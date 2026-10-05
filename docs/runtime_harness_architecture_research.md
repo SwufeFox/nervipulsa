@@ -238,6 +238,16 @@ The CLI transcript itself contained the literal marker in baseline runs; in trea
 
 **Open questions.** Add a single real Host-to-actor integration scenario where dual handler delivery is rejected and the Host-generated terminal is captured by the mock provider; verify both the computed missing ID and provider payload. Separately test model behavior with a scripted/controlled responder that must acknowledge the missing ID, while treating behavioral success as a distinct criterion from payload inclusion.
 
+
+
+## 首个 worker 自定义库：`nervipulsa.hashline_edit`
+
+持久 worker 暴露全局 `read_file(path)` 与 `edit_file(path, snapshot, put)`，也支持从 `nervipulsa.hashline_edit` 导入。读取产生 whole-file 4 位小写十六进制 xxHash32 snapshot tag，并以 `N:text` 格式渲染行。写入采用 OMP PUT 整文件替换语法：`PUT <4-hex-tag>\n<complete replacement text>`；调用者传入本次读取的 snapshot 和完整 PUT 字符串。标签与当前文件不符时拒绝写入，路径需位于 worker workspace 中，写入使用同目录临时文件和原子替换。
+
+上游 OMP 项目在其 `Cargo.toml` 中声明 MIT 许可；算法来源和许可可以据此引用。本仓库的实现是独立 Python 实现，没有复制 Rust 源码。实现范围限于 UTF-8 文本；该文件编辑 API 不构成 Python 沙箱。
+
+
+
 ## 2026-10-05：静态环境发现安全加固
 
 独立代码审查发现上一版 `python_environment` 会对模型提供的模块调用 `find_spec` 与 `import_module`。这意味着只读发现可触发目标模块及其父包顶层代码；此前关于只读安全性的表述不成立。保留本文件既有运行记录及历史 CLI 实验数据，但将其限定为旧实现上的行为观察，不能证明发现过程安全。
@@ -331,3 +341,51 @@ provider profile 默认值、持久化与切换、Magpie 请求字段测试及 R
 
 本轮实际复验 Magpie：`GET /v1/models` 使用 Bearer `magpie` 返回 HTTP 200，目录有 14 个模型且包含 `codex/gpt-6-luna`；之后以隔离的临时配置目录和 workspace 启动 Nervipulsa 的 `magpie` profile，传入该模型和短文本请求，CLI 展示预期 provider/model 并返回 `MAGPIE COMPATIBLE.`，退出码 0、stderr 为空。临时配置和 workspace 已清理。该结果证明本机此模型/gateway 的 Chat Completions profile 可用，不证明其他 profile 的真实服务可用或 Magpie 上所有模型均兼容；本轮也没有测试 Python tool-call 往返。
 
+
+## 2026-10-05 — OMP Hashline Edit as first custom Python library
+
+### Upstream facts and migration boundary
+
+The first custom library is exposed inside the persistent worker as
+`nervipulsa.hashline_edit`; the model imports it with
+`from nervipulsa import hashline_edit`. This is a project-owned Python module and
+uses only the standard library. Its design follows the public
+[OMP edit-tool contract](https://github.com/can1357/oh-my-pi/blob/main/docs/tools/edit.md),
+[Hashline format helpers](https://github.com/can1357/oh-my-pi/blob/main/crates/pi-edit/src/modes/hashline/format.rs),
+[snapshot store](https://github.com/can1357/oh-my-pi/blob/main/crates/pi-edit/src/store.rs),
+and [text normalization helpers](https://github.com/can1357/oh-my-pi/blob/main/crates/pi-edit/src/text.rs).
+The upstream workspace declares MIT in its
+[Cargo manifest](https://github.com/can1357/oh-my-pi/blob/main/Cargo.toml); this Python
+implementation was written independently from the documented behavior, not copied
+from its Rust source.
+
+OMP's section header is `[path#TAG]`; TAG is the four-character uppercase hex form
+of `xxHash32(seed=0) & 0xffff`. Before hashing, BOM is removed, CRLF and lone CR
+are normalized to LF, and trailing ASCII space, tab, and CR are ignored per line.
+The view uses `N:text` rows. Implemented PUT forms are `PUT N.=M:` for closed-range
+replacement, `PUT <N:` before a line, `PUT >N:` after a line, and `PUT >$:` at EOF.
+Every hunk in one patch addresses the same snapshot, and replacement body rows start
+with `+`.
+
+### Nervipulsa implementation and limits
+
+`view_file(path)` records a bounded worker-epoch snapshot and returns the OMP-style
+header and numbered rows. `edit(patch)` accepts one file section, validates the
+four-digit tag and current normalized content against the newest cached matching
+snapshot, rejects unknown/stale tags and overlapping or duplicate hunks, then writes via a
+temporary file and atomic replacement. Paths are workspace-relative and resolved
+before use; symlink/junction targets outside the worker workspace are rejected.
+UTF-8 BOM and the detected LF/CRLF style are preserved. File and in-memory snapshot
+limits are enforced. The 16-bit tag can collide; lookup follows the newest matching
+retained snapshot and then compares its full text to the current file before writing.
+
+This is intentionally a PUT-only subset: no Tree-sitter block locators, CUT, REM,
+MV, clipboard registers, historical stale-tag recovery, or seen-line enforcement.
+The four-hex tag is a locator, not a cryptographic identity; the implementation
+also compares the full cached text before writing. The helper constrains only its
+own API calls and is not a sandbox for arbitrary `python_exec` code. A concurrent
+filesystem writer can still race the final compare-and-replace window.
+
+No tests or live worker request were run in this slice. The algorithm and parser
+have therefore not yet been checked against upstream compatibility vectors or a
+real-model edit; those are the next verification steps.

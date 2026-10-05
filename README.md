@@ -1,5 +1,7 @@
 # Nervipulsa v0.4-dev
 
+
+
 Nervipulsa is a local, event-driven coding-agent runtime. User messages, model
 actions, and Python results travel as events. Model inference never waits for
 Python execution, so the CLI can accept another message while code is running.
@@ -218,6 +220,38 @@ back.
 The SQLite journal is an asynchronous observer. Event acceptance does not mean
 the journal has been flushed to disk. A visible incomplete-journal marker is
 shown if its bounded observation queue fills or writing fails.
+
+## Hashline Edit for workspace files
+
+The persistent Python worker includes `nervipulsa.hashline_edit`, the first project
+specific Python library. It follows the snapshot tag and `PUT` syntax used by
+[OMP Hashline Edit](https://github.com/can1357/oh-my-pi/blob/main/docs/tools/edit.md).
+The independent Python implementation references OMP's
+[format helpers](https://github.com/can1357/oh-my-pi/blob/main/crates/pi-edit/src/modes/hashline/format.rs),
+[snapshot hashing](https://github.com/can1357/oh-my-pi/blob/main/crates/pi-edit/src/store.rs),
+and [MIT license declaration](https://github.com/can1357/oh-my-pi/blob/main/Cargo.toml).
+
+```python
+from nervipulsa import hashline_edit
+
+print(hashline_edit.view_file("src/example.py"))
+# [src/example.py#1A2B]
+# 1:first line
+# 2:second line
+
+print(hashline_edit.edit("""[src/example.py#1A2B]
+PUT 2.=2:
++updated line"""))
+```
+
+Tags are four uppercase hex digits from the low 16 bits of xxHash32 over the
+normalized whole-file snapshot. Every edit uses the latest view tag and original
+line numbers. Supported operations are range replacement (`PUT N.=M:`), insertion
+before/after a line (`PUT <N:` / `PUT >N:`), and end insertion (`PUT >$:`). Each
+replacement row starts with `+`. Files are limited to 4 MiB; snapshots are bounded
+and stale content is rejected. The implementation is independently written in
+Python and supports only this PUT subset: no syntax-tree block edits, CUT, MV, REM,
+stale-tag recovery, or seen-line enforcement. This helper is not a Python sandbox.
 
 ## Development status
 

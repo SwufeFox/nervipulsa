@@ -21,6 +21,7 @@ from pathlib import Path
 
 from nervipulsa.events import MAX_HANDLER_RESULTS_PER_EXECUTION
 from nervipulsa.framing import read_frame, write_frame
+from nervipulsa import hashline_edit
 
 PREVIEW_BYTES = 4 * 1024
 EXCEPTION_PREVIEW_CHARS = 512
@@ -178,6 +179,7 @@ def _control_socket() -> socket.socket:
 def run_worker(workspace: Path, epoch: int, output_dir: Path) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    hashline_edit._configure_workspace(workspace)
     sock = _control_socket()
     socket_write_lock = threading.Lock()
 

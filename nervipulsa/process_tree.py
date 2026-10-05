@@ -93,6 +93,7 @@ class ManagedProcess:
         self.control = control
         self.job = job
         self._lock = threading.Lock()
+        self._termination_result: bool | None = None
 
     @property
     def pid(self) -> int:
@@ -103,21 +104,30 @@ class ManagedProcess:
 
     def terminate_tree(self) -> bool:
         with self._lock:
-            return self._terminate_tree()
+            if self._termination_result is None:
+                self._termination_result = self._terminate_tree()
+            return self._termination_result
 
     def _terminate_tree(self) -> bool:
+        tree_stopped = True
         if os.name == "nt":
             if self.job is not None:
-                _terminate_job(self.job)
+                try:
+                    tree_stopped = _terminate_job(self.job)
+                except OSError:
+                    tree_stopped = False
                 self.job = None
+                if not tree_stopped:
+                    tree_stopped = _taskkill(self.pid)
             else:
-                _taskkill(self.pid)
+                tree_stopped = _taskkill(self.pid)
         else:
             try:
                 os.killpg(self.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             except OSError:
+                tree_stopped = False
                 try:
                     self.proc.kill()
                 except OSError:
@@ -131,14 +141,15 @@ class ManagedProcess:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             if os.name == "nt":
-                _taskkill(self.pid)
+                if not _taskkill(self.pid):
+                    tree_stopped = False
                 try:
                     self.proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     return False
             else:
                 return False
-        return self.poll() is not None
+        return tree_stopped and self.poll() is not None
 
 
 def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProcess:
@@ -267,7 +278,7 @@ def _create_kill_on_close_job() -> tuple[Any, Any]:
     return kernel32, job
 
 
-def _terminate_job(job: Any) -> None:
+def _terminate_job(job: Any) -> bool:
     import ctypes
     from ctypes import wintypes
 
@@ -276,18 +287,22 @@ def _terminate_job(job: Any) -> None:
     kernel32.TerminateJobObject.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
-    kernel32.TerminateJobObject(job, 1)
-    kernel32.CloseHandle(job)
-
-
-def _taskkill(pid: int) -> None:
     try:
-        subprocess.run(
+        return bool(kernel32.TerminateJobObject(job, 1))
+    finally:
+        kernel32.CloseHandle(job)
+
+
+def _taskkill(pid: int) -> bool:
+    try:
+        completed = subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
             capture_output=True,
             check=False,
+            timeout=5,
         )
-    except FileNotFoundError:
+    except (OSError, subprocess.TimeoutExpired):
         # Minimal Windows images may omit taskkill.exe. The caller still kills
         # and waits for the worker itself; descendant cleanup is unavailable.
-        pass
+        return False
+    return completed.returncode == 0

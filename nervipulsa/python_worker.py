@@ -206,7 +206,12 @@ def run_worker(workspace: Path, epoch: int, output_dir: Path) -> None:
             return False
         return handlers.pop(handler_id, None) is not None
 
-    namespace: dict[str, object] = {"__name__": "__main__", "on_finished": on_finished, "off_finished": off_finished}
+    namespace: dict[str, object] = {
+        "__name__": "__main__",
+        "on_finished": on_finished,
+        "off_finished": off_finished,
+        "hashline_edit": hashline_edit,
+    }
     send_frame({"kind": "ready", "worker_epoch": epoch})
     while True:
         message = read_frame(sock)

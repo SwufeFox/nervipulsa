@@ -9,6 +9,8 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
+import pytest
+
 from nervipulsa.events import MAX_HANDLER_RESULTS_PER_EXECUTION, Bus, Event, Lane, Mailbox
 from nervipulsa.python_host import PythonHost
 
@@ -336,6 +338,72 @@ def test_finished_handler_bridge(workspace: Path) -> None:
             assert fired.payload["trigger"]["request_id"] == trigger.event_id
             assert fired.payload["result"] == "observed:succeeded"
             assert rig.host.late_frames == 0
+        finally:
+            await rig.close()
+
+    asyncio.run(body())
+
+
+
+@pytest.mark.parametrize("use_timeout", [False, True])
+def test_cleanup_failure_is_visible_in_terminal_and_runtime_facts(
+    workspace: Path, monkeypatch, use_timeout: bool
+) -> None:
+    async def body() -> None:
+        rig = HostRig(workspace)
+        try:
+            request = rig.request(
+                "while True:\n    pass", timeout=1 if use_timeout else 30
+            )
+            await _wait(rig.ui, "python.started", reply_to=request.event_id)
+            managed = rig.host._managed
+            assert managed is not None
+            terminate_tree = managed.terminate_tree
+
+            def terminate_but_report_failure() -> bool:
+                terminate_tree()
+                return False
+
+            monkeypatch.setattr(managed, "terminate_tree", terminate_but_report_failure)
+            if not use_timeout:
+                rig.cancel(request.event_id, reason="test-cleanup-report")
+            finished = await _wait(rig.llm, "python.finished", reply_to=request.event_id)
+
+            expected_status = "timeout" if use_timeout else "cancelled"
+            assert finished.payload["status"] == expected_status
+            assert finished.payload["process_tree_cleanup_failed"] is True
+            assert rig.host.runtime_facts()["cleanup_failed"] is True
+        finally:
+            await rig.close()
+
+    asyncio.run(body())
+
+
+def test_worker_hashline_import_view_and_put_edit(workspace: Path) -> None:
+    async def body() -> None:
+        target = workspace / "sample.py"
+        target.write_text("before\nafter\n", encoding="utf-8")
+        rig = HostRig(workspace)
+        try:
+            request = rig.request(
+                "view = hashline_edit.view_file('sample.py')\n"
+                "print(view)\n"
+                "header = view.splitlines()[0]\n"
+                "result = hashline_edit.edit(f'{header}\\nPUT 1.=1:\\n+changed')\n"
+                "print(result)"
+            )
+            finished = await _wait(rig.llm, "python.finished", reply_to=request.event_id)
+            assert finished.payload["status"] == "succeeded", finished.payload["stderr"]
+            assert "[sample.py#" in finished.payload["stdout"]
+            assert "1:changed" in finished.payload["stdout"]
+            assert target.read_text(encoding="utf-8") == "changed\nafter\n"
+
+            explicit_import = rig.request(
+                "from nervipulsa import hashline_edit\n"
+                "assert hashline_edit.view_file('sample.py')"
+            )
+            imported = await _wait(rig.llm, "python.finished", reply_to=explicit_import.event_id)
+            assert imported.payload["status"] == "succeeded", imported.payload["stderr"]
         finally:
             await rig.close()
 

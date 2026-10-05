@@ -43,6 +43,7 @@ class Execution:
     cancel_reason: str = ""
     timed_out: bool = False
     started_monotonic: float | None = None
+    cleanup_failed: bool = False
 
 
 @dataclass
@@ -64,6 +65,7 @@ class ExecResult:
     handler_fired: list[dict[str, Any]] | None = None
     handler_ids: list[str] | None = None
     missing_handler_ids: list[str] | None = None
+    cleanup_failed: bool = False
 
 
 class PythonHost:
@@ -144,6 +146,7 @@ class PythonHost:
         unfinished = ([current] if current else []) + [item for item in queued if item != current]
         return {
             "worker_epoch": self._epoch,
+            "cleanup_failed": self.cleanup_failed,
             "namespace": "not_started" if self._epoch == 0 else "current_epoch_only",
             "current_execution_id": current,
             "queued_execution_ids": queued,
@@ -187,7 +190,7 @@ class PythonHost:
         if current is not None and current.event_id not in self._done:
             current.cancel = True
             current.cancel_reason = "shutdown"
-            await asyncio.to_thread(self._kill_current)
+            await asyncio.to_thread(self._kill_current, current)
         if self._scheduler_task is not None:
             try:
                 await asyncio.wait_for(self._scheduler_task, timeout=8)
@@ -269,7 +272,7 @@ class PythonHost:
             self._emit_cancel_result(event, "requested", execution_id)
             record.cancel = True
             record.cancel_reason = reason
-            await asyncio.to_thread(self._kill_current)
+            await asyncio.to_thread(self._kill_current, record)
 
     async def _scheduler(self) -> None:
         try:
@@ -558,16 +561,20 @@ class PythonHost:
             except (asyncio.TimeoutError, TimeoutError):
                 pass
 
-    def _kill_current(self) -> None:
+    def _kill_current(self, record: Execution | None = None) -> bool:
         managed = self._managed
         if managed is None:
-            return
-        if not managed.terminate_tree():
+            return True
+        cleanup_ok = managed.terminate_tree()
+        if not cleanup_ok:
             self.cleanup_failed = True
+            if record is not None:
+                record.cleanup_failed = True
         try:
             managed.control.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
+        return cleanup_ok
 
     def _execute_blocking(self, record: Execution) -> ExecResult:
         epoch = self._epoch
@@ -603,14 +610,18 @@ class PythonHost:
         deadline = send_at + 10
         while True:
             if record.cancel:
-                self._kill_current()
+                self._kill_current(record)
                 return self._cancelled_result(
-                    record, start if started else send_at, epoch, handler_snapshot_ids
+                    record,
+                    start if started else send_at,
+                    epoch,
+                    handler_snapshot_ids,
+                    cleanup_failed=record.cleanup_failed,
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if not started:
-                    self._kill_current()
+                    self._kill_current(record)
                     return ExecResult(
                         "failed",
                         "",
@@ -619,10 +630,17 @@ class PythonHost:
                         True,
                         "worker_exit",
                         epoch,
+                        cleanup_failed=record.cleanup_failed,
                     )
                 record.timed_out = True
-                self._kill_current()
-                return self._timeout_result(record, start, epoch, handler_snapshot_ids)
+                self._kill_current(record)
+                return self._timeout_result(
+                    record,
+                    start,
+                    epoch,
+                    handler_snapshot_ids,
+                    cleanup_failed=record.cleanup_failed,
+                )
             try:
                 item = self._frame_q.get(timeout=min(0.5, max(0.05, remaining)))
             except queue.Empty:
@@ -633,10 +651,20 @@ class PythonHost:
                     continue
                 if record.cancel:
                     return self._cancelled_result(
-                        record, start if started else send_at, epoch, handler_snapshot_ids
+                        record,
+                        start if started else send_at,
+                        epoch,
+                        handler_snapshot_ids,
+                        cleanup_failed=record.cleanup_failed,
                     )
                 if record.timed_out:
-                    return self._timeout_result(record, start, epoch, handler_snapshot_ids)
+                    return self._timeout_result(
+                        record,
+                        start,
+                        epoch,
+                        handler_snapshot_ids,
+                        cleanup_failed=record.cleanup_failed,
+                    )
                 return ExecResult(
                     "failed",
                     "",
@@ -787,6 +815,8 @@ class PythonHost:
         start: float,
         epoch: int,
         handler_ids: list[str] | None = None,
+        *,
+        cleanup_failed: bool = False,
     ) -> ExecResult:
         reason = record.cancel_reason or "cancel"
         return ExecResult(
@@ -800,6 +830,7 @@ class PythonHost:
             expected_handler_count=(len(handler_ids) if handler_ids is not None else 0),
             handler_ids=handler_ids,
             missing_handler_ids=(list(handler_ids) if handler_ids is not None else None),
+            cleanup_failed=cleanup_failed,
         )
 
     def _timeout_result(
@@ -808,6 +839,8 @@ class PythonHost:
         start: float,
         epoch: int,
         handler_ids: list[str] | None = None,
+        *,
+        cleanup_failed: bool = False,
     ) -> ExecResult:
         return ExecResult(
             "timeout",
@@ -820,6 +853,7 @@ class PythonHost:
             expected_handler_count=(len(handler_ids) if handler_ids is not None else 0),
             handler_ids=handler_ids,
             missing_handler_ids=(list(handler_ids) if handler_ids is not None else None),
+            cleanup_failed=cleanup_failed,
         )
 
     @staticmethod
@@ -908,6 +942,8 @@ class PythonHost:
             ),
             "truncated": truncated,
         }
+        if result.cleanup_failed:
+            payload["process_tree_cleanup_failed"] = True
         if result.reason:
             payload["reason"] = result.reason
         if result.missing_handler_ids is not None:

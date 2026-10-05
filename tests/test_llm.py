@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -551,6 +552,67 @@ def test_python_environment_runtime_error_becomes_failed_event(workspace: Path, 
             assert event_payloads[0]["status"] == "failed"
             assert event_payloads[0]["error"] == "environment discovery failed (RuntimeError)"
         finally:
+            await runtime.shutdown()
+
+    asyncio.run(body())
+
+
+def test_python_environment_scan_does_not_block_actor_loop(workspace: Path, monkeypatch) -> None:
+    import nervipulsa.llm as llm_module
+
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    loop_progressed = asyncio.Event()
+
+    def blocked_scan(*_args, **_kwargs):
+        scan_started.set()
+        if not release_scan.wait(timeout=5):
+            raise RuntimeError("test scan release timed out")
+        return {
+            "read_only": True,
+            "python": "3.13",
+            "workspace": ".",
+            "project_files": [],
+            "modules": [],
+            "install_supported": False,
+        }
+
+    monkeypatch.setattr(llm_module, "discover_python_environment", blocked_scan)
+    backend = ScriptedBackend(
+        lambda _request: ModelResponse(
+            tool_calls=[ToolCall(id="env-blocked", name="python_environment", arguments={})]
+        ) if backend.calls == 1 else text_response("scan completed")
+    )
+    runtime = _runtime(workspace, backend)
+
+    async def body() -> None:
+        async def prove_loop_progress() -> None:
+            await asyncio.sleep(0.02)
+            loop_progressed.set()
+
+        try:
+            await runtime.start()
+            runtime.submit_text("Inspect the environment")
+            assert await asyncio.to_thread(scan_started.wait, 5)
+            progress_task = asyncio.create_task(prove_loop_progress())
+            await asyncio.wait_for(loop_progressed.wait(), timeout=1)
+            assert not release_scan.is_set()
+            delivery = runtime.submit_text("follow-up during environment scan")
+            assert delivery.accepted
+            release_scan.set()
+            assert await runtime.wait_until_idle(8)
+            assert any(event.type == "python.environment_discovered" for event in runtime.trace)
+            assert backend.calls == 2
+            second_request = backend.requests[1]
+            assert "follow-up during environment scan" in _user_texts(second_request)
+            assert any(
+                '"type":"python.environment_discovered"' in str(message.get("content"))
+                for message in second_request.messages
+                if message.get("role") == "user"
+            )
+            await progress_task
+        finally:
+            release_scan.set()
             await runtime.shutdown()
 
     asyncio.run(body())

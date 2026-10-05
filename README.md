@@ -25,32 +25,55 @@ Configuration is saved under the platform user configuration directory,
 outside the workspace. The key is hidden while entering and is never written to
 the event journal or passed to the Python worker.
 
-The supported `provider` value is `openai`, which selects the OpenAI Chat
-Completions protocol. This also supports OpenAI-compatible services: set `base_url`
-to the service's `/v1` root, set `model` to its model identifier, and provide the
-API key it expects. Nervipulsa sends the configured model name unchanged; model
-names are not compiled into the code. Other provider protocols such as native
-Anthropic or Gemini are not currently supported. The API key is required before
-sending a request and is sent as a Bearer token.
+The default provider profile is `magpie`, for the official local Magpie gateway:
+`http://127.0.0.1:3425/v1` using the gateway token `magpie`. Start Magpie first
+and add/sign in to at least one upstream provider there. Magpie does not define a
+universal model name, so choose one shown by its model catalog with `/config set
+model`; the model is sent unchanged. The first model request cannot succeed until
+a model is selected and Magpie is running.
 
-Provider and Base URL changes take effect for the next model request without
-restarting. Changing either clears the saved API key unless a replacement key
-is supplied in the same update; configure the destination key or its
-provider-specific environment variable before making a live request.
-
-Switching providers without an explicit replacement Base URL resets a custom
-endpoint to the provider's native route. Supply a new Base URL in the same
-configuration update to keep using a compatible gateway.
+`provider` selects the OpenAI Chat Completions protocol adapter. This also supports
+OpenAI-compatible services: set `base_url` to the service's `/v1` root, `model` to
+its model identifier, and provide the API key it expects. Other provider protocols
+such as native Anthropic or Gemini are not currently supported. API keys are sent
+as Bearer tokens. For Magpie, `/config profiles` lists saved profiles and `/config
+use <name>` switches profiles; `/config show` displays the active profile and
+redacts credentials. `/config set <provider|base-url|model|api-key>` updates the
+active profile, and changes apply to the next model request.
 
 Configuration precedence is command line, NERVIPULSA_* environment variables,
-user configuration, then defaults. --dir fixes the workspace for the whole
-session. The API key can also be supplied as NERVIPULSA_API_KEY.
+user configuration, then defaults. `--dir` fixes the workspace for the whole
+session. The API key can also be supplied as NERVIPULSA_API_KEY. Provider profiles
+are saved separately in the user configuration file, so switching profiles
+restores each profile's adapter, endpoint, model, and key.
+
+Switching providers without an explicit replacement Base URL selects that
+provider's saved endpoint or known default. The OpenAI default is
+`https://api.openai.com/v1`; Magpie uses the local gateway endpoint above. Supply a
+new Base URL in the same configuration update to keep using a compatible gateway.
 
 The interactive prompt supports in-session history (Up/Down), completion with
 Tab (including /config subcommands and fields), Enter to submit, Ctrl+J for
 multiline input, and safe async output while you are typing.
 
-## Commands
+## Provider presets
+
+Built-in profiles are available for `magpie`, `openai`, `deepseek`, `openrouter`, `ollama`, and `lmstudio`:
+
+| Profile | Base URL | Credential behavior |
+| --- | --- | --- |
+| `magpie` | `http://127.0.0.1:3425/v1` | Uses the local gateway token `magpie` by default |
+| `openai` | `https://api.openai.com/v1` | Requires a key; falls back to `OPENAI_API_KEY` |
+| `deepseek` | `https://api.deepseek.com` | Requires a key; falls back to `DEEPSEEK_API_KEY` |
+| `openrouter` | `https://openrouter.ai/api/v1` | Requires a key; falls back to `OPENROUTER_API_KEY` |
+| `ollama` | `http://localhost:11434/v1` | Local endpoint; key is optional |
+| `lmstudio` | `http://localhost:1234/v1` | Local endpoint; key is optional |
+
+Each profile uses the OpenAI Chat Completions protocol. Magpie sends `model`, `messages`, `tools`, and `tool_choice: "auto"` to `/chat/completions`; choose a model from Magpie's model catalog and Nervipulsa passes its `provider/model` ID unchanged. You can also create a named custom profile by setting its provider name and a custom Base URL. Native Anthropic Messages, OpenAI Responses, and Gemini transports are not implemented in Nervipulsa; Magpie can translate its upstream providers through this Chat Completions endpoint. Cloud presets require credentials, while local/custom compatible endpoints may omit them if their server allows unauthenticated requests.
+
+Changing provider with `NERVIPULSA_PROVIDER` or `--provider` selects the matching
+profile and its endpoint. A base URL, model, or key specified at the same override
+level takes precedence. Provider settings are stored under the active profile.
 
 - /config opens full setup; /config show lists active settings with the API
   key redacted.

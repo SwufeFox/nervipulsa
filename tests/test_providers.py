@@ -189,26 +189,42 @@ def test_openai_auth_rejections_are_known_not_sent_errors() -> None:
     assert len(requests) == 1
 
 
-def test_missing_openai_key_fails_before_sending(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with _provider_server(200, {}) as (base_url, requests):
+
+
+def test_magpie_sends_chat_completions_request_fields_and_gateway_token() -> None:
+    response = {"model": "m", "choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    request = _request()
+    with _provider_server(200, response) as (base_url, requests):
         backend = OpenAICompatibleBackend(
-            provider="openai",
-            base_url=base_url,
-            api_key="",
-            model="deepseek-flash",
+            provider="magpie", base_url=base_url, api_key="magpie", model="m"
         )
-        with pytest.raises(ProviderError) as raised:
-            asyncio.run(backend.complete(_request()))
+        result = asyncio.run(backend.complete(request))
 
-    assert raised.value.kind == "request_not_sent"
-    assert not requests
+    path, body = requests[0]
+    assert path == "/v1/chat/completions"
+    assert body == {
+        "model": "m",
+        "messages": request.messages,
+        "tools": request.tools,
+        "tool_choice": "auto",
+    }
+    assert result.content == "ok"
 
 
-def test_unsupported_provider_fails_before_sending() -> None:
+def test_openai_compatible_endpoint_allows_missing_api_key() -> None:
+    response = {"model": "m", "choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    with _provider_server(200, response) as (base_url, requests):
+        backend = OpenAICompatibleBackend(
+            provider="custom", base_url=base_url, api_key="", model="m"
+        )
+        asyncio.run(backend.complete(_request()))
+    assert len(requests) == 1
+
+
+
     backend = OpenAICompatibleBackend(
-        provider="anthropic", base_url="https://example.test/v1",
+        provider="magpie", adapter="anthropic-messages", base_url="https://example.test/v1",
         api_key="local-test-key", model="provider/model-name",
     )
-    with pytest.raises(ProviderError, match="unsupported provider"):
+    with pytest.raises(ProviderError, match="unsupported protocol adapter"):
         asyncio.run(backend.complete(_request()))

@@ -286,3 +286,48 @@ The CLI transcript itself contained the literal marker in baseline runs; in trea
 
 证据采集脚本在读取 journal 后因 SQLite 连接未显式 close，Windows 临时目录自动清理遇到 `WinError 32`；CLI 本身已正常退出且 journal 数据已读取，之后关闭进程句柄并手动清除该临时目录。该清理错误不影响本轮 CLI 结果。
 
+## 2026-10-05 — 异步 Agent 文献与环境扫描非阻塞化
+
+### 文献审查
+
+核读并对照四项研究：
+
+- Kim et al., [LLMCompiler（ICML 2024）](https://arxiv.org/abs/2312.04511)：将单任务内工具调用构造成依赖 DAG，允许独立函数并行；摘要报告最高 3.7× latency speedup、6.7× cost savings 和约 9% accuracy improvement。其关键条件是 planner 能识别依赖；它没有验证 Nervipulsa 的邮箱容量、用户持续输入或 worker 生命周期。
+- [PASTE v3](https://arxiv.org/abs/2603.18897v3)：按历史模式预测后续工具并进行隔离推测执行。当前 v3 摘要报告 task completion time 降低 43.5%、observed tool latency 降低 1.8×；早期 v1 摘要报告的 48.5% 与吞吐指标不同，故本文固定引用版本，不混用数字。对 Nervipulsa 而言，猜测参数和有副作用的 Python 工具都需要额外一致性/回滚协议，当前没有采用 speculation。
+- [AsyncTool v3](https://arxiv.org/abs/2605.27995v3)：在 12 个工具、358 条经验证单任务轨迹基础上构造 712 个双/三任务样本，评估 19 个模型，并用模拟工具延迟测量 task switching、dependency tracking 和 state maintenance；GPT-4.1 总分最高为 38.06。它适合启发未来延迟/交错 benchmark；轨迹合成与模拟时延的结果不能证明真实 event loop、Mailbox 或 Python worker 的正确性。
+- [LLMs are General Asynchronous Agents v1](https://arxiv.org/abs/2609.35427v1)：使用 asyncio 风格 inference coroutine、共享 KV/cache blocks 与 attention views 进行并行模型推理，展示视频、游戏与监控场景；作者明确指出模型异步操作尚不可靠。该机制位于模型推理层，不等同于事件日志、handler 语义或跨进程恢复。
+
+综合判断：这些工作分别研究计划内并行、工具 speculation、多任务延迟评测和模型 coroutine 并行；没有一项直接证明事件序号、背压、取消/迟到结果或 handler exactly-once 语义。公开摘要中的加速数字依赖不同 workload、模型和系统，不外推为 Nervipulsa 的性能收益。
+
+### 实现与证据
+
+源码审计发现 `python_environment` 在 `_deliver_one` 同步扫描路径、metadata 与 AST，会阻塞 LLMActor 所在线程。现在 `_complete_and_commit`、`_deliver_tools`、`_deliver_one` 沿调用链异步化，并通过 `asyncio.to_thread` 执行扫描；原有 `python.environment_discovered`、`activation_id`、`tool_call_id`、`reply_to` 和失败回执保持不变。
+
+新增 `test_python_environment_scan_does_not_block_actor_loop`：使用 threading events 阻塞扫描；等待期间验证 loop callback 能运行、后续 `user.message` 投递被接受；释放后检查环境发现事件与该消息共同进入下一 provider 请求。定向测试 `python -m pytest tests/test_llm.py::test_python_environment_scan_does_not_block_actor_loop -q` 为 **1 passed in 1.45s**。之后完整 `python -m pytest` 为 **77 passed, 1 skipped in 47.32s**；skip 仍因当前 runner 的 `'chcp' is not recognized`，junction containment 未实机验证。
+
+### 边界与后续
+
+Actor 仍 await 当前发现扫描，所以后续消息在扫描期间可进入事件流，但不会在当前 activation 完成前启动下一轮推理。这项改动证明 event loop responsiveness，不证明并行 agent activation、用户可见延迟改善或负载下吞吐收益；本轮未做新的 live model run 或性能基准。
+
+下一步优先：1）对 handler 全局槽位上限做真实并发 admission/消费压力测试；2）组合 cancel、timeout、restart、shutdown 与迟到 frame；3）建立带真实延迟工具的两条独立任务链基线，报告完成时间、事件顺序、依赖违规和清理情况；4）评估 junction containment runner。
+
+## 2026-10-05 — Provider profiles 与 Magpie 兼容
+
+### 外部实现对照
+
+- [OpenCode providers](https://opencode.ai/docs/providers/) 将 provider ID、每 provider 的 options/baseURL、凭据与 model catalog 分开；自定义端点通过 OpenAI-compatible adapter 接入，不要求每个 vendor 都有独立的请求循环。
+- [Goose providers](https://block.github.io/goose/docs/getting-started/providers/) 同时维护原生协议 provider 和大量 OpenAI-compatible endpoints；它把 provider-specific authentication/environment variables 留在各自配置边界，并特别提供多个自定义 OpenAI-compatible provider 的配置路径。
+- [Magpie](https://github.com/yetone/magpie) 将不同上游汇聚到 gateway，并在 gateway 做 Chat Completions、Responses、Anthropic Messages、Gemini 之间的转换。对 Nervipulsa，正确的最小接入点是 Magpie 的 OpenAI-compatible Chat Completions：base URL `http://127.0.0.1:3425/v1`，route `/chat/completions`，模型名按 `provider/model` 原样传递；loopback 示例 token 为 `magpie`。共享给 LAN 时必须改用 Magpie gateway key。
+
+### Nervipulsa 采用的边界
+
+配置现在保存多个命名 profile（provider/adapter/base URL/model/API key），可用 `/config profiles` 查看、`/config use <name>` 切换；旧版单 provider 字段仍可加载。协议适配器与 profile 名称分离，内置 profile 覆盖 OpenAI、DeepSeek、OpenRouter、Ollama、LM Studio 和 Magpie，另可配置自定义 OpenAI-compatible URL。模型 ID 不做前缀改写。凭据只存在用户配置，公开展示仍遮蔽。
+
+当前实现依旧只实现 OpenAI Chat Completions 请求/响应与工具调用格式。它不代表 Nervipulsa 原生支持 Anthropic Messages、Gemini 或 OpenAI Responses；Magpie 承担其上游转换。该决定沿用小型 agent 的自定义兼容端点模式，避免为 Magpie 已解决的协议转换重复维护多套 transcript 编码。
+
+### 证据边界
+
+provider profile 默认值、持久化与切换、Magpie 请求字段测试及 README 操作说明已完成。实现代理报告完整自动测试 **82 passed, 1 skipped**；之后我补入了 DeepSeek/OpenRouter/Ollama/LM Studio preset 默认值与 provider-specific API key preflight，没有重新跑 pytest，因此 82/1 不覆盖这最后的静态配置/auth 修改。最终 `git diff --check` 通过。
+
+本轮实际复验 Magpie：`GET /v1/models` 使用 Bearer `magpie` 返回 HTTP 200，目录有 14 个模型且包含 `codex/gpt-6-luna`；之后以隔离的临时配置目录和 workspace 启动 Nervipulsa 的 `magpie` profile，传入该模型和短文本请求，CLI 展示预期 provider/model 并返回 `MAGPIE COMPATIBLE.`，退出码 0、stderr 为空。临时配置和 workspace 已清理。该结果证明本机此模型/gateway 的 Chat Completions profile 可用，不证明其他 profile 的真实服务可用或 Magpie 上所有模型均兼容；本轮也没有测试 Python tool-call 往返。
+

@@ -16,18 +16,19 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
-from .config import Settings, config_path, load_settings, save_settings
+from .config import PROVIDER_DEFAULTS, Settings, config_path, load_settings, save_settings
 from .providers import OpenAICompatibleBackend
 from .runtime import Runtime
 
 
+_CONFIG_USAGE = "/config [show | set <provider|base-url|model|api-key> | profiles | use <name>]"
 _CONFIG_FIELDS = {
     "provider": ("provider", "Provider"),
     "base-url": ("base_url", "Base URL"),
     "model": ("model", "Model"),
     "api-key": ("api_key", "API key"),
 }
-_CONFIG_USAGE = "/config [show | set <provider|base-url|model|api-key>]"
+
 _TOP_LEVEL_COMMANDS = (
     "/help",
     "/config",
@@ -67,7 +68,7 @@ class _CommandCompleter(Completer):
         if separator and subcommand == "set" and " " not in prefix:
             candidates = _CONFIG_FIELDS
         elif not separator:
-            candidates = ("show", "set")
+            candidates = ("show", "set", "profiles", "use")
             prefix = subcommand
         else:
             return
@@ -324,6 +325,8 @@ def _show_status(runtime: Runtime) -> None:
 def _show_config(runtime: Runtime) -> None:
     settings = runtime.settings
     runtime.echo("Active settings (saved changes apply to new model requests immediately):")
+    runtime.echo(f"profile: {settings.active_profile}")
+    runtime.echo(f"adapter: {settings.adapter}")
     for field, (attribute, _) in _CONFIG_FIELDS.items():
         value = getattr(settings, attribute)
         if attribute == "api_key":
@@ -342,6 +345,15 @@ async def _prompt_config_value(settings: Settings, field: str) -> str:
 
 
 def _save_config_changes(runtime: Runtime, changes: dict[str, str]) -> None:
+    if "active_profile" not in changes and "provider" in changes:
+        provider_name = str(changes["provider"]).strip()
+        changes = {**changes, "active_profile": provider_name}
+        if provider_name != runtime.settings.provider:
+            destination = runtime.settings.profiles.get(provider_name) or PROVIDER_DEFAULTS.get(provider_name, {})
+            changes = {
+                **{key: value for key, value in destination.items() if key not in changes},
+                **changes,
+            }
     provider_changed = (
         "provider" in changes
         and str(changes["provider"]).strip() != runtime.settings.provider
@@ -366,6 +378,7 @@ def _save_config_changes(runtime: Runtime, changes: dict[str, str]) -> None:
     path = save_settings(updated)
     backend = OpenAICompatibleBackend(
         provider=updated.provider,
+        adapter=updated.adapter,
         base_url=updated.base_url,
         api_key=updated.api_key,
         model=updated.model,
@@ -413,7 +426,18 @@ async def _set_config_value(runtime: Runtime, field: str) -> None:
 
 async def _handle_config_command(runtime: Runtime, line: str) -> None:
     parts = line.split()
-    if len(parts) == 1:
+    if parts == ["/config", "profiles"]:
+        runtime.echo("Profiles: " + ", ".join(sorted(runtime.settings.profiles)))
+    elif len(parts) == 3 and parts[1] == "use":
+        name = parts[2]
+        profile = runtime.settings.profiles.get(name)
+        if profile is None:
+            runtime.echo(f"Unknown profile: {name}")
+            return
+        changes = {"provider": name, "active_profile": name}
+        changes.update({key: profile[key] for key in ("adapter", "base_url", "model", "api_key") if key in profile})
+        _save_config_changes(runtime, changes)
+    elif len(parts) == 1:
         await _edit_config_async(runtime)
     elif len(parts) == 2 and parts[1] == "show":
         _show_config(runtime)
@@ -460,6 +484,7 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
 
     backend = OpenAICompatibleBackend(
         provider=settings.provider,
+        adapter=settings.adapter,
         base_url=settings.base_url,
         api_key=settings.api_key,
         model=settings.model,

@@ -10,7 +10,7 @@ from prompt_toolkit.document import Document
 
 import nervipulsa.cli as cli
 from nervipulsa.cli import _COMMAND_COMPLETER, handle_line
-from nervipulsa.config import Settings
+from nervipulsa.config import Settings, save_settings
 from nervipulsa.events import Event
 from nervipulsa.journal import Journal
 from nervipulsa.providers import (
@@ -69,7 +69,7 @@ def test_non_tty_reads_lines_off_event_loop_and_waits_for_idle(tmp_path: Path, m
     assert idle_timeouts == [30]
 
 
-    assert _completions("/config ") == {"show", "set"}
+    assert _completions("/config ") == {"show", "set", "profiles", "use"}
     assert _completions("/config set ") == {"provider", "base-url", "model", "api-key"}
 
 
@@ -332,7 +332,39 @@ def test_provider_switch_applies_now_and_clears_previous_key(
     assert not any("cleared" in line for line in output)
 
 
-def test_base_url_switch_clears_previous_key(tmp_path: Path, monkeypatch) -> None:
+def test_profile_switch_restores_saved_provider_settings(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings()
+    settings.profiles["openai"] = {
+        "adapter": "openai-chat-completions",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-test",
+        "api_key": "openai-profile-key",
+    }
+    backend = OpenAICompatibleBackend(
+        provider=settings.provider,
+        adapter=settings.adapter,
+        base_url=settings.base_url,
+        api_key=settings.api_key,
+        model=settings.model,
+    )
+    output: list[str] = []
+    runtime = Runtime(settings, backend, tmp_path, echo=output.append)
+    config_file = tmp_path / "config.json"
+    monkeypatch.setattr(cli, "save_settings", lambda updated: save_settings(updated, config_file))
+
+    asyncio.run(cli._handle_config_command(runtime, "/config use openai"))
+    assert runtime.settings.provider == "openai"
+    assert runtime.settings.base_url == "https://api.openai.com/v1"
+    assert runtime.settings.model == "gpt-test"
+    assert runtime.settings.api_key == "openai-profile-key"
+
+    asyncio.run(cli._handle_config_command(runtime, "/config use magpie"))
+    assert runtime.settings.provider == "magpie"
+    assert runtime.settings.base_url == "http://127.0.0.1:3425/v1"
+    assert runtime.settings.api_key == "magpie"
+    assert "openai-profile-key" not in runtime.backend.api_key
+
+
     settings = Settings(
         provider="openai",
         base_url="https://api.openai.com/v1",

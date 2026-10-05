@@ -169,27 +169,36 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 class OpenAICompatibleBackend:
     """Adapter for the OpenAI Chat Completions HTTP protocol."""
 
-    def __init__(self, *, provider: str, base_url: str, api_key: str, model: str, timeout: float = 120) -> None:
+    def __init__(self, *, provider: str, base_url: str, api_key: str, model: str, timeout: float = 120, adapter: str = "openai-chat-completions") -> None:
         self.provider = provider.strip().lower() or "openai"
+        self.adapter = adapter
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        if self.provider != "openai":
-            raise ProviderError("request_not_sent", "unsupported provider; supported provider is 'openai' (OpenAI-compatible endpoints)")
+        if self.adapter != "openai-chat-completions":
+            raise ProviderError("request_not_sent", f"unsupported protocol adapter: {self.adapter}")
         model = self.model or request.model
-        if not model:
-            raise ProviderError("request_not_sent", "missing model name")
-        if not (self.api_key or os.environ.get("OPENAI_API_KEY")):
-            raise ProviderError("request_not_sent", "missing API key; use /config, NERVIPULSA_API_KEY, or OPENAI_API_KEY")
+
         body: dict[str, Any] = {"model": model, "messages": request.messages}
         if request.tools:
             body["tools"] = request.tools
             body["tool_choice"] = "auto"
         headers = {"Content-Type": "application/json"}
-        key = self.api_key or os.environ.get("OPENAI_API_KEY", "")
+        key_env = {
+            "openai": "OPENAI_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
+        }.get(self.provider)
+        key = self.api_key or (os.environ.get(key_env, "") if key_env else "")
+        required_key_providers = {"openai", "deepseek", "openrouter"}
+        if self.provider in required_key_providers and not key:
+            raise ProviderError(
+                "request_not_sent",
+                f"missing API key for {self.provider}; configure it in /config or set {key_env}",
+            )
         if key:
             headers["Authorization"] = f"Bearer {key}"
         http_request = urllib.request.Request(

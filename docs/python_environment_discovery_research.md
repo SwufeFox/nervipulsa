@@ -44,7 +44,9 @@
 - 搜索根数量上限、路径隐私与 containment；
 - 解析异常通过失败事件送达模型上下文。
 
-最新验证：核心环境发现筛选 `13 passed, 1 skipped`；全量 `python -m pytest` **76 passed, 1 skipped in 49.44s**。junction skip 的 pytest 原因是 `'chcp' is not recognized`；不计作真实 OS 链接 containment 通过。
+最新验证：核心环境发现筛选 `13 passed, 1 skipped`；全量 `python -m pytest` **77 passed, 1 skipped in 47.32s**。junction skip 的 pytest 原因是 `'chcp' is not recognized`；不计作真实 OS 链接 containment 通过。
+
+环境扫描现经 `asyncio.to_thread` 执行，不再同步占住 runtime event loop。阻塞扫描回归确认扫描未释放时 loop callback 仍能运行，第二条用户消息已被接受；释放后发现事件与消息进入后续 provider 请求。LLMActor 仍 await 当前发现调用，因此这不是并行 activation 或多任务工具调度。
 
 ## 后续问题
 

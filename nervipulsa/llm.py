@@ -1187,7 +1187,7 @@ class LLMActor:
         try:
             if activation.error_kind == "commit_interrupted" and activation.response is not None:
                 activation.status = "running"
-                self._deliver_tools(activation, activation.response)
+                await self._deliver_tools(activation, activation.response)
                 if activation.status == "running":
                     self._finish(activation, "committed")
                 return
@@ -1285,7 +1285,7 @@ class LLMActor:
                     "assistant.message",
                     {"text": response.content, "activation_id": activation.id},
                 )
-        self._deliver_tools(activation, response)
+        await self._deliver_tools(activation, response)
         if activation.status == "running":
             self._finish(activation, "committed")
 
@@ -1352,7 +1352,7 @@ class LLMActor:
         self._emit_feedback(activation, rejections or [{"tool_call_id": "", "reason": "invalid_payload"}])
         self._finish(activation, "committed")
 
-    def _deliver_tools(self, activation: Activation, response: ModelResponse) -> None:
+    async def _deliver_tools(self, activation: Activation, response: ModelResponse) -> None:
         rejections: list[dict[str, str]] = []
         for index, call in enumerate(response.tool_calls):
             state = activation.tool_calls.get(call.id)
@@ -1360,7 +1360,7 @@ class LLMActor:
                 continue
             activation.tool_calls[call.id] = "pending"
             try:
-                receipt, status = self._deliver_one(activation, call)
+                receipt, status = await self._deliver_one(activation, call)
                 self.transcript.add_tool(call.id, receipt)
                 activation.tool_calls[call.id] = status
                 execution_id = receipt.get("execution_id") if status == "accepted" else None
@@ -1386,13 +1386,14 @@ class LLMActor:
         if rejections and not activation.feedback_sent:
             self._emit_feedback(activation, rejections)
 
-    def _deliver_one(self, activation: Activation, call: ToolCall) -> tuple[dict[str, Any], str]:
+    async def _deliver_one(self, activation: Activation, call: ToolCall) -> tuple[dict[str, Any], str]:
         arguments = call.arguments or {}
         if call.name == "python_environment":
             try:
                 if not isinstance(arguments, dict) or set(arguments) - {"modules", "api_names"}:
                     raise ValueError("invalid environment discovery arguments")
-                result = discover_python_environment(
+                result = await asyncio.to_thread(
+                    discover_python_environment,
                     self.workspace,
                     arguments.get("modules", []),
                     arguments.get("api_names", []),

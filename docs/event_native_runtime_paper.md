@@ -8,7 +8,7 @@
 
 基于工具调用循环构建的 Agent harness，通常把工具执行结果视为唯一的运行时反馈。本文研究一种事件原生扩展：持久 Python worker 可注册完成回调，回调结果作为独立事件进入 agent 的观察流；事件总线、邮箱和执行生命周期负责关联、排序、容量控制与审计。研究重点不是证明回调 API 可运行，而是确定在并发、背压、超时和 worker 重启下，回调结果能否以有限资源进入模型上下文，同时保留可解释的失败语义。
 
-Nervipulsa 当前实现采用每次 Python 请求的终态预留、最多 16 个 handler 结果槽位、全局有界 handler 容量、终态报告预期与缺失结果，以及按事件序号投影观察的 coalescer。源码审查与全量自动化测试验证了这些主要账本路径；2026-10-05 全量回归为 76 passed、1 skipped。另新增只读 `python_environment` 工具，以受限路径、发行版 metadata 和 AST 线索协助模型发现自定义 Python 库；工具不导入代码，也不自动安装。当前静态版本在本地 CLI 中先发现 `widgetkit`，再显式执行 smoke test。此前的 3425 handler CLI 复验、8317 连接拒绝及首次复验失败仍保留为独立证据；单轮运行不能证明并发可靠性或成本优势。
+Nervipulsa 当前实现采用每次 Python 请求的终态预留、最多 16 个 handler 结果槽位、全局有界 handler 容量、终态报告预期与缺失结果，以及按事件序号投影观察的 coalescer。源码审查与自动化测试覆盖这些主要账本路径；静态 `python_environment` 以受限路径、发行版 metadata 和 AST 线索发现自定义库，不导入代码、不自动安装。本文新增一次 event-loop 阻塞回归：环境扫描在线程执行期间，runtime loop 仍可接受后续用户消息，扫描结果随后进入模型上下文。最新全量回归为 77 passed、1 skipped。该实现已有本地 CLI 先发现后 smoke test 的行为证据，但尚无并发负载或跨进程恢复证据。
 
 当前证据支持将其视为一个有真实端到端行为、具备初步有界投递契约的研究原型。它还不足以证明该桥接在成本、稳定性或通用性上优于普通工具调用循环。3425 handler 任务共两次 committed activation、一次 execution、9,589 provider usage tokens；静态环境发现任务则共三次 committed activation、一次 execution、14,134 tokens。两者是不同任务，不能作成本比较。高并发压力、cancel/shutdown 组合及严格配对成本比较仍需实验判定。
 
@@ -50,10 +50,11 @@ Worker epoch 用于拒绝重启前的旧 handler 帧。timeout/cancel 若发生�
 
 ## 3. 研究方法与证据边界
 
-本文综合三类证据：
+本文综合四类证据：
 
 - **源码审查：** 检查 admission、reservation rollback、lane key 校验、handler 槽位账本、终态收缩、Host frame 校验、epoch 清理和 coalescer 投影路径。
-- **自动化测试：** 使用确定性单元与 subprocess 测试检查容量、重复和错误关联、回调快照、生命周期与排序等行为。2026-10-05 全量命令 `python -m pytest` 得到 76 passed、1 skipped，用时 49.44 秒；skip 是 Windows junction 集成用例，命令因 `'chcp' is not recognized` 失败，不能计为链接 containment 实机通过。
+- **外部文献审阅：** 对比 LLMCompiler、PASTE、AsyncTool 与 AsyncLLM 的并行位置、评测变量和适用边界；这些研究的性能数据未外推为本项目结果。
+- **自动化测试：** 使用确定性单元与 subprocess 测试检查容量、重复和错误关联、回调快照、生命周期与排序等行为。2026-10-05 最近一次 `python -m pytest` 得到 77 passed、1 skipped，用时 47.32 秒；skip 是 Windows junction 集成用例，命令因 `'chcp' is not recognized` 失败，不能计为链接 containment 实机通过。
 - **本地模型 CLI 观察：** 此前试验验证了 nonce、多 handler、跨执行注册和 epoch 重启行为，也观察到冗余调用及过早宣称成功。2026-10-05 当前版本在 3425 gateway 上完成一次安全 clamp 任务；handler 结果进入模型第二次 activation 并被最终答复正确使用。另保留 8317 配置导致的连接拒绝记录。静态环境发现另有独立本地 CLI 任务验证：事件日志显示环境发现先于 Python 请求，`widgetkit` 版本和 API 发现结果进入模型，随后 smoke test 成功。上述 live 样本只证明各自单次行为，不代表压力、普遍可靠性或成本优势。
 
 实验并非随机化对照研究。曾有一次无 handler 控制与一次 nonce handler 任务都使用两次 committed activation；原始 token 数分别为 7,842 和 8,224，但提示词和生成代码不同，不能据此估计 handler 的因果成本。当前数据只支持提出后续配对实验，不支持性能优势结论。
@@ -82,6 +83,10 @@ Worker epoch 用于拒绝重启前的旧 handler 帧。timeout/cancel 若发生�
 
 Host UI 错误不一定单独投影为模型消息，但 incomplete terminal 含 `missing_handler_ids`，确定性测试已证明 provider 请求收到该状态。仍未通过真实模型体验确认模型是否会正确理解并据此改变行为。
 
+### 4.4 环境发现期间的 event-loop 响应性
+
+源码审计发现，`python_environment` 的路径与 metadata/AST 扫描原本在工具派发函数内同步运行，会占住 `LLMActor` 所在线程。实现现已将扫描放入 `asyncio.to_thread`，并沿提交链路逐层 await；事件发布、activation 关联与失败回执形状保持不变。确定性回归用阻塞扫描函数制造可控等待，断言期间 loop callback 能运行，第二条 `user.message` 被接受，扫描释放后发现事件与该消息共同进入后续 provider 请求。该测试证明 loop 可调度性和消息入队，不证明 actor 在首个 activation 结束前并行推理或模型能同时处理两个任务。最新全量测试为 77 passed、1 skipped；没有进行 live CLI 或负载下性能比较。
+
 ## 5. 讨论
 
 ### 5.1 架构判断
@@ -98,16 +103,32 @@ Host UI 错误不一定单独投影为模型消息，但 incomplete terminal 含
 
 25 ms coalescer 上限是当前实现的有界等待策略，并非由实测用户体验确定的普适最优值。已知 handler 数使 actor 可在结果齐全时提前结束等待；若结果迟到，终态仍能表达缺失。后续应测量 handler 到达延迟分布、等待带来的端到端增量，以及缺失观察对最终任务质量的影响，再决定是否调整该上限或改为更明确的批次关闭协议。
 
+### 5.4 相关工作与迁移边界
+
+[LLMCompiler（ICML 2024）](https://arxiv.org/abs/2312.04511) 将单个请求中的可并行函数调用编译为依赖 DAG；论文报告最高 3.7× 延迟加速和 6.7× 成本节省。它要求规划器识别依赖，解决的是计划内工具并行，不是持续输入、worker 生命周期或 event mailbox 正确性。
+
+[PASTE](https://arxiv.org/abs/2603.18897v3) 从重复工具模式预测后续调用并隔离推测结果。当前 v3 摘要报告任务完成时间降低 43.5%、观察到的工具延迟降低 1.8×；早期 v1 摘要曾报告不同的 48.5% 和吞吐口径。该版本差异说明引用性能数字必须固定论文版本。推测执行依赖工作负载模式，并引入错误预测和有副作用工具的风险；Nervipulsa 当前没有采用，也没有相应收益证据。
+
+[AsyncTool](https://arxiv.org/abs/2605.27995v3) 通过模拟工具延迟和多任务交错，评估模型的任务切换、依赖跟踪与状态维护。它适合启发 Nervipulsa 后续设计真实延迟测试，但其模型分数不是 mailbox、取消、迟到帧或 handler 结果语义的系统级证明。
+
+[LLMs are General Asynchronous Agents](https://arxiv.org/abs/2609.35427v1) 以 asyncio coroutine、共享 KV/cache blocks 和不同可见性 view 组织并行模型推理，并展示流式视频、游戏与系统监控场景。它讨论用户打断/steering，但不是持久 Python worker、事件日志恢复或工具结果去重的验证。该工作也明确指出当前模型异步操作尚不可靠。
+
+这些论文提供三种不同的并发位置：工具 DAG 并行、推测工具执行、多个 LLM coroutine；而 Nervipulsa 当前已实现的是异步事件路由与有界 worker 结果回传。现有代码优化只确保同步静态扫描不会堵住 asyncio loop，不会让正在运行的 activation 被打断，也不会证明多任务吞吐提升。
+
 ## 6. 结论
 
-Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主干，并实现了 handler 结果的初步有界投递协议。历史 live CLI 试验提供了多个 handler 进入模型上下文的真实证据；2026-10-05 的当前版本 3425 CLI 复验进一步验证了模型理解 `on_finished`、成功执行安全 Python 任务、terminal 与 handler 观察进入同一后续 activation，并被最终回答正确使用。当前静态环境发现版本也在本地 CLI 中完成 `widgetkit` 的先发现后 smoke test 流程。当前源码审计与 76 passed、1 skipped 的全量测试支持主要容量、关联、回滚、排序和环境发现路径；OS junction containment 集成仍因 runner 命令问题跳过。
+Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主干，并实现了 handler 结果的初步有界投递协议。历史 live CLI 试验提供了多个 handler 进入模型上下文的真实证据；2026-10-05 的当前版本 3425 CLI 复验进一步验证了模型理解 `on_finished`、成功执行安全 Python 任务、terminal 与 handler 观察进入同一后续 activation，并被最终回答正确使用。当前静态环境发现版本也在本地 CLI 中完成 `widgetkit` 的先发现后 smoke test 流程；最新异步扫描改动由阻塞回归验证 event loop 可响应并接收后续输入。当前源码审计与 77 passed、1 skipped 的全量测试支持主要容量、关联、回滚、排序、发现结果回执和 event-loop 非阻塞路径；OS junction containment 集成仍因 runner 命令问题跳过。
 
 因此，当前结论是“已获得单轮当前版本 live 证据、可继续验证的事件原生 harness 原型”，而不是“已被证明更令人满意的新架构”。下一阶段应优先完成并发容量与生命周期压力测试、缺失/拒绝结果对模型可见性的验证，以及有/无 handler 的配对基准。完成这些实验后，再决定保留窄 bridge、扩展为通用订阅，或移除该机制。
 
 ## 参考材料
 
-1. Nervipulsa 项目研究日志：[runtime_harness_architecture_research.md](runtime_harness_architecture_research.md)。本文中的实现细节与实验记录均来自该项目内的源码审查、测试结果和历史 CLI 观察；未引用外部文献，也未将历史运行结果描述为本轮复验。
-2. 本轮全量测试记录：`python -m pytest`，59 passed，71.59 s（2026-10-04 审计记录，Asia/Shanghai）。
+1. Nervipulsa 项目研究日志：[runtime_harness_architecture_research.md](runtime_harness_architecture_research.md)。实现细节与实验记录来自项目源码审查、测试和历史 CLI 观察。
+2. Kim et al., “An LLM Compiler for Parallel Function Calling,” ICML 2024, [arXiv:2312.04511](https://arxiv.org/abs/2312.04511)。
+3. “Act While Thinking: Accelerating LLM Agents via Pattern-Aware Speculative Tool Execution,” [arXiv:2603.18897 v3](https://arxiv.org/abs/2603.18897v3)。该预印本不同版本的摘要报告口径有变化，正文讨论采用明确标注版本的 v3 数值。
+4. “AsyncTool: Evaluating the Asynchronous Function Calling Capability under Multi-Task Scenarios,” [arXiv:2605.27995 v3](https://arxiv.org/abs/2605.27995v3)。
+5. “LLMs are General Asynchronous Agents,” [arXiv:2609.35427 v1](https://arxiv.org/abs/2609.35427v1)。
+6. 最新全量验证：`python -m pytest`，77 passed、1 skipped、47.32 s（2026-10-05；junction skip 原因见研究日志）。
 
 ## 后续实验清单
 

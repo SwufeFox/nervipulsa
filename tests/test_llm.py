@@ -9,7 +9,7 @@ from pathlib import Path
 
 from nervipulsa.cli import handle_line
 from nervipulsa.config import Settings
-from nervipulsa.events import Event, Lane, Mailbox
+from nervipulsa.events import Delivery, Event, Lane, Mailbox
 from nervipulsa.llm import ContextProjector, LLMActor, Transcript
 from nervipulsa.providers import (
     ModelResponse,
@@ -92,10 +92,10 @@ def test_counted_handler_coalescing_is_bounded_and_uses_initial_batch() -> None:
                 "request", {"expected_handler_count": count}, 0.0,
             )
 
-        def handler(seq: int) -> Event:
+        def handler(seq: int, handler_id: str | None = None) -> Event:
             return Event(
                 "session", f"handler-{seq}", seq, "agent.handler_fired", "host", "llm",
-                None, {"trigger": {"request_id": "request"}}, 0.0,
+                None, {"handler_id": handler_id or f"h{seq}", "trigger": {"request_id": "request"}}, 0.0,
             )
 
         inbox = Inbox()
@@ -135,7 +135,23 @@ def test_counted_handler_coalescing_is_bounded_and_uses_initial_batch() -> None:
         nested_batch = await actor._coalesce_handler_results([finished(1)])
         assert [event.seq for event in nested_batch] == [10, 14, 15]
 
-        # Missing counted results stop at the absolute 25 ms deadline.
+        # Duplicate handler IDs do not satisfy the expected count twice, even
+        # though each event remains in the activation batch for audit.
+        async def publish_duplicate_then_distinct() -> None:
+            await asyncio.sleep(0.003)
+            inbox.events.extend([
+                handler(11, "same-id"),
+                Event("session", "between", 12, "user.message", "cli", "llm", None, {"text": "during duplicate"}, 0.0),
+            ])
+            await asyncio.sleep(0.003)
+            inbox.events.append(handler(13, "second-id"))
+
+        dedup_task = asyncio.create_task(publish_duplicate_then_distinct())
+        deduped = await actor._coalesce_handler_results([finished(2), handler(10, "same-id")])
+        await dedup_task
+        assert [event.seq for event in deduped] == [10, 10, 11, 12, 13]
+        assert inbox.calls >= 2
+
         started = asyncio.get_running_loop().time()
         missing = await actor._coalesce_handler_results([finished(3)])
         elapsed = asyncio.get_running_loop().time() - started
@@ -202,6 +218,70 @@ async def _until(predicate, timeout: float = 8):
             return
         await asyncio.sleep(0.02)
     raise AssertionError("condition was not met")
+
+
+
+def test_incomplete_handler_status_reaches_provider_activation(workspace: Path) -> None:
+    async def body() -> None:
+        def respond(request):
+            for message in request.messages:
+                content = str(message.get("content") or "")
+                if '"type":"python.finished"' not in content:
+                    continue
+                envelope = json.loads(content)
+                payload = envelope.get("payload", {})
+                if payload.get("handler_result_status") == "incomplete":
+                    missing = payload.get("missing_handler_ids", [])
+                    return text_response(f"Acknowledged missing handler: {missing[0]}")
+            return text_response("no incomplete handler status")
+
+        backend = ScriptedBackend(respond)
+        runtime = _runtime(workspace, backend)
+        request_id = "execution-incomplete"
+        try:
+            await runtime.start()
+            assert runtime.llm_box.reserve_terminal(request_id)
+            terminal = runtime.bus.call(
+                "python_host",
+                "python.finished",
+                {
+                    "status": "timeout",
+                    "stdout": "",
+                    "stderr": "",
+                    "duration_ms": 400,
+                    "namespace_reset": True,
+                    "expected_handler_count": 2,
+                    "handler_result_status": "incomplete",
+                    "missing_handler_ids": ["handler-missing-17"],
+                    "worker_epoch": 4,
+                },
+                reply_to=request_id,
+                lane=Lane.RESERVED_RESULT,
+                lane_key=request_id,
+            )
+            assert terminal.accepted
+            assert await runtime.wait_until_idle(8)
+
+            # Assert the exact messages passed to the mock provider, not just the
+            # journal, actor transcript, or activation ledger.
+            payloads = [
+                json.loads(str(message["content"]))
+                for message in backend.requests[0].messages
+                if message.get("role") == "user"
+                and '"type":"python.finished"' in str(message.get("content"))
+            ]
+            assert len(payloads) == 1
+            event_payload = payloads[0]["payload"]
+            assert event_payload["handler_result_status"] == "incomplete"
+            assert event_payload["missing_handler_ids"] == ["handler-missing-17"]
+            assert any(
+                message.get("content") == "Acknowledged missing handler: handler-missing-17"
+                for message in runtime.actor.transcript.messages
+            )
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(body())
 
 
 def test_messages_batch_and_arrivals_during_inference_wait(workspace: Path) -> None:
@@ -439,6 +519,86 @@ def test_budget_and_context_pause_without_dropping_history(workspace: Path) -> N
     asyncio.run(budget())
     asyncio.run(context())
 
+
+
+
+def test_python_environment_runtime_error_becomes_failed_event(workspace: Path, monkeypatch) -> None:
+    import nervipulsa.llm as llm_module
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("synthetic path resolver failure")
+
+    monkeypatch.setattr(llm_module, "discover_python_environment", explode)
+    responses = [
+        ModelResponse(tool_calls=[ToolCall(id="env-fail", name="python_environment", arguments={})]),
+        text_response("Discovery failed safely."),
+    ]
+    backend = ScriptedBackend(lambda _request: responses.pop(0))
+    runtime = _runtime(workspace, backend)
+
+    async def body() -> None:
+        try:
+            await runtime.start()
+            runtime.submit_text("Inspect the Python environment")
+            assert await runtime.wait_until_idle(8)
+            event_payloads = [
+                json.loads(str(message["content"]))["payload"]
+                for message in backend.requests[1].messages
+                if message.get("role") == "user"
+                and '"type":"python.environment_discovered"' in str(message.get("content"))
+            ]
+            assert len(event_payloads) == 1
+            assert event_payloads[0]["status"] == "failed"
+            assert event_payloads[0]["error"] == "environment discovery failed (RuntimeError)"
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(body())
+
+
+def test_python_environment_tool_runs_before_smoke_test(workspace: Path) -> None:
+    (workspace / "customlib.py").write_text('__version__ = "1.4"\nclass Widget: pass\n', encoding="utf-8")
+    import sys
+    sys.path.insert(0, str(workspace))
+
+    async def body() -> None:
+        responses = [
+            ModelResponse(tool_calls=[ToolCall(
+                id="env-1", name="python_environment",
+                arguments={"modules": ["customlib"], "api_names": ["Widget"]},
+            )]),
+            text_response("Import and API verified; now smoke test."),
+        ]
+        backend = ScriptedBackend(lambda _request: responses.pop(0))
+        runtime = _runtime(workspace, backend)
+        try:
+            await runtime.start()
+            runtime.submit_text("Use unfamiliar customlib")
+            assert await runtime.wait_until_idle(8)
+            request = backend.requests[0]
+            assert [tool["function"]["name"] for tool in request.tools] == ["python_exec", "python_environment"]
+            receipts = [message for message in runtime.actor.transcript.messages if message.get("role") == "tool"]
+            assert len(receipts) == 1
+            receipt = json.loads(receipts[0]["content"])
+            assert receipt["status"] == "accepted"
+            event_messages = [
+                json.loads(message["content"])
+                for message in runtime.actor.transcript.messages
+                if message.get("role") == "user" and '"python.environment_discovered"' in str(message.get("content"))
+            ]
+            assert len(event_messages) == 1
+            result = event_messages[0]["payload"]
+            assert result["modules"][0]["version"] == "1.4"
+            assert result["modules"][0]["api"] == {"Widget": True}
+            assert result["install_supported"] is False
+        finally:
+            await runtime.shutdown()
+
+    try:
+        asyncio.run(body())
+    finally:
+        sys.path.remove(str(workspace))
+        sys.modules.pop("customlib", None)
 
 
 def test_provider_usage_and_context_measurements_are_journaled(workspace: Path) -> None:
@@ -1029,6 +1189,59 @@ def test_cross_file_edit_survives_compression_and_a_new_requirement(workspace: P
             assert any("LEFT-DONE" in line for line in lines)
             handle_line(runtime, "/logs")
             assert any("reply_to=" in line and "→" in line for line in lines)
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(body())
+
+
+def test_host_delivery_rejection_status_reaches_provider_and_is_acknowledged(workspace: Path) -> None:
+    async def body() -> None:
+        def respond(request):
+            if backend.calls == 1:
+                return tool_response(("call-handler", "on_finished(lambda result: 'callback seen')\nimport time\ntime.sleep(0.15)\nprint('EXECUTION DONE')", None))
+            terminal = next(
+                (json.loads(str(message.get("content") or "")) for message in request.messages
+                 if message.get("role") == "user" and '"type":"python.finished"' in str(message.get("content") or "")),
+                None,
+            )
+            if terminal is None:
+                return text_response("terminal missing")
+            missing = terminal["payload"].get("missing_handler_ids", [])
+            return text_response(f"Acknowledged host rejection: {missing[0] if missing else 'none'}")
+
+        backend = ScriptedBackend(respond)
+        runtime = _runtime(workspace, backend)
+        original_call = runtime.host_emitter.call
+
+        def reject_handler_delivery(event_type, payload, **kwargs):
+            if event_type == "agent.handler_fired":
+                return Delivery(False, reason="capacity_exceeded")
+            return original_call(event_type, payload, **kwargs)
+
+        runtime.host_emitter.call = reject_handler_delivery
+        try:
+            await runtime.start()
+            runtime.submit_text("Run Python and report handler delivery status.")
+            assert await runtime.wait_until_idle(8)
+
+            terminals = [event for event in runtime.trace if event.type == "python.finished"]
+            assert len(terminals) == 1
+            terminal = terminals[0]
+            assert terminal.payload["handler_result_status"] == "incomplete"
+            assert len(terminal.payload["missing_handler_ids"]) == 1
+            provider_events = [
+                json.loads(str(message.get("content") or ""))
+                for message in backend.requests[1].messages
+                if message.get("role") == "user"
+                and '"type":"python.finished"' in str(message.get("content") or "")
+            ]
+            assert len(provider_events) == 1
+            assert provider_events[0]["payload"]["missing_handler_ids"] == terminal.payload["missing_handler_ids"]
+            assert any(
+                message.get("content") == f"Acknowledged host rejection: {terminal.payload['missing_handler_ids'][0]}"
+                for message in runtime.actor.transcript.messages
+            )
         finally:
             await runtime.shutdown()
 

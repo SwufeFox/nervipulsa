@@ -161,6 +161,19 @@ def _valid_payload(event_type: str, data: Mapping[str, Any]) -> bool:
             and isinstance(data.get("new_epoch"), int)
             and text("reason", nonempty=True)
         )
+    if event_type == "python.environment_discovered":
+        return (
+            text("activation_id", nonempty=True)
+            and text("tool_call_id", nonempty=True)
+            and isinstance(data.get("read_only"), bool)
+            and isinstance(data.get("python"), str)
+            and isinstance(data.get("workspace"), str)
+            and isinstance(data.get("project_files"), list)
+            and isinstance(data.get("modules"), list)
+            and data.get("install_supported") is False
+            and data.get("status", "succeeded") in {"succeeded", "failed"}
+            and (data.get("status", "succeeded") != "failed" or isinstance(data.get("error"), str))
+        )
     if event_type == "session.shutdown":
         return True
     return False

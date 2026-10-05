@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -25,8 +26,10 @@ from .providers import (
     ModelResponse,
     ProviderError,
     ToolCall,
+    environment_tool_schema,
     tool_schema,
 )
+from .python_environment import discover_python_environment
 
 # Room left for a summary before the view is treated as near the budget.
 SUMMARY_RESERVE = 900
@@ -117,7 +120,7 @@ class Transcript:
             return {"projected": False, "duplicate": False, "added_chars": 0}
         if event.type == "user.message":
             message = {"role": "user", "content": str(event.payload["text"])}
-        elif event.type in {"python.finished", "agent.feedback", "python.environment_changed", "agent.handler_fired"}:
+        elif event.type in {"python.finished", "python.environment_discovered", "agent.feedback", "python.environment_changed", "agent.handler_fired"}:
             envelope = {
                 "kind": "runtime_event",
                 "source": event.source,
@@ -747,7 +750,7 @@ class LLMActor:
         self.compacting = False
         self.note: Callable[[str], None] | None = None
         self._last_request_chars: int | None = None
-        self.tools = [tool_schema(workspace)]
+        self.tools = [tool_schema(workspace), environment_tool_schema()]
         self.activations: list[Activation] = []
         self._paused: Activation | None = None
         self._held: list[Event] = []
@@ -854,7 +857,7 @@ class LLMActor:
         if not finished:
             return batch
         expected: dict[str, int | None] = {}
-        received: dict[str, int] = {}
+        received: dict[str, set[str]] = {}
 
         def register_finished(events: list[Event]) -> None:
             for event in events:
@@ -862,7 +865,7 @@ class LLMActor:
                     continue
                 request_id = event.reply_to
                 expected[request_id] = event.payload.get("expected_handler_count")
-                received.setdefault(request_id, 0)
+                received.setdefault(request_id, set())
 
         register_finished(batch)
         deadline = asyncio.get_running_loop().time() + 0.025
@@ -874,12 +877,19 @@ class LLMActor:
                     trigger = event.payload.get("trigger")
                     request_id = trigger.get("request_id") if isinstance(trigger, dict) else None
                     if request_id in received:
-                        received[request_id] += 1
+                        handler_id = event.payload.get("handler_id")
+                        # Host events always carry a handler ID. Use the event ID
+                        # for malformed legacy producers so separate observations
+                        # still count independently while duplicate identified
+                        # results cannot satisfy the expected count twice.
+                        received[request_id].add(
+                            handler_id if isinstance(handler_id, str) else event.id
+                        )
 
         count_handlers(batch)
         while True:
             all_counted_complete = all(
-                count is None or received[request_id] >= count
+                count is None or len(received[request_id]) >= count
                 for request_id, count in expected.items()
             )
             legacy_pending = any(count is None for count in expected.values())
@@ -1292,6 +1302,18 @@ class LLMActor:
                 errors.append(f"{call.id}:invalid_payload")
                 continue
             seen.add(call.id)
+            if call.name == "python_environment":
+                arguments = call.arguments or {}
+                modules = arguments.get("modules", [])
+                api_names = arguments.get("api_names", [])
+                if (
+                    not isinstance(modules, list)
+                    or any(not isinstance(item, str) for item in modules)
+                    or not isinstance(api_names, list)
+                    or any(not isinstance(item, str) for item in api_names)
+                ):
+                    errors.append(f"{call.id}:invalid_payload")
+                continue
             if call.name != "python_exec":
                 errors.append(f"{call.id}:unknown_tool")
                 continue
@@ -1366,6 +1388,35 @@ class LLMActor:
 
     def _deliver_one(self, activation: Activation, call: ToolCall) -> tuple[dict[str, Any], str]:
         arguments = call.arguments or {}
+        if call.name == "python_environment":
+            try:
+                if not isinstance(arguments, dict) or set(arguments) - {"modules", "api_names"}:
+                    raise ValueError("invalid environment discovery arguments")
+                result = discover_python_environment(
+                    self.workspace,
+                    arguments.get("modules", []),
+                    arguments.get("api_names", []),
+                )
+                result["status"] = "succeeded"
+            except Exception as exc:
+                result = {
+                    "status": "failed",
+                    "error": f"environment discovery failed ({type(exc).__name__})"[:500],
+                    "read_only": True,
+                    "python": sys.version.split()[0],
+                    "workspace": self.workspace,
+                    "project_files": [],
+                    "modules": [],
+                    "install_supported": False,
+                }
+            delivery = self._emitter.call(
+                "python.environment_discovered",
+                {"activation_id": activation.id, "tool_call_id": call.id, **result},
+                reply_to=activation.id,
+            )
+            if not delivery.accepted:
+                return {"status": "rejected", "reason": delivery.reason or "rejected", "executed": False}, "rejected"
+            return {"status": "accepted", "event_id": delivery.event_id}, "accepted"
         timeout = arguments.get("timeout", self.default_timeout)
         delivery = self._emitter.call(
             "python.requested",

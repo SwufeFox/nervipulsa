@@ -19,6 +19,9 @@ from typing import Any, Callable
 from .events import SYSTEM_PROMPT
 
 TOOL_DESCRIPTION = """\
+For an unfamiliar Python library, first inspect project dependency files and docs
+with python_environment, then verify candidate imports, versions, and requested API
+names, and only then run a minimal smoke test with python_exec. Never install packages.
 Submit Python code to a persistent interpreter in workspace {workspace}.
 Each execution starts in the workspace root. Variables, imports, and function
 definitions persist between executions. Use print() to expose values; expression
@@ -100,6 +103,27 @@ def tool_schema(workspace: str) -> dict[str, Any]:
                     },
                 },
                 "required": ["code"],
+            },
+        },
+    }
+
+
+def environment_tool_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "python_environment",
+            "description": (
+                "Statically inspect project clues, package metadata, candidate source paths, "
+                "and AST-visible API names. This does not import or execute target modules."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "modules": {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 200, "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$"}},
+                    "api_names": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 200, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}},
+                },
+                "additionalProperties": False,
             },
         },
     }

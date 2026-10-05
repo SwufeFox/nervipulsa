@@ -44,7 +44,64 @@ def test_created_running_and_unknown_route() -> None:
         assert [event.payload["text"] for event in batch] == ["one", "two"]
         assert [event.seq for event in batch] == [1, 2]
 
+
+
+def test_handler_global_ceiling_admission_release_and_retry() -> None:
+    async def body() -> None:
+        bus = Bus()
+        box = Mailbox("llm", result_limit=4, handler_result_limit=2)
+        bus.register("python.requested", box)
+        bus.register("python.finished", box)
+        bus.start()
+
+        def admit(label: str):
+            return bus.call(
+                "llm",
+                "python.requested",
+                {"code": "pass", "timeout": 1, "activation_id": "a", "tool_call_id": label},
+                reserve_result_for="llm",
+                reserve_handler_slots=4,
+            )
+
+        first = admit("first")
+        second = admit("second")
+        assert first.accepted and second.accepted
+        assert box.reserved_size == 2
+        assert box.handler_reserved_size == 8
+
+        sequence_before_rejection = bus.seq
+        rejected = admit("rejected")
+        assert not rejected.accepted
+        assert rejected.reason == "capacity_exceeded"
+        assert bus.seq == sequence_before_rejection
+        assert box.reserved_size == 2
+        assert box.handler_reserved_size == 8
+
+        terminal = bus.call(
+            "python_host",
+            "python.finished",
+            _finished(first.event_id, expected_handler_count=0),
+            reply_to=first.event_id,
+            lane=Lane.RESERVED_RESULT,
+            lane_key=first.event_id,
+        )
+        assert terminal.accepted
+        assert box.handler_reserved_size == 4
+        for event in box.drain_available(8):
+            box.mark_consumed(event)
+        assert box.handler_reserved_size == 4
+        assert box.reserved_size == 1
+
+        retried = admit("retry")
+        assert retried.accepted
+        assert box.reserved_size == 2
+        assert box.handler_reserved_size == 8
+        bus.close()
+        assert box.reserved_size == 0
+        assert box.handler_reserved_size == 0
+
     asyncio.run(body())
+
 
 
 def test_reserved_results_survive_a_full_ordinary_lane() -> None:

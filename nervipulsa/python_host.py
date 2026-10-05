@@ -466,7 +466,7 @@ class PythonHost:
             return ""
         return self._stderr_buf.decode("utf-8", "replace")[-4000:]
 
-    def _route_handler_frame(self, frame: dict[str, Any], epoch: int) -> None:
+    def _route_handler_frame(self, frame: dict[str, Any], epoch: int) -> bool:
         handler_id = frame.get("handler_id")
         snapshot_id = frame.get("snapshot_id")
         trigger = frame.get("trigger")
@@ -481,7 +481,7 @@ class PythonHost:
             or self._handlers.get(handler_id) != epoch
         ):
             self.late_frames += 1
-            return
+            return False
         payload = {
             "handler_id": handler_id,
             "trigger": trigger,
@@ -496,20 +496,22 @@ class PythonHost:
             lane_key=snapshot_id,
         )
         if delivery.accepted:
-            return
+            return True
         fallback = self._results.call("agent.handler_fired", payload, reply_to=snapshot_id)
-        if not fallback.accepted:
-            self.undelivered_handler_results += 1
-            self._ui.call(
-                "agent.error",
-                {
-                    "kind": "handler_result_undelivered",
-                    "message": (
-                        f"handler result {handler_id} for {snapshot_id} was not delivered: "
-                        f"{delivery.reason}; fallback: {fallback.reason}"
-                    ),
-                },
-            )
+        if fallback.accepted:
+            return True
+        self.undelivered_handler_results += 1
+        self._ui.call(
+            "agent.error",
+            {
+                "kind": "handler_result_undelivered",
+                "message": (
+                    f"handler result {handler_id} for {snapshot_id} was not delivered: "
+                    f"{delivery.reason}; fallback: {fallback.reason}"
+                ),
+            },
+        )
+        return False
 
     def _drain_idle(self) -> str | None:
         """Consume worker signals with nothing executing. Never blocks.
@@ -843,7 +845,7 @@ class PythonHost:
             pass
 
     def _apply_result(self, record: Execution, result: ExecResult) -> None:
-        self._emit_finished(record, result)
+        delivered_handler_ids: set[str] = set()
         try:
             if result.status not in {"timeout", "cancelled"}:
                 seen_handler_ids: set[str] = set()
@@ -853,13 +855,21 @@ class PythonHost:
                         self.late_frames += 1
                         continue
                     seen_handler_ids.add(handler_id)
-                    self._route_handler_frame(frame, result.worker_epoch)
+                    if self._route_handler_frame(frame, result.worker_epoch):
+                        delivered_handler_ids.add(handler_id)
+            if result.handler_ids is not None:
+                result.missing_handler_ids = [
+                    handler_id
+                    for handler_id in result.handler_ids
+                    if handler_id not in delivered_handler_ids
+                ]
         finally:
             snapshots = self._handler_snapshots.get(result.worker_epoch)
             if snapshots is not None:
                 snapshots.pop(record.event_id, None)
                 if not snapshots:
                     self._handler_snapshots.pop(result.worker_epoch, None)
+        self._emit_finished(record, result)
 
     def _emit_finished(self, record: Execution, result: ExecResult) -> None:
         if record.event_id in self._done:

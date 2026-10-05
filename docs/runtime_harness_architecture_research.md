@@ -41,7 +41,7 @@ Can Nervipulsa evolve from a model/tool-call loop into a reliable event-native h
 
 1. CLI input emits `user.message` to the LLM mailbox. A model `python_exec` call emits `python.requested`; admission reserves a terminal slot keyed to the new event ID before returning the accepted receipt.
 2. `PythonHost` dequeues requests serially and sends an `execute` frame to the worker. The worker emits `started`/`finished`; registered callbacks emit `handler.register` during the run and `handler.fired` after the execution completes.
-3. The host publishes `python.finished` on the reserved-result lane. It validates handler frames against the current worker epoch and emits `agent.handler_fired` through the event bus. Handler observations currently use the ordinary lane.
+3. The host validates handler frames against the current worker epoch and the active request snapshot, then routes handler observations through their bounded reservation. It emits `python.finished` after those routing attempts so its missing IDs include rejected results. The LLM actor coalesces correlated observations and projects them in global sequence order; native events remain separately journaled.
 
 4. `LLMActor` reads `expected_handler_count` from `python.finished`: zero skips waiting; positive counts wait until matching `agent.handler_fired` results arrive or the 25 ms deadline expires. Historical events without the field keep a bounded 25 ms grace. Events drained during the wait are sorted by global sequence, projected individually, and recorded in activation input IDs. Consuming `python.finished` releases its terminal reservation.
 5. Epoch restart clears host handler IDs. Old epoch frames are rejected. Timeout/restart may clear worker namespace and registrations; the new epoch starts without old callbacks.
@@ -92,7 +92,7 @@ This is a candidate for a small implementation slice, not yet a proven contract.
 
 The Worker originally sent its `finished` frame before invoking callbacks. `PythonHost._execute_blocking()` returned as soon as it read that frame, so the host marked the execution idle and could schedule the next request while callbacks were still running. The original execution timeout did not cover callback time. A callback could therefore leave an apparently idle runtime with a blocked worker; a later request could hit the separate 10-second worker-start deadline and force a restart. This also meant callback work was absent from the terminal execution duration.
 
-**Fixed:** the worker freezes its handler snapshot after user code, buffers each callback result, sends those result frames before the final `finished` frame, and calculates duration after callbacks and frame transmission. The Host buffers fired frames while the request is active, waits for that final frame, then publishes `python.finished` followed by the corresponding handler events. If timeout/cancel kills the worker before that frame, the partial handler buffer is discarded. A real subprocess regression verifies callback timeout and queued-request ordering. Full suite: **53 passed**.
+**Fixed:** the worker freezes its handler snapshot after user code, buffers each callback result, sends those result frames before the final `finished` frame, and calculates duration after callbacks and frame transmission. The Host buffers fired frames while the request is active and waits for that final frame. As of the 2026-10-06 delivery-rejection fix, it routes each buffered handler result before publishing `python.finished`, so the terminal can report host-side delivery failures; the actor consumes the resulting events in global sequence order. If timeout/cancel kills the worker before that frame, the partial handler buffer is discarded. A real subprocess regression verifies callback timeout and queued-request ordering.
 
 This keeps public event ordering while making the existing execution timeout cover callbacks. No synchronous Host ACK is needed: the worker's main thread executes user code and does not read its control socket until execution returns, so a synchronous registration/result ACK would deadlock unless the worker gains a separate control-reader thread.
 
@@ -131,4 +131,158 @@ Keep per-execution expected counts with independently bounded handler slots, ter
 1. Stress-test simultaneous admission at the global slot ceiling and verify release after close, timeout, cancellation, and restart under load.
 2. Decide whether coalescing should independently deduplicate handler IDs even though the host currently enforces uniqueness.
 3. Run a paired live benchmark if cost conclusions are needed; no local gateway CLI E2E was part of the current audit.
+
+
+
+## Live CLI 复验（2026-10-05）
+
+### 目的与执行范围
+
+按用户既有授权，本次启动使用进程级 `NERVIPULSA_BASE_URL`、`NERVIPULSA_MODEL`、`NERVIPULSA_API_KEY` 覆盖；值从已配置设置载入，没有修改或保存持久配置，密钥未写入日志。CLI 工作目录指定为 `.scratch/live_cli_e2e`。任务要求创建含 `clamp(value, low, high)` 的简单 Python 模块，实际执行边界/范围 assertion，并打印 `CLAMP ASSERTIONS PASS`；同时要求尝试注册 `on_finished`，将执行状态和 marker 观测作为 handler observation 返回。
+
+### 结果与证据
+
+- CLI 进程退出码为 0；启动横幅显示 provider `openai`、模型 `deepseek-flash` 和指定临时工作区。CLI 捕获的 stdout 只有启动横幅与交互提示，stderr 为空。
+- Journal：1 个 `user.message`；1 个 activation，状态 `paused`；provider attempt 状态 `unavailable`，错误为 `urlopen` 的 Windows `[WinError 10061]`（目标计算机主动拒绝连接）。这是本次失败证据；本轮没有 provider 回复。
+- 执行数为 0、tool call 数为 0；没有生成 `math_ops.py`，断言没有运行，marker 没有出现。`on_finished` 注册及额外 observation 因模型调用未成功而未能验证。
+- 因此本次只能证明 CLI 接受输入并将 gateway 连接失败记录到 journal；**当前版本的真实 CLI 任务未通过，不能声称当前代码 live 验证通过**。没有测得执行/handler activation、无关或 no-op 工具调用，也没有最终模型答复。
+- 本轮 `.scratch/live_cli_e2e` 临时工作区（含 journal）已清理。
+
+### 架构含义与待办
+
+连接失败发生在任何工具执行之前，不提供 Python worker 或 handler 协议的正反证据。既有历史 CLI 记录仍是较早运行的证据，不能替代当前版本复验。待 gateway 可连接后，按同一授权重跑实际修改与 assertion，并检查 stdout/stderr、事件和 activation 数、工具调用相关性、handler observation 是否进入最终模型上下文及最终答复。
+
+### 3425 gateway 重试（2026-10-05）
+
+- **第一次重试的配置偏差：** 从用户配置加载的 base URL 仍为 `http://127.0.0.1:8317/v1`。CLI 进程以 provider `openai`、模型 `deepseek-flash` 启动，但请求仍遇到 Windows `WinError 10061`；该次 journal 新建了一个 paused activation，没有 Python execution。此结果不算对用户指出的 3425 监听端口的有效验证。API key 仅由子进程环境提供，未输出或落盘。
+- **3425 有效重试：** 使用同一配置中的 provider/model/key，仅对该次进程设置 `NERVIPULSA_BASE_URL=http://127.0.0.1:3425/v1`。临时工作区为 `.scratch/live_cli_retry`。任务要求写入 `clamp_module.py`、运行三个边界 assertion 并打印 `CLAMP ASSERTIONS PASS`，同时在单轮内尝试注册一参数 `on_finished`，让模型最后确认执行和回调状态。
+- **真实 CLI 与 journal 结果：** 3425 返回了可用模型响应。Journal 依序记录 `user.message`、`python.requested`、`python.started`、`python.finished`、`agent.handler_fired`、`assistant.message`。唯一 execution `evt_00000002` 状态 `succeeded`，worker epoch 1，耗时 332 ms，stdout 为 `CLAMP ASSERTIONS PASS`，stderr 为空；三项 assertion 均通过。模型代码正确调用运行时提供的 `on_finished`，没有定义本地替代函数。
+- **Handler 验证：** terminal 报告 `expected_handler_count=1`、`handler_result_status=complete`、无 missing IDs。`agent.handler_fired` 的 observation 为 `status=succeeded` 和 `stdout_contains_marker=true`。第二个 committed activation 的 input IDs 同时包含 `python.finished` 与 `agent.handler_fired`；模型最终答复准确复述断言、marker、执行状态及 handler observation。因此此单轮任务适合并已完成 on_finished handler 验证，没有污染主任务证据。
+- **Activation 与使用量：** 两个 committed activations，一次 Python execution，一次 tool call；第一 activation provider request 16.239 s，usage 4,493 tokens；第二 activation 2.058 s，usage 5,096 tokens。合计 9,589 tokens。此单次任务不构成成本基准。CLI 子进程以捕获输出运行时，Windows GBK 解码导致 stdout 捕获异常；journal 完整记录了最终 assistant.message，且 CLI 进程退出码为 0。验证结论以 journal 为准。
+- **清理与证据边界：** `.scratch/live_cli_retry` 临时工作区及其中 journal 已在记录后清理。之前记录的 8317 连接拒绝与 2026-10-05 初次失败均保留；本次 3425 结果单独记录。该结果证明当前代码在此模型/gateway 的一轮安全任务中完成了理解、执行、handler 投递和模型观察，不证明并发压力、成本优势或生产可靠性。
+
+## 架构含义与待办（更新）
+
+3425 实验补齐了此前缺失的当前版本 live CLI 证据：模型能够理解 `on_finished` 的一参数 API，handler 能在同一执行完成后被触发，且 terminal 与 handler 两条事件都进入下一次 activation 并被最终回答正确使用。保留窄 handler bridge 的原型判断获得一项新的正向现场证据，但尚不能据此推断一般任务质量或可靠性。后续仍需容量上限压力、取消/关闭组合生命周期验证，以及有/无 handler 的配对成本实验。
+
+## 有界 handler 预算与生命周期复验（2026-10-05）
+
+### 本轮问题与代码审阅
+
+继续核查全局 handler-result ceiling、每执行 reservation、终态收缩、结果消费释放及 close/cancel/timeout/restart 后的 late-frame 语义。保护并保留了上方完整的 2026-10-05 live CLI 3425 记录；本轮没有重写该记录，也没有进行新的 live CLI/model run。
+
+- `Bus.call()` 在接受 `python.requested` 前同步检查目标 mailbox admission，再按 terminal、handler slots、请求 offer 的顺序取得容量；中途失败会 rollback 已取得的 reservation，并回滚 provisional sequence。worker 不会收到被拒绝的请求。
+- Mailbox 的全局 handler ceiling 为 `handler_result_limit * result_limit`，单执行预留最多 16 个。handler 结果入队时把一个 available slot 转为 outstanding；dequeue/lease 不释放，`mark_consumed(agent.handler_fired)` 才释放 outstanding。收到 `python.finished` 会将 available 部分收缩到实际 expected count；消费 terminal 关闭未填部分，而已接收、未消费的 handler 结果继续计数。`close()` 清空队列、lease、terminal reservation 和 handler accounting。
+- `PythonHost` 在 queued cancel、running cancel、timeout、worker restart 前后都通过唯一 terminal 结果结束该执行；worker epoch 清空 handler registry/snapshot，旧 epoch 或不属于当前 snapshot 的 frame 被计为 late 并丢弃。terminal 被 LLM 消费后，迟到 handler 使用已关闭的 reservation 会被拒绝。timeout 时已知 snapshot 会标注缺失 handler；snapshot 尚未知时状态为 unknown。close 最终关闭 bus/mailbox 并清账。
+- 执行路径判断：admission 与所有 mailbox 预算写入均为同步函数，运行在拥有 Bus 的 asyncio loop 上；同一 loop 上的协程只能在 `await` 处交接，因此 reservation 更新之间没有真正的多线程竞争。PythonHost 确实有 worker 子进程、读取 IPC 的线程以及 `asyncio.to_thread` 阻塞操作，但这些线程/进程把帧交回 host 后，由 loop 上的 host 协程执行路由；它们不直接并发修改 mailbox。故本轮单测验证的是确定性容量语义，不是 concurrent load 或多线程竞争证明。
+
+### 变更与确定性测试
+
+本轮未发现需要修复的生产代码缺陷；新增回归覆盖到 `tests/test_events.py` 与 `tests/test_python_host.py`：
+
+- 使用两个同时占用预算的执行 admission 填满可配置全局 8 个 handler slots；第三个执行被拒绝，sequence、terminal reservation 和 handler accounting 均不变。一个零 handler terminal 入队并被消费后，释放出的容量允许重试成功；close 后两类 reservation 均为零。
+- 真实 worker timeout 后预算归零，旧执行的 late handler frame 被拒绝；排队 cancel 及运行中 cancel 导致的 queued request 清账得到验证。
+- worker callback 超时保留 terminal 的 `incomplete`/missing ID 证据；消费 terminal 后未填 handler slot 归零，late callback result 被拒绝。worker epoch restart 后新执行完成且预算归零。
+- shutdown/close 期间有预留的请求被清空，mailbox budget 归零，close 后 frame 被 runtime closing 拒绝。
+
+验证：`python -m pytest tests/test_events.py tests/test_python_host.py -q`：**20 passed**；`python -m pytest -q`：**61 passed in 40.07s**；`git diff --check` 通过。未执行压力测试，也未测跨线程并发 admission。
+
+### 结论与后续
+
+当前证据支持：单 asyncio loop 上全局及每执行预算的 admission、消费释放、终态收缩和关闭清理具有确定性；测试覆盖了 timeout/cancel/restart/close 的终态观察与 late result 路径。它不支持“真实 concurrent load 已证明”，因为没有多线程写 mailbox，且本轮未进行负载实验。若未来允许其他线程直接调用 Bus，需先定义 thread-affinity 或加锁协议，再单独做并发压力验证。架构余项仍包括并发负载测试和 coalescer 对 handler ID 的独立去重。
+
+## Paired live CLI test: presence of `on_finished` (2026-10-05)
+
+**Question.** Does registering exactly one Python `on_finished` handler change observed completion latency for the same small numeric task? This is a four-run, interleaved live CLI comparison, not a general performance claim.
+
+**Gateway and controls.** Before running, `127.0.0.1:3425` accepted a TCP connection and an authenticated `/v1/models` request returned HTTP 200. Each process received environment overrides `provider=openai`, `base_url=http://127.0.0.1:3425/v1`, `model=codex/gpt-6-luna`; the already configured API credential was passed only in process memory/environment. No credential value was printed or written. Each run used a unique `.scratch` workspace and config directory, maximum four activations, 40 second Python execution timeout.
+
+**Task.** Both conditions used the same core request: use Python to define `normalize_score(value, maximum)` that clamps to `[0, maximum]`; assert `(-2,10)->0`, `(4,10)->4`, `(12,10)->10`; print exactly `NORMALIZE PASS` only after assertions; create no files. Treatment added one instruction: register exactly one `on_finished` handler before execution, returning execution status and whether stdout contains the marker. Baseline explicitly registered no handler.
+
+**Order:** baseline / treatment / treatment / baseline. CLI prompt and environment settings were otherwise identical.
+
+### Per-run observations
+
+| Run | Condition | CLI exit | Wall time (s) | Activations | Provider requests | Prompt tokens | Completion tokens | Execution | `python.finished` stdout marker | Handler fired/result |
+|---:|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| 1 | baseline | 0 | 12.099 | 2 | 2 | 8647 | 126 | succeeded | true | none |
+| 2 | treatment | 0 | 16.031 | 2 | 2 | 8817 | 187 | succeeded | true | succeeded; stdout contains NORMALIZE PASS: True |
+| 3 | treatment | 0 | 13.938 | 2 | 2 | 8817 | 181 | succeeded | true | status=succeeded; contains_NORMALIZE_PASS=True |
+| 4 | baseline | 0 | 15.992 | 2 | 2 | 8612 | 91 | succeeded | true | none |
+
+The CLI transcript itself contained the literal marker in baseline runs; in treatment, the marker was present in the journaled Python execution stdout and in each handler result, though it was not necessarily repeated in the final assistant transcript. The execution stdout is the marker correctness measure.
+
+### Summary and paired differences
+
+- Mean wall time: baseline **14.046s**, treatment **14.985s**; unpaired difference treatment − baseline **+0.939s**.
+- Adjacent pairs (baseline then treatment): run 1→2 **+3.932s**; run 4 vs run 3 (baseline run 4, treatment run 3) **-2.054s**.
+- Mean paired difference **+0.939s**. The pair signs disagree.
+- Mean activation token totals: baseline **8738.0**, treatment **9001.0** (provider usage summed over both activations per CLI session).
+- All four scheduled runs exited with CLI status 0; all four Python executions succeeded and journaled `NORMALIZE PASS`; baseline fired zero handlers, treatment fired exactly one and returned both execution status and marker membership.
+
+### Failure retained and limitations
+
+- An earlier treatment pilot in the same task attempt was also run and is retained as a failure: its Python execution succeeded, journaled stdout `NORMALIZE PASS`, and fired exactly one handler returning `status=succeeded; marker=True`; the following activation ended with journal error kind `shutdown`, and the CLI process did not produce a completed captured transcript/result before the attempt was abandoned. Its wall time is unavailable, so it is not included in the four scheduled timing rows or means. It is recorded here rather than silently discarded.
+- Tiny sample (two per condition), one model/gateway, sequential calls, and variable provider latency limit inference. The wall-time differences are inconsistent in sign and do not establish a handler performance cost or benefit. Prompt wording necessarily differs by the treatment instruction. Token totals also include assistant follow-up activations and can vary by model response.
+- Evidence source: per-run Nervipulsa SQLite journals (`activations`, `executions`, and `events`) plus measured process wall time; temporary journal/output files were removed after extraction. No unit tests were run for this live experiment.
+
+## 2026-10-06 — Missing handler status in provider activation input
+
+**Question.** When handler delivery is rejected or never completes, does the terminal `incomplete` state and its `missing_handler_ids` reach the actual model request, or are they only recorded by the journal/UI?
+
+**Path reviewed.** `PythonHost` derives missing IDs from expected registered handler IDs versus delivered frames and includes `handler_result_status` / `missing_handler_ids` in the terminal `python.finished` payload. The bus validates and routes that terminal event to the LLM mailbox. `LLMActor._coalesce_handler_results()` waits up to its bounded window for the declared handler count, then returns the terminal and any received handler events sorted by sequence. In `_activate()`, each event is projected before the provider request; `Transcript.project()` retains the event payload in a compact JSON runtime-event envelope, `snapshot()` includes that message, and the backend receives the resulting `ModelRequest.messages`.
+
+**Evidence.** Existing real-worker test `test_handler_timeout_discards_fired_frames_from_real_worker` asserts a timed-out handler produces terminal `handler_result_status == "incomplete"` and a non-empty `missing_handler_ids`. New deterministic regression `test_incomplete_handler_status_reaches_provider_activation` drives a valid terminal event through the live Runtime bus and actor/coalescer/projection path, with a `ScriptedBackend` mock recording the request. It parses the actual `backend.requests[0].messages` and asserts the `python.finished` envelope contains `handler_result_status: incomplete` and the recognizable ID `handler-missing-17`. Command: `python -m pytest tests/test_llm.py::test_incomplete_handler_status_reaches_provider_activation -q` — **1 passed**. No production fix was needed: status and IDs survive to provider input.
+
+**Evidence boundary.** This proves model-context visibility for a deterministic terminal payload. It does not prove that a model notices, correctly interprets, or acts on the incomplete status. The provider regression injects the Host-shaped terminal event; Host derivation is separately covered by the real-worker timeout test. End-to-end injection of an actual dual-lane delivery rejection into the same provider-capturing runtime remains an open integration test. Rejection in one or both lanes must not be inferred as model-visible solely from a journal/UI delivery record.
+
+**Open questions.** Add a single real Host-to-actor integration scenario where dual handler delivery is rejected and the Host-generated terminal is captured by the mock provider; verify both the computed missing ID and provider payload. Separately test model behavior with a scripted/controlled responder that must acknowledge the missing ID, while treating behavioral success as a distinct criterion from payload inclusion.
+
+## 2026-10-05：静态环境发现安全加固
+
+独立代码审查发现上一版 `python_environment` 会对模型提供的模块调用 `find_spec` 与 `import_module`。这意味着只读发现可触发目标模块及其父包顶层代码；此前关于只读安全性的表述不成立。保留本文件既有运行记录及历史 CLI 实验数据，但将其限定为旧实现上的行为观察，不能证明发现过程安全。
+
+实现已改为静态发现：读取有限项目线索；从 workspace/解释器搜索目录定位候选源码路径；只用 AST 识别顶层声明和字面量 `__version__`；distribution 版本仅读取元数据。查询不调用 `find_spec`、不导入目标模块、不执行源码，也不修改 `sys.path`。严格限制模块/ API 名称、数量、源文件大小、单条线索和序列化结果预算。
+
+## 2026-10-05：环境发现 workspace 外链边界与当前版本复验
+
+### 发现与修复
+
+静态 AST 检查不会执行目标模块。审查还发现 workspace 文档原文若直接投影进模型上下文，会扩大提示注入面；现环境发现事件只列出常见依赖清单文件名，不读 README、Markdown 或 setup/依赖文件正文。源码候选路径在静态读取前做 resolve containment 检查；搜索根有限制，事件中只用 workspace 相对路径或解释器搜索根标签。越界候选被忽略。
+
+### 验证
+
+- 修复前相关回归：`python -m pytest tests/test_python_environment.py tests/test_events.py tests/test_llm.py -q`：32 passed。
+- 修复后 `python -m pytest tests/test_python_environment.py -q`：当前局部验证见本轮末尾；完整测试最新为 76 passed、1 skipped。skip 是 workspace 外链 containment 集成用例；当前 Git Bash 环境调用 `cmd.exe /c mklink /J` 失败，pytest 输出为 `'chcp' is not recognized`，所以真实 OS junction 路径未验证，不把 skip 计作通过。
+- 当前版本 CLI live run 使用 `http://127.0.0.1:3425/v1` 和已配置 `codex/gpt-6-luna`。在隔离 workspace 中先调用环境发现检查本地 `widgetkit.py`（静态版本 0.3.1、API `scale`），之后显式导入并完成两项断言。CLI 退出码 0；journal 有 7 个事件，环境发现 payload 明确含 `read_only=true`、`install_supported=false`、候选路径及 `scale=true`；唯一 execution 在 epoch 1 succeeded，stdout `WIDGETKIT SMOKE PASS`，stderr 为空。最终回答复述发现和断言结果。三个 activation committed，两次工具调用（发现、执行），provider usage 共 14,277 tokens；该单样本不构成成本结论。
+
+### 证据边界及后续
+
+该真实模型运行确认当前版本的发现结果能进入后续 activation 并引导一次显式 smoke test；不保证其他模型遵循相同流程，也不证明静态 API 判断等于运行时 API 可用。符号链接 containment 的实际 OS 集成路径尚未在此受限环境中执行成功。旧版导入式实现的 CLI 记录仍是历史证据，不用于证明静态版本安全。临时 CLI workspace、journal、输出和 `__pycache__` 已清理。
+
+## 2026-10-05 — Coalescer handler ID 去重
+
+`LLMActor._coalesce_handler_results()` 原先按事件数量满足 `expected_handler_count`。若同一 `handler_id` 被重复投递，重复项可能提前结束等待，另一个 handler 的结果则未进入当前 activation。现在按每个 execution 的唯一 handler ID 计数；无 ID 的兼容事件以 event ID 作为各自独立结果。所有观察到的事件仍按全局序号投影并保留，避免为去重丢弃审计事件。
+
+新增回归安排同一 handler ID 重复到达，再延迟投递第二个不同 ID，并在中间插入 user message。断言 coalescer 继续等待到第二个唯一结果，且 activation 批次仍保留全部事件并排序。验证：`python -m pytest tests/test_llm.py::test_counted_handler_coalescing_is_bounded_and_uses_initial_batch -q`：**1 passed**；`git diff --check` 通过。
+
+## 2026-10-05 — 双 lane 拒收进入 provider 的端到端验证
+
+端到端回归发现 Host 原先先发布 `python.finished`，再路由 `agent.handler_fired`。因此 handler 两条路由都被拒收时，终态已经按 worker 原始 fired frame 记录为 `complete`，遗漏了 Host 侧的投递失败。现在 Host 先尝试 handler 主 lane 与有界 ordinary fallback，按实际接受结果计算 `missing_handler_ids`，再发布 terminal。handler 事件与 terminal 在同一 Host 事件循环步骤内入队，LLM actor 后续按全局序号统一处理。相应的 Host 生命周期测试已调整为验证 handler observation 在 terminal 前入队。
+
+`test_host_delivery_rejection_status_reaches_provider_and_is_acknowledged` 使用真实 Python worker 注册并触发 handler，通过可控 emitter 让两条投递路径均返回容量拒绝；断言 Host terminal 为 `incomplete` 且带 missing ID、实际 provider 请求包含该 ID，scripted responder 在最终 transcript 中明确确认该 ID。`test_incomplete_handler_status_reaches_provider_activation` 继续验证 Host 形状 terminal 的状态投影。目标命令 `python -m pytest tests/test_llm.py::test_host_delivery_rejection_status_reaches_provider_and_is_acknowledged tests/test_llm.py::test_incomplete_handler_status_reaches_provider_activation tests/test_python_host.py::test_queued_request_waits_for_handler_frames -q`：**3 passed**。
+
+尚未在本机通过的项目：workspace 外链 containment 集成测试由于 junction 命令失败而 skipped；需在支持 junction/symlink 的 runner 上执行。
+
+## 2026-10-05 — 环境发现收尾与元数据索引复核
+
+修复 `test_llm.py` 中手动加入异常路径回归时造成的函数边界错误，恢复了原有的批量输入、环境发现 smoke test 和 provider usage 测试为独立用例。环境发现仍保持静态：不会导入目标库；只回传有限文件路径、distribution metadata 和源码 AST 声明。
+
+全局 `importlib.metadata.packages_distributions()` 在这台 Windows 环境的单次测量耗时 8.483 秒，会让同步工具 dispatch 阻塞 event loop。实现改为仅扫描最多 32 个已解析解释器搜索根、每根最多 512 个发行版的 metadata 与 `top_level.txt`，构建 import-name 到 distribution 的映射；相同搜索根在进程内缓存。定向测量扫描 259 个 distributions、读取 153 个 `top_level.txt` 用时 0.158 秒。它仍是静态 metadata 读取，不执行包代码。
+
+验证：核心环境发现筛选 `13 passed, 1 skipped`；完整 `python -m pytest` 为 **76 passed, 1 skipped in 49.44s**。skip 原因为 Windows junction 命令报 `'chcp' is not recognized`，不视作真实 OS 链接 containment 通过。`git diff --check` 已通过。真实并发容量压力测试仍未运行。
+
+同日使用授权的本地 gateway 和 `codex/gpt-6-luna` 对最终静态发现实现做 CLI 复验。临时 `widgetkit.py` 含静态版本 `0.4.2` 与 `scale` API；journal 共 7 个事件，观察到 `python.environment_discovered` 先于 `python.requested`。发现 payload 为 succeeded、`scale=true`、`install_supported=false`；之后显式 Python execution succeeded，耗时 15 ms，断言 `scale(3) == 9`。共 3 次 committed activation、2 次工具调用、14,134 provider usage tokens。CLI 退出码为 0，最终答复正确复述发现和 smoke test；临时目录已清理。此证据是一轮本地体验，不推及其他模型或负载。
+
+证据采集脚本在读取 journal 后因 SQLite 连接未显式 close，Windows 临时目录自动清理遇到 `WinError 32`；CLI 本身已正常退出且 journal 数据已读取，之后关闭进程句柄并手动清除该临时目录。该清理错误不影响本轮 CLI 结果。
 

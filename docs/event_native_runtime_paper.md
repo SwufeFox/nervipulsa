@@ -8,9 +8,9 @@
 
 基于工具调用循环构建的 Agent harness，通常把工具执行结果视为唯一的运行时反馈。本文研究一种事件原生扩展：持久 Python worker 可注册完成回调，回调结果作为独立事件进入 agent 的观察流；事件总线、邮箱和执行生命周期负责关联、排序、容量控制与审计。研究重点不是证明回调 API 可运行，而是确定在并发、背压、超时和 worker 重启下，回调结果能否以有限资源进入模型上下文，同时保留可解释的失败语义。
 
-Nervipulsa 当前实现采用每次 Python 请求的终态预留、最多 16 个 handler 结果槽位、全局有界 handler 容量、终态报告预期与缺失结果，以及按事件序号投影观察的 coalescer。源码审查与全量自动化测试验证了这些主要账本路径；最近一次全量回归为 59 项通过。此前的本地模型 CLI 试验证明了单个和多个 handler 结果可以到达模型上下文，也暴露了冗余工具调用、过早报告成功及 token 成本对照不充分等问题。
+Nervipulsa 当前实现采用每次 Python 请求的终态预留、最多 16 个 handler 结果槽位、全局有界 handler 容量、终态报告预期与缺失结果，以及按事件序号投影观察的 coalescer。源码审查与全量自动化测试验证了这些主要账本路径；2026-10-05 全量回归为 76 passed、1 skipped。另新增只读 `python_environment` 工具，以受限路径、发行版 metadata 和 AST 线索协助模型发现自定义 Python 库；工具不导入代码，也不自动安装。当前静态版本在本地 CLI 中先发现 `widgetkit`，再显式执行 smoke test。此前的 3425 handler CLI 复验、8317 连接拒绝及首次复验失败仍保留为独立证据；单轮运行不能证明并发可靠性或成本优势。
 
-当前证据支持将其视为一个有真实端到端行为、具备初步有界投递契约的研究原型。它还不足以证明该桥接在成本、稳定性或通用性上优于普通工具调用循环。高并发压力、当前版本的本地 gateway 体验、失败信号到模型的保证，以及通用事件订阅 API 的必要性，仍需实验判定。
+当前证据支持将其视为一个有真实端到端行为、具备初步有界投递契约的研究原型。它还不足以证明该桥接在成本、稳定性或通用性上优于普通工具调用循环。3425 handler 任务共两次 committed activation、一次 execution、9,589 provider usage tokens；静态环境发现任务则共三次 committed activation、一次 execution、14,134 tokens。两者是不同任务，不能作成本比较。高并发压力、cancel/shutdown 组合及严格配对成本比较仍需实验判定。
 
 **关键词：** Agent runtime；事件驱动架构；有界队列；背压；持久 worker；可观察性；工具执行
 
@@ -46,15 +46,15 @@ Worker 的公开 API 当前窄化为 `on_finished(callback)` 与 `off_finished(h
 
 ### 2.3 失败与生命周期
 
-Worker epoch 用于拒绝重启前的旧 handler 帧。timeout/cancel 若发生在有效终态快照之前，会丢弃部分 handler 缓冲并使已知 handler 在终态中显示为缺失；worker 崩溃且快照未知时，状态标记为 unknown。Mailbox close 清理 queued、leased 状态及终态和 handler 预留。handler 专用与 ordinary fallback 均失败时，Host 记下未投递结果并发出 UI 错误；但当前实现并不保证该 UI 错误一定进入 LLM 上下文。
+Worker epoch 用于拒绝重启前的旧 handler 帧。timeout/cancel 若发生在有效终态快照之前，会丢弃部分 handler 缓冲并使已知 handler 在终态中显示为缺失；worker 崩溃且快照未知时，状态标记为 unknown。Mailbox close 清理 queued、leased 状态及终态和 handler 预留。handler 专用与 ordinary fallback 均拒绝时，Host 按实际接受的 handler ID 构造 incomplete terminal；确定性测试已验证 missing 状态进入 provider 请求，但真实模型如何理解该状态尚未做体验验证。
 
 ## 3. 研究方法与证据边界
 
 本文综合三类证据：
 
 - **源码审查：** 检查 admission、reservation rollback、lane key 校验、handler 槽位账本、终态收缩、Host frame 校验、epoch 清理和 coalescer 投影路径。
-- **自动化测试：** 使用确定性单元与 subprocess 测试检查容量、重复和错误关联、回调快照、生命周期与排序等行为。当前审计轮全量命令 `python -m pytest` 得到 59 passed，用时 71.59 秒。
-- **本地模型 CLI 观察：** 此前试验在本地 OpenAI 兼容 gateway 上执行 Python 任务，验证 handler nonce 能从 worker 回传并被模型复述；也观察了多 handler 顺序、跨执行持久注册、worker 重启后的旧 epoch 拒收、用户中途发消息和模型行为错误。当前审计轮未重新运行 CLI，因此这些属于历史实验证据，不代表 2026-10-05 的当前代码版本已完成 live 复验。
+- **自动化测试：** 使用确定性单元与 subprocess 测试检查容量、重复和错误关联、回调快照、生命周期与排序等行为。2026-10-05 全量命令 `python -m pytest` 得到 76 passed、1 skipped，用时 49.44 秒；skip 是 Windows junction 集成用例，命令因 `'chcp' is not recognized` 失败，不能计为链接 containment 实机通过。
+- **本地模型 CLI 观察：** 此前试验验证了 nonce、多 handler、跨执行注册和 epoch 重启行为，也观察到冗余调用及过早宣称成功。2026-10-05 当前版本在 3425 gateway 上完成一次安全 clamp 任务；handler 结果进入模型第二次 activation 并被最终答复正确使用。另保留 8317 配置导致的连接拒绝记录。静态环境发现另有独立本地 CLI 任务验证：事件日志显示环境发现先于 Python 请求，`widgetkit` 版本和 API 发现结果进入模型，随后 smoke test 成功。上述 live 样本只证明各自单次行为，不代表压力、普遍可靠性或成本优势。
 
 实验并非随机化对照研究。曾有一次无 handler 控制与一次 nonce handler 任务都使用两次 committed activation；原始 token 数分别为 7,842 和 8,224，但提示词和生成代码不同，不能据此估计 handler 的因果成本。当前数据只支持提出后续配对实验，不支持性能优势结论。
 
@@ -63,6 +63,10 @@ Worker epoch 用于拒绝重启前的旧 handler 帧。timeout/cancel 若发生�
 ### 4.1 已验证的运行行为
 
 此前 live CLI 试验显示，handler 产生的随机 nonce 可以在不通过普通 stdout 暴露的情况下回到模型上下文。多 handler 试验中，两个不可预测 nonce 均被准确复述，journal 记录 `python.finished` 和对应 `agent.handler_fired`。同一 worker epoch 跨两次执行保留的注册可分别触发；timeout/restart 后，旧 epoch 帧被拒绝，新 epoch 注册正常路由。
+
+**当前版本 3425 CLI 复验（2026-10-05）。** 进程级 overrides 使用 `http://127.0.0.1:3425/v1`、已配置模型 `deepseek-flash` 和已配置 API key；key 未输出或写入文件。隔离任务要求创建并运行 `clamp_module.py`，验证三项边界断言并输出 marker，同时尝试注册 `on_finished` callback。模型生成的 Python 代码正确调用一参数 `on_finished`，没有定义本地替代函数。Journal 事件序列为 `user.message`、`python.requested`、`python.started`、`python.finished`、`agent.handler_fired`、`assistant.message`。execution 成功，耗时 332 ms，marker 出现在 stdout；handler 预期数和到达数均为 1，结果表明状态为 succeeded 且 stdout 包含 marker。第二个 committed activation 同时消费 terminal 和 handler 两个事件，最终答复正确复述三项断言和 handler observation。这验证了当前代码下单任务的真实模型理解、执行、handler 路由和模型可见性。
+
+本轮另有配置 URL 仍指向 8317 的尝试，journal 记录 `WinError 10061`、paused activation 和零次执行；它与此前已记录的首次连接拒绝均保留为失败证据，不能混同为 3425 成功运行。Windows 捕获子进程 stdout 时出现 GBK decode 异常，但 CLI 进程退出码为 0，最终 assistant.message 与完整事件序列从 SQLite journal 读取并核对。该输出捕获限制不影响对 journal 证据的确认。
 
 另有受控试验在 Python 执行期间送入第二条用户消息：首个执行完成后，该消息得到处理，但模型随后产生一次不必要的 no-op Python 调用。较早一次较少约束的模型运行曾改错函数名、在结果返回前宣称成功，随后才根据失败观察纠正。这些现象提示 harness 的事件正确性不能替代模型行为评估。
 
@@ -74,9 +78,9 @@ Worker epoch 用于拒绝重启前的旧 handler 帧。timeout/cancel 若发生�
 
 ### 4.3 仍未证明的性质
 
-当前测试证明配置范围内的账本转移和若干生命周期路径，不等于证明高并发下的容量行为。尚未进行接近全局槽位上限的并发压力实验，也未进行 cancel/restart/shutdown 组合负载测试。Actor coalescer 依据 request ID 统计到达结果数；handler ID 去重由 Host 保证，另一种 producer 若不遵守该约束，coalescer 本身不会独立发现重复 ID。
+当前测试证明配置范围内的账本转移和若干生命周期路径，不等于证明高并发下的容量行为。尚未进行接近全局槽位上限的并发压力实验，也未进行 cancel/restart/shutdown 组合负载测试。Actor coalescer 现在按唯一 handler ID 判断预期结果是否到齐；重复 ID 不会提前满足数量门槛，且所有事件仍保留在有序观察批次中。第三方 producer 的不同关联契约仍未测试。
 
-即使终态标记 missing，模型也未必会收到 Host 发出的 UI 错误事件。因而“系统可审计地知道结果不完整”已具备实现路径，但“模型总会看见并据此调整行为”尚未成立。
+Host UI 错误不一定单独投影为模型消息，但 incomplete terminal 含 `missing_handler_ids`，确定性测试已证明 provider 请求收到该状态。仍未通过真实模型体验确认模型是否会正确理解并据此改变行为。
 
 ## 5. 讨论
 
@@ -96,9 +100,9 @@ Worker epoch 用于拒绝重启前的旧 handler 帧。timeout/cancel 若发生�
 
 ## 6. 结论
 
-Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主干，并实现了 handler 结果的初步有界投递协议。历史 live CLI 试验提供了 handler 结果进入模型上下文的真实证据；当前源码审计与 59 项全量测试支持主要容量、关联、回滚和排序路径。近期发现并修复的错关联键问题说明，账本边界审查仍能发现测试之外的协议缺陷。
+Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主干，并实现了 handler 结果的初步有界投递协议。历史 live CLI 试验提供了多个 handler 进入模型上下文的真实证据；2026-10-05 的当前版本 3425 CLI 复验进一步验证了模型理解 `on_finished`、成功执行安全 Python 任务、terminal 与 handler 观察进入同一后续 activation，并被最终回答正确使用。当前静态环境发现版本也在本地 CLI 中完成 `widgetkit` 的先发现后 smoke test 流程。当前源码审计与 76 passed、1 skipped 的全量测试支持主要容量、关联、回滚、排序和环境发现路径；OS junction containment 集成仍因 runner 命令问题跳过。
 
-因此，当前结论是“可继续验证的事件原生 harness 原型”，而不是“已被证明更令人满意的新架构”。下一阶段应优先完成当前代码版本的本地 CLI 端到端复验、并发容量与生命周期压力测试、缺失/拒绝结果对模型可见性的验证，以及有/无 handler 的配对基准。完成这些实验后，再决定保留窄 bridge、扩展为通用订阅，或移除该机制。
+因此，当前结论是“已获得单轮当前版本 live 证据、可继续验证的事件原生 harness 原型”，而不是“已被证明更令人满意的新架构”。下一阶段应优先完成并发容量与生命周期压力测试、缺失/拒绝结果对模型可见性的验证，以及有/无 handler 的配对基准。完成这些实验后，再决定保留窄 bridge、扩展为通用订阅，或移除该机制。
 
 ## 参考材料
 
@@ -113,3 +117,11 @@ Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主
 4. 验证 handler 双路径拒绝时，模型是否得到可行动的 incomplete/error observation。
 5. 运行严格配对 benchmark，测量 activation、provider 请求、延迟、token 和任务正确率。
 6. 以用例和测量结果决定是否需要通用命名事件订阅 API。
+
+### 2026-10-05 补记：静态 Python 环境发现
+
+较早的环境发现 CLI 样本使用临时 `widgetkit` 版本 `0.3.1`，先静态发现、后显式 import 与 smoke test；该记录保留为早期功能证据。当前最终静态实现的复验使用 `widgetkit` 版本 `0.4.2`，任务要求先调用 `python_environment`，再执行 `python_exec` 验证 `scale(3) == 9`，不安装任何包。
+
+本轮 CLI 退出码 0。SQLite journal 的 7 个事件显示 `python.environment_discovered` 先于 `python.requested`；发现结果为 succeeded、版本 `0.4.2`、`api.scale=true`、`install_supported=false`。之后 Python execution succeeded，耗时 15 ms。共 3 次 committed activation、2 次工具调用，provider usage 合计 14,134 tokens。模型最终复述了发现结果与 smoke test 成功。该现场结果仅说明这一模型、本机环境和单个自定义库任务的行为。
+
+自动化结果为 76 passed、1 skipped；skip 是 junction 集成命令在当前 Windows runner 中报 `'chcp' is not recognized`。静态路径隔离有确定性测试，但 OS 级 junction 行为尚无证据。全量测试和 live run 都不能替代真实并发容量压力、cancel/restart/shutdown 组合负载和严格配对成本实验。

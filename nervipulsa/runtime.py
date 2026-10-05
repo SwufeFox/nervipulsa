@@ -94,8 +94,9 @@ class Runtime:
             "agent.feedback": self.llm_box,
             "agent.handler_fired": self.llm_box,
             "agent.retry": self.llm_box,
-            "python.environment_changed": self.llm_box,
             "session.shutdown": self.life_box,
+            "python.environment_changed": self.llm_box,
+            "python.environment_discovered": self.llm_box,
         }
         for event_type, mailbox in routes.items():
             self.bus.register(event_type, mailbox)

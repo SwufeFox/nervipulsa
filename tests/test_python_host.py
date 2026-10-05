@@ -9,7 +9,7 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-from nervipulsa.events import MAX_HANDLER_RESULTS_PER_EXECUTION, Bus, Event, Mailbox
+from nervipulsa.events import MAX_HANDLER_RESULTS_PER_EXECUTION, Bus, Event, Lane, Mailbox
 from nervipulsa.python_host import PythonHost
 
 
@@ -158,6 +158,37 @@ def test_namespace_cwd_streams_and_immediate_accept(workspace: Path) -> None:
     asyncio.run(body())
 
 
+def test_shutdown_closes_mailbox_handler_budget(workspace: Path) -> None:
+    async def body() -> None:
+        rig = HostRig(workspace)
+        try:
+            pending = rig.request("print('shutdown-budget')")
+            assert pending.accepted
+            assert rig.llm.handler_reserved_size == MAX_HANDLER_RESULTS_PER_EXECUTION
+            await rig.close()
+            assert rig.llm.handler_reserved_size == 0
+            late = rig.bus.call(
+                "python_host",
+                "agent.handler_fired",
+                {
+                    "handler_id": "late-after-close",
+                    "trigger": {"request_id": pending.event_id},
+                    "result": "late",
+                    "worker_epoch": rig.host.worker_epoch,
+                },
+                reply_to=pending.event_id,
+                lane=Lane.HANDLER_RESULT,
+                lane_key=pending.event_id,
+            )
+            assert late.reason == "runtime_closing"
+            assert rig.llm.handler_reserved_size == 0
+        finally:
+            if rig.bus.state.value != "CLOSED":
+                await rig.close()
+
+    asyncio.run(body())
+
+
 def test_timeout_and_cancel_kill_the_process_tree(workspace: Path) -> None:
     async def body() -> None:
         rig = HostRig(workspace)
@@ -166,6 +197,22 @@ def test_timeout_and_cancel_kill_the_process_tree(workspace: Path) -> None:
             timed = await _wait(rig.llm, "python.finished", reply_to=spinning.event_id, timeout=8)
             assert timed.payload["status"] == "timeout"
             assert timed.payload["namespace_reset"] is True
+            assert rig.llm.handler_reserved_size == 0
+            late = rig.bus.call(
+                "python_host",
+                "agent.handler_fired",
+                {
+                    "handler_id": "late-after-timeout",
+                    "trigger": {"request_id": spinning.event_id},
+                    "result": "late",
+                    "worker_epoch": timed.payload["worker_epoch"],
+                },
+                reply_to=spinning.event_id,
+                lane=Lane.HANDLER_RESULT,
+                lane_key=spinning.event_id,
+            )
+            assert not late.accepted
+            assert rig.llm.handler_reserved_size == 0
             follow = rig.request("print('after-timeout')")
             after = await _wait(rig.llm, "python.finished", reply_to=follow.event_id)
             assert after.payload["status"] == "succeeded"
@@ -179,6 +226,7 @@ def test_timeout_and_cancel_kill_the_process_tree(workspace: Path) -> None:
             queued_done = await _wait(rig.llm, "python.finished", reply_to=queued.event_id)
             assert queued_done.payload["status"] == "cancelled"
             assert queued_done.payload["namespace_reset"] is False
+
             running = rig.request(
                 "import subprocess, sys, pathlib, time\n"
                 "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
@@ -194,6 +242,7 @@ def test_timeout_and_cancel_kill_the_process_tree(workspace: Path) -> None:
             dropped = await _wait(rig.llm, "python.finished", reply_to=running.event_id, timeout=8)
             assert dropped.payload["status"] == "cancelled"
             assert dropped.payload["reason"] == "namespace_reset_before_start"
+            assert rig.llm.handler_reserved_size == 0
 
             tree = rig.request(
                 "import subprocess, sys, pathlib, time\n"
@@ -252,6 +301,7 @@ def test_worker_crash_resets_and_idle_death_notifies(workspace: Path) -> None:
             again = rig.request("print('restarted')")
             restarted = await _wait(rig.llm, "python.finished", reply_to=again.event_id)
             assert "restarted" in restarted.payload["stdout"]
+            assert rig.llm.handler_reserved_size == 0
 
             before = rig.host.late_frames
             rig.host._frame_q.put(
@@ -466,7 +516,7 @@ def test_queued_request_waits_for_handler_frames(workspace: Path) -> None:
                 or (event.type == "python.started" and event.reply_to == second.event_id)
             ]
             assert [item[0] for item in lifecycle] == [
-                "python.finished", "agent.handler_fired", "python.started"
+                "agent.handler_fired", "python.finished", "python.started"
             ]
             assert next_started.reply_to == second.event_id
         finally:
@@ -484,13 +534,29 @@ def test_handler_timeout_discards_fired_frames_from_real_worker(workspace: Path)
             registered = await _wait(rig.llm, "python.finished", reply_to=register.event_id)
             assert registered.payload["expected_handler_count"] == 1
             assert registered.payload["handler_result_status"] == "complete"
-            assert registered.payload["missing_handler_ids"] == []
+            await _wait(rig.llm, "agent.handler_fired", reply_to=register.event_id)
             timed_out = rig.request("print('callback-will-time-out')", timeout=0.4)
             terminal = await _wait(rig.llm, "python.finished", reply_to=timed_out.event_id, timeout=8)
             assert terminal.payload["status"] == "timeout"
             assert terminal.payload["expected_handler_count"] == 1
             assert terminal.payload["handler_result_status"] == "incomplete"
             assert len(terminal.payload["missing_handler_ids"]) == 1
+            assert rig.llm.handler_reserved_size == 0
+            late = rig.bus.call(
+                "python_host",
+                "agent.handler_fired",
+                {
+                    "handler_id": "late-after-callback-timeout",
+                    "trigger": {"request_id": timed_out.event_id},
+                    "result": "late",
+                    "worker_epoch": terminal.payload["worker_epoch"],
+                },
+                reply_to=timed_out.event_id,
+                lane=Lane.HANDLER_RESULT,
+                lane_key=timed_out.event_id,
+            )
+            assert not late.accepted
+            assert rig.llm.handler_reserved_size == 0
             await asyncio.sleep(0.2)
             assert not any(event.type == "agent.handler_fired" for event in rig.llm.drain_available(32))
         finally:

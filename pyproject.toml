@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nervipulsa"
+version = "0.4.0.dev0"
+description = "An event-native local coding agent runtime"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["prompt-toolkit>=3.0.43"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+nervipulsa = "nervipulsa.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nervipulsa*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The cache plugin writes a temp directory next to the cache dir; some
+# restricted filesystem policies deny that write and leave stray directories.
+addopts = "-ra -p no:cacheprovider"

@@ -1,0 +1,32 @@
+{
+  "python": "3.13.14",
+  "platform": "win32",
+  "transcript_measurement": {
+    "messages": 400,
+    "transcript_chars": 859333,
+    "chars_match_full_dump": true,
+    "view_chars": 859737,
+    "ms_per_4_measurements_mean": 0.0331,
+    "ms_per_4_measurements_p95": 0.0373,
+    "legacy_full_dump_ms_mean": 37.4384
+  },
+  "tool_session": {
+    "tool_activations": 24,
+    "model_calls": 48,
+    "transcript_chars": 317946,
+    "wall_ms": 2947.5,
+    "cpu_ms": 484.4
+  },
+  "host_idle_wake": {
+    "rounds": 12,
+    "accepted_to_started_ms_mean": 1.86,
+    "accepted_to_started_ms_max": 5.03,
+    "accepted_to_started_ms_p95": 2.76
+  },
+  "idle_overhead": {
+    "seconds": 2.0,
+    "cpu_ms": 0.0,
+    "scheduler_wakeups": 8,
+    "thread_count_start": 4
+  }
+}

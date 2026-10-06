@@ -445,3 +445,24 @@ The measurements support the specific claim that ordinary capacity inspection is
 ### Verification
 
 `python -m pytest tests/test_events.py -q`: **9 passed**. Coverage asserts ordinary count after accepted/rejected admissions, after `take_batch()`, after `drain_available()`, and after close; the handler global-capacity test confirms ordinary-lane count remains independent of reserved slots. `git diff --check` passed. The full suite and application-level task latency were not run/measured in this slice.
+
+## 2026-10-06 — Batched SQLite journal flush
+
+### Change and invariants
+
+`Journal._flush()` previously issued one `connection.execute()` per observation row, then committed once. It now prepares rows by table and calls `executemany()` once per table inside the same transaction. Each table's rows retain their original relative order, including repeated activation/execution IDs whose later UPSERT must win. The tables have no cross-table foreign-key dependency. Unknown kinds remain ignored; any serialization or database error rolls back the whole batch, records the same error and dropped count, and clears `pending` as before.
+
+### Paired measurement
+
+A local file-backed SQLite benchmark used WAL with `synchronous=NORMAL`, 50 AB/BA paired samples, 10 separate 64-row transactions per timed sample, and the same prebuilt workload in each arm: 32 events (one with a 32 KB text payload), 24 deliveries, 4 activation UPSERTs and 4 execution UPSERTs. Setup and row construction were outside the timer.
+
+| Measurement | Per-item `execute` | Grouped `executemany` |
+|---|---:|---:|
+| Median time per 10-transaction sample | 22.148 ms | 21.359 ms |
+| P10–P90 time | 15.731–58.029 ms | 14.810–52.358 ms |
+
+Grouped writes won in 40 of 50 pairs. The ratio of the two overall medians is about 1.037 (roughly **3.6% less time**); the median of per-pair ratios was 1.102, with P10–P90 0.975–1.228. The different summaries and broad timing spread show that the win is modest and host-sensitive. This measures journal flush throughput only; it does not prove a reduction in production journal drops or user-visible request latency.
+
+### Verification
+
+`tests/test_journal.py` and `tests/test_cli.py`: **13 passed**. The new regression covers repeated activation/execution UPSERT ordering and unknown-kind handling. `git diff --check` passed. Full-suite and production-load/drop-rate measurements remain outstanding.

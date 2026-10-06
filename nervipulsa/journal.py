@@ -185,6 +185,13 @@ class Journal:
     def _flush(self, connection: sqlite3.Connection, pending: list[object]) -> None:
         if not pending:
             return
+        rows: dict[str, list[tuple[Any, ...] | dict[str, Any]]] = {
+            "events": [],
+            "deliveries": [],
+            "activations": [],
+            "executions": [],
+            "tool_calls": [],
+        }
         try:
             for item in pending:
                 if not isinstance(item, tuple):
@@ -192,8 +199,7 @@ class Journal:
                 kind = item[0]
                 if kind == "event":
                     event: Event = item[1]
-                    connection.execute(
-                        "INSERT OR IGNORE INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows["events"].append(
                         (
                             event.id,
                             event.session_id,
@@ -204,13 +210,11 @@ class Journal:
                             event.reply_to,
                             json.dumps(event.payload, ensure_ascii=False, separators=(",", ":")),
                             event.accepted_at,
-                        ),
+                        )
                     )
                 elif kind == "delivery":
                     record = item[1]
-                    connection.execute(
-                        "INSERT INTO deliveries(session_id,event_id,receiver,accepted,reason,observed_at) "
-                        "VALUES(?,?,?,?,?,?)",
+                    rows["deliveries"].append(
                         (
                             record["session_id"],
                             record["event_id"],
@@ -218,24 +222,11 @@ class Journal:
                             record["accepted"],
                             record["reason"],
                             record["observed_at"],
-                        ),
+                        )
                     )
                 elif kind == "activation":
                     record = item[1]
-                    connection.execute(
-                        """
-                        INSERT INTO activations
-                        (id,session_id,input_event_ids_json,transcript_version,status,started_at,ended_at,model,usage_json,context_json,error_json)
-                        VALUES(:id,:session_id,:input_event_ids_json,:transcript_version,:status,:started_at,:ended_at,:model,:usage_json,:context_json,:error_json)
-                        ON CONFLICT(id) DO UPDATE SET
-                          transcript_version=excluded.transcript_version,
-                          status=excluded.status,
-                          ended_at=excluded.ended_at,
-                          model=excluded.model,
-                          usage_json=excluded.usage_json,
-                          context_json=excluded.context_json,
-                          error_json=excluded.error_json
-                        """,
+                    rows["activations"].append(
                         {
                             **record,
                             "input_event_ids_json": record.get("input_event_ids_json")
@@ -246,35 +237,20 @@ class Journal:
                             or json.dumps(record.get("context", {}), ensure_ascii=False),
                             "error_json": record.get("error_json")
                             or (json.dumps(record["error"]) if record.get("error") is not None else None),
-                        },
+                        }
                     )
                 elif kind == "execution":
                     record = item[1]
-                    connection.execute(
-                        """
-                        INSERT INTO executions
-                        (execution_id,session_id,activation_id,worker_epoch,status,queued_at,started_at,ended_at,namespace_reset,metadata_json)
-                        VALUES(:execution_id,:session_id,:activation_id,:worker_epoch,:status,:queued_at,:started_at,:ended_at,:namespace_reset,:metadata_json)
-                        ON CONFLICT(execution_id) DO UPDATE SET
-                          activation_id=excluded.activation_id,
-                          worker_epoch=excluded.worker_epoch,
-                          status=excluded.status,
-                          started_at=excluded.started_at,
-                          ended_at=excluded.ended_at,
-                          namespace_reset=excluded.namespace_reset,
-                          metadata_json=excluded.metadata_json
-                        """,
+                    rows["executions"].append(
                         {
                             **record,
                             "metadata_json": record.get("metadata_json")
                             or json.dumps(record.get("metadata", {}), ensure_ascii=False),
-                        },
+                        }
                     )
                 elif kind == "tool_call":
                     record = item[1]
-                    connection.execute(
-                        "INSERT INTO tool_calls(session_id,activation_id,tool_call_id,execution_id,status,reason,observed_at) "
-                        "VALUES(?,?,?,?,?,?,?)",
+                    rows["tool_calls"].append(
                         (
                             record["session_id"],
                             record["activation_id"],
@@ -283,8 +259,54 @@ class Journal:
                             record["status"],
                             record.get("reason"),
                             record.get("observed_at", time.time()),
-                        ),
+                        )
                     )
+            connection.executemany(
+                "INSERT OR IGNORE INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows["events"],
+            )
+            connection.executemany(
+                "INSERT INTO deliveries(session_id,event_id,receiver,accepted,reason,observed_at) "
+                "VALUES(?,?,?,?,?,?)",
+                rows["deliveries"],
+            )
+            connection.executemany(
+                """
+                INSERT INTO activations
+                (id,session_id,input_event_ids_json,transcript_version,status,started_at,ended_at,model,usage_json,context_json,error_json)
+                VALUES(:id,:session_id,:input_event_ids_json,:transcript_version,:status,:started_at,:ended_at,:model,:usage_json,:context_json,:error_json)
+                ON CONFLICT(id) DO UPDATE SET
+                  transcript_version=excluded.transcript_version,
+                  status=excluded.status,
+                  ended_at=excluded.ended_at,
+                  model=excluded.model,
+                  usage_json=excluded.usage_json,
+                  context_json=excluded.context_json,
+                  error_json=excluded.error_json
+                """,
+                rows["activations"],
+            )
+            connection.executemany(
+                """
+                INSERT INTO executions
+                (execution_id,session_id,activation_id,worker_epoch,status,queued_at,started_at,ended_at,namespace_reset,metadata_json)
+                VALUES(:execution_id,:session_id,:activation_id,:worker_epoch,:status,:queued_at,:started_at,:ended_at,:namespace_reset,:metadata_json)
+                ON CONFLICT(execution_id) DO UPDATE SET
+                  activation_id=excluded.activation_id,
+                  worker_epoch=excluded.worker_epoch,
+                  status=excluded.status,
+                  started_at=excluded.started_at,
+                  ended_at=excluded.ended_at,
+                  namespace_reset=excluded.namespace_reset,
+                  metadata_json=excluded.metadata_json
+                """,
+                rows["executions"],
+            )
+            connection.executemany(
+                "INSERT INTO tool_calls(session_id,activation_id,tool_call_id,execution_id,status,reason,observed_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                rows["tool_calls"],
+            )
             connection.commit()
         except Exception as exc:
             connection.rollback()

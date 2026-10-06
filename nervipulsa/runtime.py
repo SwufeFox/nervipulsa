@@ -153,6 +153,8 @@ class Runtime:
             "context_compressing": self.actor.compacting,
             "worker_epoch": self.host.worker_epoch,
             "journal_incomplete": self.journal.incomplete,
+            "journal_dropped": self.journal.dropped,
+            "journal_error": self.journal.error,
             "api_key": "set" if self.settings.api_key else "missing",
         }
 

@@ -38,9 +38,12 @@ def test_created_running_and_unknown_route() -> None:
         second = bus.call("cli", "user.message", payload)
         payload["text"] = "mutated"
         assert second.accepted
+        assert box.ordinary_size == 2
         third = bus.call("cli", "user.message", {"text": "three"})
         assert third.reason == "capacity_exceeded"
+        assert box.ordinary_size == 2
         batch = await box.take_batch(10)
+        assert box.ordinary_size == 0
         assert [event.payload["text"] for event in batch] == ["one", "two"]
         assert [event.seq for event in batch] == [1, 2]
 
@@ -76,6 +79,7 @@ def test_handler_global_ceiling_admission_release_and_retry() -> None:
         assert bus.seq == sequence_before_rejection
         assert box.reserved_size == 2
         assert box.handler_reserved_size == 8
+        assert box.ordinary_size == 2
 
         terminal = bus.call(
             "python_host",
@@ -123,7 +127,10 @@ def test_reserved_results_survive_a_full_ordinary_lane() -> None:
             lane_key="exec-1",
         )
         assert finished.accepted
+        assert box.ordinary_size == 1
         assert box.reserve_terminal("exec-1") is False
+        bus.close()
+        assert box.ordinary_size == 0
 
     asyncio.run(body())
 
@@ -237,6 +244,7 @@ def test_handler_slots_survive_dequeue_until_consumed_and_terminal_closes_unused
         )
         assert fired.accepted
         mixed_batch = box.drain_available(8)
+        assert box.ordinary_size == 0
         handler_event = next(event for event in mixed_batch if event.type == "agent.handler_fired")
         assert box.handler_reserved_size == 2
         box.mark_consumed(handler_event)

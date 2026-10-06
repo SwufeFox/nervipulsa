@@ -146,3 +146,31 @@ Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主
 本轮 CLI 退出码 0。SQLite journal 的 7 个事件显示 `python.environment_discovered` 先于 `python.requested`；发现结果为 succeeded、版本 `0.4.2`、`api.scale=true`、`install_supported=false`。之后 Python execution succeeded，耗时 15 ms。共 3 次 committed activation、2 次工具调用，provider usage 合计 14,134 tokens。模型最终复述了发现结果与 smoke test 成功。该现场结果仅说明这一模型、本机环境和单个自定义库任务的行为。
 
 自动化结果为 76 passed、1 skipped；skip 是 junction 集成命令在当前 Windows runner 中报 `'chcp' is not recognized`。静态路径隔离有确定性测试，但 OS 级 junction 行为尚无证据。全量测试和 live run 都不能替代真实并发容量压力、cancel/restart/shutdown 组合负载和严格配对成本实验。
+
+## 7. 2026-10-06 — Long-running task protocols and recovery
+
+### 7.1 Related runtime contracts
+
+The stable `2026-07-28` [MCP Tasks extension](https://github.com/modelcontextprotocol/ext-tasks) returns a durable handle for long-running work. It requires task creation to be durable before the response, uses explicit task states, supports deferred result retrieval and input-required transitions, and defines cooperative cancellation. This is an MCP extension with capability negotiation, not a core MCP default. Its polling model addresses client disconnects; it does not replace Nervipulsa's in-process event delivery.
+
+The latest released [A2A specification](https://a2a-protocol.org/latest/specification/) is `1.0.0` and exposes task resources across independent agents: a request may return a direct message or a task, with Get/List/Cancel and optional streaming or push updates. This is a useful external interoperability boundary, but it does not specify Nervipulsa's worker IPC, mailbox capacity, or callback reservation semantics.
+
+[Google AIP-151](https://google.aip.dev/151) offers a uniform long-running operation resource with typed metadata and results. It distinguishes failure before an operation starts from failure after it starts. Its 10-second figure is a heuristic, not a universal cutoff.
+
+[Temporal Activity guidance](https://docs.temporal.io/activities) makes the retry hazard explicit: a failed attempt starts over unless a heartbeat checkpoint is provided, and idempotent activity code is recommended because external side effects can be repeated. This is directly relevant to Python code that may write files or launch subprocesses. A timeout or lost terminal cannot show whether a side effect occurred.
+
+[AgentRewind](https://arxiv.org/abs/2608.14380) explores agent-level rollback by aligning saved model context with controlled environment state, then injecting memory from the abandoned trajectory. Its benchmark concerns long-horizon engineering tasks. This differs from replaying an event journal: a log records observations, while rewind must restore the corresponding environment too.
+
+### 7.2 Current guarantee and design implication
+
+In Nervipulsa, `python.requested` is accepted after an in-process mailbox offer and capacity reservation. The observer then submits the event to a bounded asynchronous journal queue. That queue can drop records when full, and SQLite writer failures mark the journal incomplete. No durable task row is committed before the tool acceptance receipt. Thus current acceptance is process-local and volatile; journal persistence is best-effort observation, not durable admission or crash recovery.
+
+The present `execution_id` is an event identifier for one execution attempt in one runtime session. If durable jobs are introduced, the design should separate a stable logical `task_id` from each attempt's `execution_id` and the worker's `worker_epoch`. A process restart during an arbitrary Python call must not trigger blind automatic replay: code may have performed external effects before its terminal event was persisted or consumed. The runtime must either provide an idempotency contract, restore a controlled workspace checkpoint, or report an unknown outcome requiring reconciliation. Event correlation alone cannot provide exactly-once effects.
+
+For the current local CLI, retain event push and the bounded terminal/handler reservations. Add Get/List-style task operations only if clients need to disconnect and resume, or if execution outlives the local session. Before that implementation, define immutable terminal states, cancellation-requested versus confirmed-stopped, attempt history, deadlines, retention, and authorization. Keep context checkpoints and workspace snapshots aligned if rewind is supported.
+
+Operational visibility can improve without changing execution semantics: `/status` now reports the journal drop count and a bounded writer-error excerpt when the journal is incomplete. Those fields diagnose missing audit observations; they do not change whether a Python task was admitted, delivered, or recoverable. This source change has not yet been tested in this slice.
+
+### 7.3 Updated research question
+
+The next recovery study should inject failure at each boundary: after mailbox admission but before journal flush; after worker side effects but before terminal emission; after terminal emission but before actor consumption; and during cancellation/worker termination. Measure whether status is recoverable, duplicate side effects occur, the worker epoch changes, and the model sees a truthful terminal state. Keep this separate from the existing mailbox-capacity study: durable task recovery is a new layer and a different guarantee.

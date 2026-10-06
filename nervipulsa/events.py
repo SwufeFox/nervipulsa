@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import math
 import uuid
@@ -197,6 +196,7 @@ class Mailbox:
         self.feedback_limit = feedback_limit
         self.handler_result_limit = handler_result_limit
         self._items: deque[_Queued] = deque()
+        self._ordinary_size = 0
         self._leased: dict[str, _Queued] = {}
         self._wake = asyncio.Event()
         self._reservations: set[str] = set()
@@ -215,7 +215,7 @@ class Mailbox:
 
     @property
     def ordinary_size(self) -> int:
-        return sum(item.lane is Lane.ORDINARY for item in self._items)
+        return self._ordinary_size
 
     @property
     def reserved_size(self) -> int:
@@ -309,6 +309,8 @@ class Mailbox:
             assert key is not None
             self._feedback_ids.add(key)
         self._items.append(_Queued(event, lane))
+        if lane is Lane.ORDINARY:
+            self._ordinary_size += 1
         self._wake.set()
         return Delivery(True, event.id)
 
@@ -325,6 +327,8 @@ class Mailbox:
         result: list[Event] = []
         while self._items and len(result) < limit:
             item = self._items.popleft()
+            if item.lane is Lane.ORDINARY:
+                self._ordinary_size -= 1
             self._leased[item.event.id] = item
             result.append(item.event)
         result.sort(key=lambda event: event.seq)
@@ -339,6 +343,8 @@ class Mailbox:
         result: list[Event] = []
         while self._items and len(result) < limit:
             item = self._items.popleft()
+            if item.lane is Lane.ORDINARY:
+                self._ordinary_size -= 1
             self._leased[item.event.id] = item
             result.append(item.event)
         result.sort(key=lambda event: event.seq)
@@ -365,6 +371,7 @@ class Mailbox:
     def close(self) -> None:
         self._closed = True
         self._items.clear()
+        self._ordinary_size = 0
         self._leased.clear()
         self._reservations.clear()
         self._handler_slots.clear()
@@ -491,6 +498,8 @@ class Bus:
                 return self._reject(None, receiver.name, Delivery(False, reason="capacity_exceeded"))
             handler_reservation = (reservation_box, event_id)
 
+        # _event_payload already creates a detached JSON snapshot, so keep that
+        # owned object instead of traversing large code/output payloads twice.
         event = Event(
             session_id=self.session_id,
             id=event_id,
@@ -499,7 +508,7 @@ class Bus:
             source=source,
             target=receiver.name,
             reply_to=reply_to,
-            payload=copy.deepcopy(snapshot),
+            payload=snapshot,
             accepted_at=asyncio.get_running_loop().time(),
         )
         result = receiver.offer(event, lane, key=lane_key)

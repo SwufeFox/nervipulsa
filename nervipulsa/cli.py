@@ -315,6 +315,11 @@ def _show_status(runtime: Runtime) -> None:
     percent = 0 if limit <= 0 else min(100, round(100 * used / limit))
     compressing = "  compressing" if status["context_compressing"] else ""
     journal = "journal incomplete" if status["journal_incomplete"] else "journal ok"
+    if status["journal_incomplete"]:
+        details = [f"dropped={status['journal_dropped']}"]
+        if status["journal_error"]:
+            details.append(str(status["journal_error"])[:160])
+        journal += f" ({'; '.join(details)})"
     runtime.echo(f"{status['provider']}  {status['model']}")
     runtime.echo(str(status["workspace"]))
     runtime.echo(f"{actor}  python {python_state}  queue {status['python_queue']}")

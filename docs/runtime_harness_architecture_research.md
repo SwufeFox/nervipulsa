@@ -389,3 +389,59 @@ filesystem writer can still race the final compare-and-replace window.
 No tests or live worker request were run in this slice. The algorithm and parser
 have therefore not yet been checked against upstream compatibility vectors or a
 real-model edit; those are the next verification steps.
+
+## 2026-10-06 — Long-running task protocols and recovery boundaries
+
+### Sources checked
+
+- The official MCP [Tasks extension overview](https://modelcontextprotocol.io/extensions/tasks/overview) and [extension repository](https://github.com/modelcontextprotocol/ext-tasks) identify Tasks as an extension, not a core MCP request mode. Repository schema `2026-07-28` is marked stable; `draft` remains under development. A task response carries a handle, initial status, TTL, and suggested polling interval; the task must be durably created before the response is sent. Statuses are `working`, `input_required`, `completed`, `failed`, and `cancelled`; cancellation is cooperative. Notifications can replace polling when both sides support them.
+- The current released [A2A specification](https://a2a-protocol.org/latest/specification/) reports version `1.0.0`. It allows a send operation to return either a direct message or a task, and defines Get/List/Cancel, status/artifact streaming, and optional push notification operations. Its primary scope is inter-agent interoperability; it is not a prescription for an in-process Python worker or bounded mailbox.
+- [Google AIP-151](https://google.aip.dev/151) standardizes long-running operation resources and typed metadata/results. Its roughly 10-second threshold is explicitly a rule of thumb. It distinguishes failures preventing start (immediate request error) from failures during execution (terminal operation error), and describes concurrency conflicts and resource expiry.
+- [Temporal Activity guidance](https://docs.temporal.io/activities) recommends idempotent activity code because retries can repeat side effects. An attempt starts from its initial state unless recorded heartbeat details supply a checkpoint. A worker crash after a side effect but before result confirmation cannot be interpreted as proof that the side effect did not happen.
+- [AgentRewind](https://arxiv.org/abs/2608.14380) records aligned checkpoints of agent context and a controlled environment, then restores both to a selected point and adds memory from the failed trajectory. It evaluates long-horizon engineering work with MettleBench. This is recovery by coordinated rewind in a controlled environment, not recovery provided by an event log alone; its results do not establish rollback of arbitrary external side effects.
+
+### Comparison with Nervipulsa
+
+Nervipulsa's accepted `python.requested` currently means that the live process admitted the event and reserved terminal/handler mailbox capacity. It does not mean a durable job record was committed before returning the acceptance receipt. `Bus.call()` offers the event and invokes the observer; the `Journal` observer only enqueues to a bounded background queue (`queue_limit=4096`). When that queue is full, or a write fails, records can be dropped and `journal.incomplete` becomes true. Therefore this SQLite journal is an asynchronous observation/audit sidecar, not a durable admission queue, task store, or process-crash recovery mechanism.
+
+The existing execution ID is the event ID for one attempt in one runtime session, while `worker_epoch` scopes worker-local state. A future durable task interface should distinguish a stable logical `task_id` from per-attempt `execution_id` and worker epoch. A restart must not blindly resubmit arbitrary Python code: filesystem/process effects may have happened even if the terminal event was not committed or consumed. Without an idempotency contract or restorable workspace snapshot, the honest terminal state for that window is unknown/reconciliation-required, not “safe to retry.”
+
+### What to absorb, and what not to copy
+
+1. Keep push events inside the current local runtime. MCP's pollable handle and A2A's Get/List/stream/push patterns are useful if Nervipulsa later exposes jobs to disconnected or external clients; they are unnecessary overhead for every local completion event.
+2. Make the current guarantee explicit: acceptance is process-local and volatile. Do not describe the journal as recovery or durability.
+3. If durable long-running work becomes a product requirement, define a task state resource before implementation: stable task ID; attempt IDs; queued/working/input-required and immutable terminal states; result/error; timestamps/deadline; cancellation-requested versus confirmed-stopped; retention/expiry; and authorization scope.
+4. Specify crash windows before enabling automatic retry. Side-effecting tools need stable idempotency keys, explicit non-retryable behavior, or a restorable controlled environment. “Exactly once” cannot be inferred from event correlation or a unique ID.
+5. Keep agent-context recovery and environment recovery aligned. AgentRewind suggests that restoring transcript/checkpoint state without the matching workspace state is inconsistent; conversely restoring files without recording prior-attempt lessons can repeat the same error.
+6. Improve operational visibility now: show journal drop count and writer error in `/status`, while continuing to treat those diagnostics as evidence of incomplete observation rather than failed task delivery or recoverable execution.
+
+### Implementation slice and evidence boundary
+
+`Runtime.status()` now exposes `journal_dropped` and `journal_error` alongside the existing `journal_incomplete` flag. CLI `/status` prints the drop count and a bounded error excerpt when the journal is incomplete. This applies the operational-visibility lesson without changing admission, event delivery, or execution semantics. No tests were run in this research slice; `git diff --check` is the only planned static verification.
+
+### Research conclusion
+
+The most valuable direction is not to turn the current mailbox into a distributed job system prematurely. First preserve its strong in-process bounded-delivery contract and state its volatile acceptance boundary accurately. If restart recovery is later required, build a separate durable task/attempt layer with idempotency and aligned environment checkpoints; the existing observation journal is not that layer.
+
+## 2026-10-06 — Mailbox ordinary admission micro-optimization
+
+### Target and change
+
+`Mailbox.ordinary_size` previously counted `Lane.ORDINARY` items by scanning the queued deque. `can_offer()` calls this property on each ordinary admission, so the capacity check cost grew linearly with queue occupancy. The mailbox now maintains `_ordinary_size`: increment only after a successful ordinary enqueue, decrement when ordinary items leave the queue through either `take_batch()` or `drain_available()`, and reset when `close()` clears queued state. Leased items remain outside ordinary queue capacity, as before. Rejection checks, event sequence sorting and all terminal/handler reservation paths are unchanged.
+
+### Microbenchmark
+
+A synthetic microbenchmark used preconstructed events and a mailbox capacity of 2,000, so event construction was excluded and the deque scan was large enough to measure. Values are a single local run of the benchmark harness; absolute timings vary by interpreter and host.
+
+| Operation | Queue occupancy | Before | After |
+|---|---:|---:|---:|
+| `ordinary_size` | 2,000 | 165,391 ns | 97 ns |
+| `can_offer` | 2,000 | 225,840 ns | 266 ns |
+| `ordinary_size` | 1,000 | 98,508 ns | 100 ns |
+| `can_offer` | 1,000 | 121,241 ns | 419 ns |
+
+The measurements support the specific claim that ordinary capacity inspection is now O(1) rather than scanning queued items. They do not establish a comparable end-to-end latency reduction under the default mailbox limit of 64, nor a model-task throughput gain; provider latency will dominate ordinary interactive use. The change is most relevant to bursts, enlarged mailbox configurations and repeated saturated admission checks.
+
+### Verification
+
+`python -m pytest tests/test_events.py -q`: **9 passed**. Coverage asserts ordinary count after accepted/rejected admissions, after `take_batch()`, after `drain_available()`, and after close; the handler global-capacity test confirms ordinary-lane count remains independent of reserved slots. `git diff --check` passed. The full suite and application-level task latency were not run/measured in this slice.

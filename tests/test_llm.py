@@ -327,7 +327,46 @@ def test_messages_batch_and_arrivals_during_inference_wait(workspace: Path) -> N
     asyncio.run(body())
 
 
-def test_invalid_and_partial_tool_calls_do_not_rerun_accepted_code(workspace: Path) -> None:
+def test_python_exec_default_adapter_emits_request_and_correlated_terminal(workspace: Path) -> None:
+    backend = ScriptedBackend(
+        lambda request: tool_response(("exec-call", "print('default adapter')", None))
+        if backend.calls == 1
+        else text_response("result received")
+    )
+    runtime = _runtime(workspace, backend)
+
+    async def body() -> None:
+        try:
+            await runtime.start()
+            runtime.submit_text("run python")
+            assert await runtime.wait_until_idle(8)
+            requested = [event for event in runtime.trace if event.type == "python.requested"]
+            finished = [event for event in runtime.trace if event.type == "python.finished"]
+            assert len(requested) == len(finished) == 1
+            request = requested[0]
+            terminal = finished[0]
+            assert request.payload == {
+                "code": "print('default adapter')",
+                "timeout": 30.0,
+                "activation_id": runtime.actor.activations[0].id,
+                "tool_call_id": "exec-call",
+            }
+            assert terminal.reply_to == request.id
+            assert terminal.payload["stdout"] == "default adapter\n"
+            receipt = next(
+                json.loads(message["content"])
+                for message in runtime.actor.transcript.messages
+                if message.get("role") == "tool"
+            )
+            assert receipt == {"status": "accepted", "execution_id": request.id}
+            assert runtime.llm_box.reserved_size == 0
+            assert runtime.llm_box.handler_reserved_size == 0
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(body())
+
+
     async def invalid() -> None:
         def respond(request):
             if any("runtime_event" in text for text in _user_texts(request)):
@@ -524,12 +563,12 @@ def test_budget_and_context_pause_without_dropping_history(workspace: Path) -> N
 
 
 def test_python_environment_runtime_error_becomes_failed_event(workspace: Path, monkeypatch) -> None:
-    import nervipulsa.llm as llm_module
+    import nervipulsa.tools as tools_module
 
     def explode(*_args, **_kwargs):
         raise RuntimeError("synthetic path resolver failure")
 
-    monkeypatch.setattr(llm_module, "discover_python_environment", explode)
+    monkeypatch.setattr(tools_module, "discover_python_environment", explode)
     responses = [
         ModelResponse(tool_calls=[ToolCall(id="env-fail", name="python_environment", arguments={})]),
         text_response("Discovery failed safely."),
@@ -558,7 +597,7 @@ def test_python_environment_runtime_error_becomes_failed_event(workspace: Path, 
 
 
 def test_python_environment_scan_does_not_block_actor_loop(workspace: Path, monkeypatch) -> None:
-    import nervipulsa.llm as llm_module
+    import nervipulsa.tools as tools_module
 
     scan_started = threading.Event()
     release_scan = threading.Event()
@@ -577,7 +616,7 @@ def test_python_environment_scan_does_not_block_actor_loop(workspace: Path, monk
             "install_supported": False,
         }
 
-    monkeypatch.setattr(llm_module, "discover_python_environment", blocked_scan)
+    monkeypatch.setattr(tools_module, "discover_python_environment", blocked_scan)
     backend = ScriptedBackend(
         lambda _request: ModelResponse(
             tool_calls=[ToolCall(id="env-blocked", name="python_environment", arguments={})]
@@ -650,6 +689,7 @@ def test_python_environment_tool_runs_before_smoke_test(workspace: Path) -> None
             ]
             assert len(event_messages) == 1
             result = event_messages[0]["payload"]
+            assert event_messages[0]["reply_to"] == runtime.actor.activations[0].id
             assert result["modules"][0]["version"] == "1.4"
             assert result["modules"][0]["api"] == {"Widget": True}
             assert result["install_supported"] is False

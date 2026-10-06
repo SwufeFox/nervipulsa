@@ -10,7 +10,55 @@ This checkout contains a v0.4 development implementation. The scripted runtime
 exercises the asynchronous event contract without credentials. Live model calls use the OpenAI Chat Completions HTTP protocol directly. Nervipulsa
 keeps its own tool execution, transcript, and retry state; no model SDK is required.
 
-## Install
+## Runtime extension points
+
+The composition boundary lives in `nervipulsa.application`: `create_backend(settings)` selects a provider registry and `create_runtime(settings, workspace, echo=...)` assembles a session. Implement `ModelBackend.complete(request)` for another provider transport and register it through a `ProviderRegistry.create(settings)` implementation. Tool adapters implement `Tool` (`name`, `schema`, `validate`, and async `invoke`) and receive a narrow `ToolContext`: workspace and timeout settings plus an `EventSink.call(...)` interface. Add adapters to `DefaultToolRegistry(tools)` or supply a custom `ToolRegistry.create(workspace)`; the catalog is the actor's only tool dispatch surface. Built-in adapters live in `nervipulsa.tools`; the actor validates calls, stores tool receipts, journals them, and safely resumes interrupted commits.
+
+Minimal custom provider and tool registry wiring:
+
+```python
+from nervipulsa.application import create_runtime
+from nervipulsa.ports import ModelResponse
+
+class MyBackend:
+    async def complete(self, request):
+        return ModelResponse(content="ready")
+
+class MyProviderRegistry:
+    def create(self, settings):
+        return MyBackend()
+
+class MyTool:
+    name = "hello"
+
+    def schema(self, *, workspace):
+        return {"type": "function", "function": {
+            "name": self.name, "description": "Say hello",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        }}
+
+    def validate(self, arguments, *, max_timeout):
+        return None if not arguments else "invalid_payload"
+
+    async def invoke(self, arguments, *, context, activation, call):
+        # A synchronous local tool can complete and return its receipt directly.
+        return {"status": "succeeded", "message": "hello"}, "accepted"
+
+class MyToolRegistry:
+    def create(self, workspace):
+        from nervipulsa.tools import DefaultToolCatalog
+        return DefaultToolCatalog(workspace, [MyTool()])
+
+runtime = create_runtime(
+    settings, workspace,
+    provider_registry=MyProviderRegistry(),
+    tool_registry=MyToolRegistry(),
+)
+```
+
+For event driven work, a tool can emit a routed event through `context.event_sink`; the runtime validates and delivers it. The built-in adapters demonstrate the `python.requested` reservation and `python.environment_discovered` patterns.
+
+
 
 Python 3.11 or newer is required. From this directory:
 
@@ -193,20 +241,45 @@ provider, base URL, model, and key in the Magpie CLI for a separate live user te
 | Path | Responsibility |
 | --- | --- |
 | `nervipulsa/events.py` | Event, Delivery, Bus, mailboxes and capacity rules |
-| `nervipulsa/llm.py` | LLM actor, batches, transcript, activation ledger |
+| `nervipulsa/ports.py` | Provider, tool, context and event sink protocols |
+| `nervipulsa/llm.py` | LLM actor, batches, transcript, activation ledger and receipts |
+| `nervipulsa/tools.py` | Default tool catalog, schemas and Python adapters |
+| `nervipulsa/application.py` | Provider/tool registries and runtime composition |
 | `nervipulsa/providers.py` | ScriptedBackend and OpenAI-compatible HTTP adapter |
+| `nervipulsa/python_environment.py` | Static Python environment discovery |
 | `nervipulsa/python_host.py` | Request queue, process management, terminals |
 | `nervipulsa/python_worker.py` | IPC frames, persistent namespace, output |
 | `nervipulsa/framing.py` | Length-prefixed JSON control frames |
 | `nervipulsa/process_tree.py` | Filtered environment, spawn and tree cleanup |
 | `nervipulsa/journal.py` | SQLite observation records |
 | `nervipulsa/config.py` | Precedence, persistence, redaction |
-| `nervipulsa/cli.py` | Input, display, commands, assembly |
+| `nervipulsa/cli.py` | Input, display, commands |
+| `nervipulsa/runtime.py` | Session wiring and event routing |
 | `examples/real_model_experiments.py` | Runnable driver for the three live checks |
 | `examples/REAL_MODEL.md` | What each live check means and how to read it |
 | `benchmarks/bench_runtime.py` | Credential-free mechanism benchmarks |
 | `docs/research_worker_handler_bridge.md` | v0.5 research: programmable worker event handlers |
 | `TEST_RESULTS.md` | Recorded scripted and real-model results |
+
+## Extension points
+
+`nervipulsa/ports.py` holds the provider-neutral request/response types and the
+`ModelBackend`, `Tool`, and `ToolCatalog` protocols. Provider implementations in
+`providers.py` translate their wire format to those types. Runtime composition is
+in `application.py`; `Runtime` receives the backend and tool catalog, then wires
+the event bus, LLM actor, journal, and the default Python host. The CLI handles
+terminal input, commands, and display, and starts a session through
+`create_runtime`.
+
+To add a provider, implement `ModelBackend.complete(request)` and supply a
+`ProviderRegistry` whose `create(settings)` returns it. To add a tool, implement
+`schema`, `validate`, and `invoke`, then supply it from a `ToolRegistry` to
+`create_runtime`. A tool gets a narrow context with workspace settings and an
+event sink; the built-in `python_exec` adapter uses that sink to submit
+`python.requested`, while terminal results still return asynchronously as
+`python.finished`. Existing `providers.tool_schema` and
+`providers.environment_tool_schema` imports remain available as compatibility
+aliases.
 
 ## Execution boundary
 

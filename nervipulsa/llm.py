@@ -12,24 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
-import sys
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .events import MAX_HANDLER_RESULTS_PER_EXECUTION, Emitter, Event, Lane, Mailbox, RuntimeState
-from .providers import (
-    SYSTEM_PROMPT,
-    ModelRequest,
-    ModelResponse,
-    ProviderError,
-    ToolCall,
-    environment_tool_schema,
-    tool_schema,
-)
-from .python_environment import discover_python_environment
+from .events import Emitter, Event, Lane, Mailbox, RuntimeState
+from .ports import ModelBackend, ModelRequest, ModelResponse, ProviderFailure, ToolCall, ToolCatalog, ToolExecutionContext
+from .events import SYSTEM_PROMPT
 
 # Room left for a summary before the view is treated as near the budget.
 SUMMARY_RESERVE = 900
@@ -716,7 +706,7 @@ class LLMActor:
         bus_state: Callable[[], RuntimeState],
         bus_seq: Callable[[], int],
         inbox: Mailbox,
-        backend: Any,
+        backend: ModelBackend,
         emitter: Emitter,
         ui: Emitter,
         workspace: str,
@@ -729,6 +719,7 @@ class LLMActor:
         context_limit: int = 200_000,
         batch_limit: int = 32,
         runtime_facts: Callable[[], dict[str, Any]] | None = None,
+        tool_catalog: ToolCatalog | None = None,
     ) -> None:
         self._bus_state = bus_state
         self._bus_seq = bus_seq
@@ -743,6 +734,7 @@ class LLMActor:
         self.max_activations = max_activations
         self.max_timeout = max_timeout
         self.default_timeout = min(default_timeout, max_timeout)
+        self._tool_context = ToolExecutionContext(workspace, self.default_timeout, max_timeout, emitter)
         self.context_limit = context_limit
         self.batch_limit = batch_limit
         self.transcript = Transcript()
@@ -750,7 +742,9 @@ class LLMActor:
         self.compacting = False
         self.note: Callable[[str], None] | None = None
         self._last_request_chars: int | None = None
-        self.tools = [tool_schema(workspace), environment_tool_schema()]
+        from .tools import DefaultToolCatalog
+        self.tool_catalog = tool_catalog or DefaultToolCatalog(workspace)
+        self.tools = self.tool_catalog.schemas(workspace=workspace)
         self.activations: list[Activation] = []
         self._paused: Activation | None = None
         self._held: list[Event] = []
@@ -1253,7 +1247,7 @@ class LLMActor:
                 self._journal_activation(activation)
                 return
             raise
-        except ProviderError as exc:
+        except ProviderFailure as exc:
             finish_attempt(exc.kind, error=exc.message)
             await self._pause(activation, exc.kind, exc.message)
             return
@@ -1302,36 +1296,13 @@ class LLMActor:
                 errors.append(f"{call.id}:invalid_payload")
                 continue
             seen.add(call.id)
-            if call.name == "python_environment":
-                arguments = call.arguments or {}
-                modules = arguments.get("modules", [])
-                api_names = arguments.get("api_names", [])
-                if (
-                    not isinstance(modules, list)
-                    or any(not isinstance(item, str) for item in modules)
-                    or not isinstance(api_names, list)
-                    or any(not isinstance(item, str) for item in api_names)
-                ):
-                    errors.append(f"{call.id}:invalid_payload")
-                continue
-            if call.name != "python_exec":
+            tool = self.tool_catalog.get(call.name)
+            if tool is None:
                 errors.append(f"{call.id}:unknown_tool")
                 continue
-            arguments = call.arguments or {}
-            code = arguments.get("code")
-            if not isinstance(code, str):
-                errors.append(f"{call.id}:invalid_payload")
-                continue
-            if "timeout" in arguments and arguments["timeout"] is not None:
-                timeout = arguments["timeout"]
-                if (
-                    isinstance(timeout, bool)
-                    or not isinstance(timeout, (int, float))
-                    or not math.isfinite(float(timeout))
-                    or float(timeout) <= 0
-                    or float(timeout) > self.max_timeout
-                ):
-                    errors.append(f"{call.id}:invalid_timeout")
+            reason = tool.validate(call.arguments or {}, max_timeout=self.max_timeout)
+            if reason:
+                errors.append(f"{call.id}:{reason}")
         return errors
 
     def _reject_all(self, activation: Activation, response: ModelResponse, problems: list[str]) -> None:
@@ -1387,52 +1358,10 @@ class LLMActor:
             self._emit_feedback(activation, rejections)
 
     async def _deliver_one(self, activation: Activation, call: ToolCall) -> tuple[dict[str, Any], str]:
-        arguments = call.arguments or {}
-        if call.name == "python_environment":
-            try:
-                if not isinstance(arguments, dict) or set(arguments) - {"modules", "api_names"}:
-                    raise ValueError("invalid environment discovery arguments")
-                result = await asyncio.to_thread(
-                    discover_python_environment,
-                    self.workspace,
-                    arguments.get("modules", []),
-                    arguments.get("api_names", []),
-                )
-                result["status"] = "succeeded"
-            except Exception as exc:
-                result = {
-                    "status": "failed",
-                    "error": f"environment discovery failed ({type(exc).__name__})"[:500],
-                    "read_only": True,
-                    "python": sys.version.split()[0],
-                    "workspace": self.workspace,
-                    "project_files": [],
-                    "modules": [],
-                    "install_supported": False,
-                }
-            delivery = self._emitter.call(
-                "python.environment_discovered",
-                {"activation_id": activation.id, "tool_call_id": call.id, **result},
-                reply_to=activation.id,
-            )
-            if not delivery.accepted:
-                return {"status": "rejected", "reason": delivery.reason or "rejected", "executed": False}, "rejected"
-            return {"status": "accepted", "event_id": delivery.event_id}, "accepted"
-        timeout = arguments.get("timeout", self.default_timeout)
-        delivery = self._emitter.call(
-            "python.requested",
-            {
-                "code": arguments["code"],
-                "timeout": float(timeout),
-                "activation_id": activation.id,
-                "tool_call_id": call.id,
-            },
-            reserve_result_for="llm",
-            reserve_handler_slots=MAX_HANDLER_RESULTS_PER_EXECUTION,
-        )
-        if not delivery.accepted:
-            return {"status": "rejected", "reason": delivery.reason or "rejected", "executed": False}, "rejected"
-        return {"status": "accepted", "execution_id": delivery.event_id}, "accepted"
+        tool = self.tool_catalog.get(call.name)
+        if tool is None:
+            return {"status": "rejected", "reason": "unknown_tool", "executed": False}, "rejected"
+        return await tool.invoke(call.arguments or {}, context=self._tool_context, activation=activation, call=call)
 
     def _emit_feedback(self, activation: Activation, rejections: list[dict[str, str]]) -> None:
         delivery = self._emitter.call(

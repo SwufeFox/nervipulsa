@@ -17,7 +17,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from .config import PROVIDER_DEFAULTS, Settings, config_path, load_settings, save_settings
-from .providers import OpenAICompatibleBackend
+from .application import create_backend, create_runtime
 from .runtime import Runtime
 
 
@@ -376,13 +376,7 @@ def _save_config_changes(runtime: Runtime, changes: dict[str, str]) -> None:
         changes = {**changes, "api_key": ""}
     updated = replace(runtime.settings, **changes)
     path = save_settings(updated)
-    backend = OpenAICompatibleBackend(
-        provider=updated.provider,
-        adapter=updated.adapter,
-        base_url=updated.base_url,
-        api_key=updated.api_key,
-        model=updated.model,
-    )
+    backend = create_backend(updated)
     runtime.apply_provider_settings(updated, backend)
     runtime.echo(
         f"saved {path}; new model requests now use "
@@ -482,14 +476,7 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
     def echo(text: str) -> None:
         print(text, flush=True)
 
-    backend = OpenAICompatibleBackend(
-        provider=settings.provider,
-        adapter=settings.adapter,
-        base_url=settings.base_url,
-        api_key=settings.api_key,
-        model=settings.model,
-    )
-    runtime = Runtime(settings, backend, workspace, echo=echo)
+    runtime = create_runtime(settings, workspace, echo=echo, runtime_factory=Runtime)
     await runtime.start()
     echo(f"nervipulsa  {settings.provider}  {settings.model or '(no model)'}  {workspace}")
     echo("Enter sends. /help lists commands.")

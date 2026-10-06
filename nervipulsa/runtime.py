@@ -13,21 +13,25 @@ from .events import Bus, Delivery, Event, Mailbox, RuntimeState
 from .journal import Journal
 from .llm import LLMActor
 from .python_host import PythonHost
+from .ports import ModelBackend, ToolCatalog
+from .tools import DefaultToolCatalog
 
 
 class Runtime:
     def __init__(
         self,
         settings: Settings,
-        backend: Any,
+        backend: ModelBackend,
         workspace: Path,
         *,
         journal_path: Path | None = None,
         echo: Callable[[str], None] | None = None,
+        tool_catalog: ToolCatalog | None = None,
     ) -> None:
         self.settings = settings
         self.backend = backend
         self.workspace = workspace.resolve()
+        self.tool_catalog = tool_catalog or DefaultToolCatalog(str(self.workspace))
         self.echo = echo or (lambda _text: None)
         self.journal_path = journal_path or (self.workspace / ".nervipulsa" / "journal.sqlite")
         self.output_dir = self.workspace / ".nervipulsa" / "outputs"
@@ -77,6 +81,7 @@ class Runtime:
             context_limit=settings.context_limit,
             batch_limit=settings.batch_limit,
             runtime_facts=self.host.runtime_facts,
+            tool_catalog=self.tool_catalog,
         )
         self.actor.note = self.echo
         self._tasks: list[asyncio.Task[None]] = []

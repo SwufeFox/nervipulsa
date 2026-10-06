@@ -410,7 +410,32 @@ def test_worker_hashline_import_view_and_put_edit(workspace: Path) -> None:
     asyncio.run(body())
 
 
-def test_worker_enforces_handler_registration_limit(workspace: Path) -> None:
+@pytest.mark.skipif(os.name != "nt", reason="Windows AppContainer API")
+def test_appcontainer_startup_failure_is_emitted(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NERVIPULSA_WINDOWS_APPCONTAINER", "1")
+    outside = workspace.parent / f"{workspace.name}-outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    os.link(outside, workspace / "outside-link.txt")
+
+    async def body() -> None:
+        rig = HostRig(workspace)
+        try:
+            request = rig.request("print('must-not-run')")
+            finished = await _wait(rig.llm, "python.finished", reply_to=request.event_id, timeout=12)
+            assert finished.payload["status"] == "failed"
+            assert finished.payload["reason"] == "worker_startup_failed"
+            assert "hard-linked file" in finished.payload["stderr"]
+        finally:
+            await rig.close()
+
+    try:
+        asyncio.run(body())
+    finally:
+        outside.unlink(missing_ok=True)
+
+
     async def body() -> None:
         rig = HostRig(workspace)
         try:

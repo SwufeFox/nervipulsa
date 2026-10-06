@@ -78,7 +78,12 @@ def xxhash32(data: bytes | str, seed: int = 0) -> int:
 def _configure_workspace(path: str | os.PathLike[str]) -> None:
     """Fix the workspace root for this worker epoch and clear old snapshots."""
     global _workspace_root, _snapshot_bytes
-    root = Path(path).resolve(strict=True)
+    if os.environ.get("NERVIPULSA_APPCONTAINER") == "1":
+        # The host canonicalizes the workspace before launch. Avoid probing its
+        # protected parent directories from inside the AppContainer token.
+        root = Path(os.path.abspath(path))
+    else:
+        root = Path(path).resolve(strict=True)
     if not root.is_dir():
         raise ValueError("worker workspace must be a directory")
     if _workspace_root != root:
@@ -102,7 +107,21 @@ def _relative_path(path: str | os.PathLike[str]) -> tuple[str, Path]:
         raise ValueError("absolute paths are not allowed; use a workspace-relative path")
     if ".." in candidate.parts:
         raise ValueError("parent-directory traversal is not allowed")
-    target = ( _root() / candidate ).resolve(strict=True)
+    if os.environ.get("NERVIPULSA_APPCONTAINER") == "1":
+        root = _root()
+        target = Path(os.path.abspath(root / candidate))
+        current = root
+        for part in candidate.parts:
+            current = current / part
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                break
+            attributes = getattr(info, "st_file_attributes", 0)
+            if stat.S_ISLNK(info.st_mode) or attributes & 0x400:
+                raise ValueError("Hashline does not follow workspace symlinks or reparse points")
+    else:
+        target = ( _root() / candidate ).resolve(strict=True)
     try:
         target.relative_to(_root())
     except ValueError as exc:

@@ -88,25 +88,50 @@ def filtered_environment() -> dict[str, str]:
 
 
 class ManagedProcess:
-    def __init__(self, proc: subprocess.Popen[bytes], control: socket.socket, job: Any) -> None:
+    def __init__(self, proc: subprocess.Popen[bytes], control: socket.socket, job: Any, cleanup: Any = None) -> None:
         self.proc = proc
         self.control = control
         self.job = job
+        self._sandbox_cleanup = cleanup
         self._lock = threading.Lock()
+        self._sandbox_cleanup_lock = threading.Lock()
         self._termination_result: bool | None = None
+        self._sandbox_cleanup_done = False
+        self._sandbox_cleanup_ok = True
+
+
+    def _cleanup_sandbox(self) -> bool:
+        with self._sandbox_cleanup_lock:
+            if self._sandbox_cleanup_done or self._sandbox_cleanup is None:
+                return self._sandbox_cleanup_ok
+            self._sandbox_cleanup_done = True
+            try:
+                self._sandbox_cleanup_ok = bool(self._sandbox_cleanup())
+            except Exception:
+                self._sandbox_cleanup_ok = False
+            return self._sandbox_cleanup_ok
+
+    @property
+    def sandbox_cleanup_failed(self) -> bool:
+        return self._sandbox_cleanup_done and not self._sandbox_cleanup_ok
 
     @property
     def pid(self) -> int:
         return int(self.proc.pid)
 
     def poll(self) -> int | None:
-        return self.proc.poll()
+        status = self.proc.poll()
+        if status is not None:
+            self._cleanup_sandbox()
+        return status
 
     def terminate_tree(self) -> bool:
         with self._lock:
             if self._termination_result is None:
                 self._termination_result = self._terminate_tree()
             return self._termination_result
+
+
 
     def _terminate_tree(self) -> bool:
         tree_stopped = True
@@ -149,7 +174,7 @@ class ManagedProcess:
                     return False
             else:
                 return False
-        return tree_stopped and self.poll() is not None
+        return tree_stopped and self.poll() is not None and self._cleanup_sandbox()
 
 
 def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProcess:
@@ -158,42 +183,32 @@ def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProces
     env = filtered_environment()
     env["NERVIPULSA_CONTROL_FD"] = str(child.fileno())
     argv = [
-        sys.executable,
-        "-m",
-        "nervipulsa.python_worker",
-        "--workspace",
-        str(workspace),
-        "--epoch",
-        str(epoch),
-        "--output-dir",
-        str(output_dir),
+        sys.executable, "-m", "nervipulsa.python_worker",
+        "--workspace", str(workspace), "--epoch", str(epoch),
+        "--output-dir", str(output_dir),
     ]
+    sandbox_cleanup = None
     try:
-        if os.name == "nt":
+        if os.name == "nt" and os.environ.get("NERVIPULSA_WINDOWS_APPCONTAINER", "").lower() in {"1", "true", "yes"}:
+            from .appcontainer import launch
+            sandbox_workspace = workspace.resolve(strict=True)
+            sandbox_output = Path(os.path.abspath(output_dir))
+            argv = [
+                sys.executable, "-m", "nervipulsa.python_worker",
+                "--workspace", str(sandbox_workspace), "--epoch", str(epoch),
+                "--output-dir", str(sandbox_output),
+            ]
+            proc, profile, acl = launch(argv, env, sandbox_workspace, sandbox_output, child.fileno())
+            sandbox_cleanup = lambda: _cleanup_appcontainer(profile, acl)
+        elif os.name == "nt":
             startup = subprocess.STARTUPINFO()
             startup.lpAttributeList = {"handle_list": [child.fileno()]}
-            proc = subprocess.Popen(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                env=env,
-                cwd=str(workspace),
-                startupinfo=startup,
-                close_fds=True,
-            )
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, env=env, cwd=str(workspace), startupinfo=startup, close_fds=True)
         else:
-            proc = subprocess.Popen(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                env=env,
-                cwd=str(workspace),
-                pass_fds=(child.fileno(),),
-                start_new_session=True,
-                close_fds=True,
-            )
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, env=env, cwd=str(workspace), pass_fds=(child.fileno(),),
+                start_new_session=True, close_fds=True)
     except Exception:
         parent.close()
         child.close()
@@ -202,16 +217,59 @@ def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProces
         child.close()
     job = _assign_windows_job(proc) if os.name == "nt" else None
     parent.setblocking(True)
-    return ManagedProcess(proc, parent, job)
+    return ManagedProcess(proc, parent, job, sandbox_cleanup)
+
+
+def _cleanup_appcontainer(profile: str, acl: tuple[str, list[tuple[Path, bool]]]) -> bool:
+    sid, paths = acl
+    import ctypes
+    import subprocess
+    from ctypes import wintypes
+
+    ok = True
+    try:
+        from .appcontainer import _icacls
+        icacls = _icacls()
+        for path, recursive in reversed(paths):
+            try:
+                command = [icacls, str(path), "/remove:g", f"*{sid}"]
+                if recursive:
+                    command.extend(["/T", "/C"])
+                result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+                if result.returncode:
+                    detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+                    print(f"AppContainer ACL cleanup failed for {path}: {detail}", file=sys.stderr)
+                    ok = False
+            except Exception as exc:
+                print(f"AppContainer ACL cleanup failed for {path}: {exc}", file=sys.stderr)
+                ok = False
+    except Exception as exc:
+        print(f"AppContainer ACL cleanup failed: {exc}", file=sys.stderr)
+        ok = False
+    try:
+        userenv = ctypes.WinDLL("userenv", use_last_error=True)
+        userenv.DeleteAppContainerProfile.argtypes = [wintypes.LPCWSTR]
+        userenv.DeleteAppContainerProfile.restype = ctypes.c_long
+        result = userenv.DeleteAppContainerProfile(profile)
+        if result != 0:
+            print(f"DeleteAppContainerProfile failed for {profile}: error {result}", file=sys.stderr)
+            ok = False
+    except Exception as exc:
+        print(f"DeleteAppContainerProfile failed for {profile}: {exc}", file=sys.stderr)
+        ok = False
+    return ok
 
 
 def _assign_windows_job(proc: subprocess.Popen[bytes]) -> Any:
     try:
         kernel32, job = _create_kill_on_close_job()
-        handle = int(getattr(proc, "_handle"))
+        raw_handle = getattr(proc, "_handle")
+        handle_value = raw_handle if isinstance(raw_handle, int) else getattr(raw_handle, "value", None)
+        if handle_value is None:
+            raise OSError("worker process handle is unavailable")
         from ctypes import wintypes
 
-        assigned = kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(handle))
+        assigned = kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(handle_value))
         if not assigned:
             kernel32.CloseHandle(job)
             return None

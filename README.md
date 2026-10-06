@@ -221,6 +221,34 @@ The SQLite journal is an asynchronous observer. Event acceptance does not mean
 the journal has been flushed to disk. A visible incomplete-journal marker is
 shown if its bounded observation queue fills or writing fails.
 
+### Experimental Windows AppContainer worker
+
+On Windows, set `NERVIPULSA_WINDOWS_APPCONTAINER=1` before starting Nervipulsa
+to opt in to the experimental AppContainer worker. This uses a native
+`STARTUPINFOEX` launch with `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` and
+an AppContainer SID with no capabilities, including no network capability. The
+existing control socket, stderr pipe, and Job Object cleanup are retained.
+
+The host grants temporary modify ACLs to the selected workspace and output
+trees, plus read access to the runtime package when it is outside those trees.
+Before changing ACLs, it scans each writable tree (up to 100,000 entries) and
+refuses to start if it finds a symlink, junction, other reparse point, or
+hard-linked file. It removes the per-run ACL entries and AppContainer profile
+when the worker exits, is cancelled, or times out. Cleanup failures appear in
+the existing process tree cleanup status.
+
+This prototype is Windows only and requires AppContainer support, `icacls`,
+and permission to create/delete an AppContainer profile and adjust the selected
+ACLs. Any setup failure prevents worker startup; it never falls back to an
+ordinary process. It does not provide resource limits or a complete defense
+against all Windows brokered resources. The link scan happens before ACL changes,
+so a separate process that can mutate the selected trees concurrently could race
+that scan; use this prototype with a workspace that is not being changed by an
+untrusted process. Filesystem APIs that canonicalize paths through protected
+parent directories can fail inside the container; the built-in Hashline library
+instead uses workspace-rooted lexical checks and rejects reparse points. The
+default remains the existing unsandboxed worker unless the opt-in variable is set.
+
 ## Hashline Edit for workspace files
 
 The persistent Python worker includes `nervipulsa.hashline_edit`, the first project

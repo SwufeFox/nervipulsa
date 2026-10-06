@@ -105,6 +105,7 @@ class PythonHost:
         self._frame_q: queue.Queue[tuple[Any, ...]] = queue.Queue()
         self._alive = False
         self._starting = False
+        self._startup_error: str | None = None
         self._executing = False
         self._closing = False
         self._wake: asyncio.Event | None = None
@@ -141,6 +142,9 @@ class PythonHost:
 
     def runtime_facts(self) -> dict[str, Any]:
         """Live execution state. Summaries must not invent or replace this."""
+        managed = self._managed
+        if managed is not None and managed.poll() is not None and managed.sandbox_cleanup_failed:
+            self.cleanup_failed = True
         queued = [item.event_id for item in self._pending]
         current = self.current_execution_id
         unfinished = ([current] if current else []) + [item for item in queued if item != current]
@@ -278,6 +282,11 @@ class PythonHost:
         try:
             await self._ensure_worker()
             while not self._closing:
+                if self._pending and not self._alive and self._startup_error:
+                    record = self._pending.popleft()
+                    self._emit_finished(record, ExecResult("failed", "", f"worker startup failed: {self._startup_error}\n", 0, False, "worker_startup_failed", self._epoch))
+                    self._startup_error = None
+                    continue
                 if self._pending and self._alive:
                     record = self._pending.popleft()
                     if record.event_id in self._done:
@@ -362,6 +371,10 @@ class PythonHost:
         try:
             await asyncio.to_thread(self._spawn_and_wait_ready)
             self._alive = True
+            self._startup_error = None
+        except Exception as exc:
+            self._alive = False
+            self._startup_error = str(exc)
         finally:
             self._starting = False
 

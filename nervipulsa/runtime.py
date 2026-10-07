@@ -210,11 +210,15 @@ class Runtime:
             raise ValueError(f"complete {stream} output artifact is missing")
         return text
 
-    async def wait_until_idle(self, timeout: float = 10) -> bool:
-        deadline = time.monotonic() + timeout
+    async def wait_until_idle(self, timeout: float | None = 10) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
         stable = 0
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
             paused = self.actor.paused is not None
+            if deadline is None and paused:
+                return False
+            if self.bus.state is not RuntimeState.RUNNING:
+                return False
             idle = (
                 self.actor.phase == "waiting"
                 and not self.actor.busy

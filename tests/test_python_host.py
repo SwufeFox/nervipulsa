@@ -436,6 +436,7 @@ def test_appcontainer_startup_failure_is_emitted(
         outside.unlink(missing_ok=True)
 
 
+def test_worker_enforces_handler_registration_limit(workspace: Path) -> None:
     async def body() -> None:
         rig = HostRig(workspace)
         try:

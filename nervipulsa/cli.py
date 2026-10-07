@@ -489,6 +489,7 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
         echo("No API key saved. /config can store one; NERVIPULSA_API_KEY or OPENAI_API_KEY can also provide it.")
     buffer = LineBuffer()
     uninstall_requested = False
+    noninteractive_incomplete = False
     try:
         if not sys.stdin.isatty():
             while True:
@@ -498,7 +499,20 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
                 text = buffer.feed(raw.rstrip("\r\n"))
                 if text is not None and handle_line(runtime, text):
                     break
-            await runtime.wait_until_idle(timeout=30)
+            if not await runtime.wait_until_idle(timeout=None):
+                paused = runtime.actor.paused
+                if paused is not None:
+                    reason = paused.error_kind or "unknown"
+                    echo(
+                        f"[stdin] agent paused after input closed ({reason}); "
+                        "the task is incomplete without further input."
+                    )
+                else:
+                    echo(
+                        "[stdin] runtime stopped before becoming idle; "
+                        "the task may be incomplete."
+                    )
+                noninteractive_incomplete = True
         else:
             bindings = KeyBindings()
 
@@ -550,6 +564,8 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
         return 0
     if runtime.host.cleanup_failed or runtime.journal.incomplete:
         echo("[shutdown] cleanup or journal incomplete")
+        return 1
+    if noninteractive_incomplete:
         return 1
     return 0
 

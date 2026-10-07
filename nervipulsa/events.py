@@ -76,6 +76,10 @@ def _valid_payload(event_type: str, data: Mapping[str, Any]) -> bool:
         value = data.get(key)
         return isinstance(value, str) and (not nonempty or bool(value.strip()))
 
+    def integer(key: str) -> bool:
+        value = data.get(key)
+        return isinstance(value, int) and not isinstance(value, bool)
+
     if event_type == "user.message":
         return text("text", nonempty=True) and len(data["text"].encode("utf-8")) <= 128 * 1024
     if event_type == "assistant.message":
@@ -91,7 +95,7 @@ def _valid_payload(event_type: str, data: Mapping[str, Any]) -> bool:
             and timeout > 0
         )
     if event_type == "python.started":
-        return text("execution_id", nonempty=True) and isinstance(data.get("worker_epoch"), int)
+        return text("execution_id", nonempty=True) and integer("worker_epoch")
     if event_type == "python.finished":
         expected = data.get("expected_handler_count")
         missing = data.get("missing_handler_ids")
@@ -121,7 +125,7 @@ def _valid_payload(event_type: str, data: Mapping[str, Any]) -> bool:
             and text("stdout")
             and text("stderr")
             and isinstance(data.get("duration_ms"), (int, float))
-            and isinstance(data.get("worker_epoch"), int)
+            and integer("worker_epoch")
             and isinstance(data.get("namespace_reset"), bool)
             and (
                 "expected_handler_count" not in data
@@ -152,12 +156,12 @@ def _valid_payload(event_type: str, data: Mapping[str, Any]) -> bool:
             text("handler_id", nonempty=True)
             and isinstance(data.get("trigger"), dict)
             and text("result")
-            and isinstance(data.get("worker_epoch"), int)
+            and integer("worker_epoch")
         )
     if event_type == "python.environment_changed":
         return (
-            isinstance(data.get("old_epoch"), int)
-            and isinstance(data.get("new_epoch"), int)
+            integer("old_epoch")
+            and integer("new_epoch")
             and text("reason", nonempty=True)
         )
     if event_type == "python.environment_discovered":

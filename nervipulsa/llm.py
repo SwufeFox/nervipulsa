@@ -1194,7 +1194,8 @@ class LLMActor:
 
     async def _complete_and_commit(self, activation: Activation) -> None:
         activation.status = "running"
-        if activation.snapshot is None:
+        snapshot_missing = activation.snapshot is None
+        if snapshot_missing:
             activation.snapshot = self.projector.snapshot()
         request = ModelRequest(
             messages=activation.snapshot,
@@ -1202,8 +1203,16 @@ class LLMActor:
             activation_id=activation.id,
             model=self.model,
         )
-        request_chars = len(json.dumps(request.messages, ensure_ascii=False))
-        tools_chars = len(json.dumps(request.tools, ensure_ascii=False))
+        request_chars = (
+            activation.context_metrics.get("request_transcript_chars")
+            if not snapshot_missing
+            else None
+        )
+        if not isinstance(request_chars, int) or isinstance(request_chars, bool):
+            request_chars = len(json.dumps(request.messages, ensure_ascii=False))
+        tools_chars = activation.context_metrics.get("tool_schema_chars")
+        if not isinstance(tools_chars, int) or isinstance(tools_chars, bool):
+            tools_chars = len(json.dumps(request.tools, ensure_ascii=False))
         attempts = activation.context_metrics.setdefault("attempts", [])
         attempt: dict[str, Any] = {
             "number": len(attempts) + 1,

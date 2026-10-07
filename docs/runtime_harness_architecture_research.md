@@ -554,3 +554,11 @@ Reviewed selected official documentation for OpenAI Agents SDK and hosted Agents
 - [Microsoft Agent Framework overview](https://learn.microsoft.com/en-us/agent-framework/overview/) · [AutoGen distributed runtime](https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/framework/distributed-agent-runtime.html) · [AutoGen repository status](https://github.com/microsoft/autogen)
 - [OpenHands runtime architecture](https://docs.openhands.dev/openhands/usage/architecture/runtime) · [conversation persistence](https://docs.openhands.dev/sdk/guides/convo-persistence)
 - [Claude Code hooks](https://code.claude.com/docs/en/hooks) · [subagents](https://code.claude.com/docs/en/sub-agents)
+
+## 2026-10-07 — Reuse request-size accounting
+
+`LLMActor._process()` already measures transcript and tool-schema JSON characters for context accounting. `_complete_and_commit()` serialized both objects again solely to populate attempt metrics. It now reuses those activation metrics when the request snapshot exists; a missing snapshot or missing/invalid metric retains the prior serialization fallback. The `ModelRequest` payload and compaction decisions are unchanged.
+
+Paired local microbenchmark: a fixed 16-message JSON transcript plus eight tool schemas, 100 calls per sample, warm-up followed by nine alternating samples. The transcript payload targets were about 10 KB, 50 KB, and 200 KB; tool schemas serialized to 1,632 characters. Direct serialization medians were **121.10 / 366.88 / 1,522.90 μs**; cached lookup with type guards was **0.451 / 0.486 / 1.249 μs**, saving approximately **0.121 / 0.366 / 1.522 ms per activation**. Counts matched exactly in every case.
+
+This isolates character-accounting overhead on prebuilt objects. It does not include actor dispatch, provider serialization/network time, model inference, or prove an end-to-end coding-task speedup. AST parsing and `git diff --check` passed; no tests were added or run.

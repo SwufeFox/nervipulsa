@@ -156,10 +156,10 @@ def handle_line(runtime: Runtime, line: str) -> bool:
     if stripped == "/help":
         runtime.echo("Enter sends. Ctrl+J adds a line. Tab completes. Up/Down recalls input.")
         commands = (
-            ("/status", "model, Python, and context budget"),
+            ("/status", "model, Python execution, and context budget"),
             ("/logs", "event ids, delivery, and context changes"),
             ("/output <id> [stdout|stderr|both]", "full saved output"),
-            ("/cancel <id>", "stop queued or running code"),
+            ("/cancel [id]", "stop the running execution, or the specified queued or running code"),
             ("/retry", "resume a paused model call"),
             ("/config", "provider, model, and API key"),
             ("/exit", "drain and close"),
@@ -274,14 +274,22 @@ def handle_line(runtime: Runtime, line: str) -> bool:
             runtime.echo(f"--- {item} ---")
             runtime.echo(content.rstrip("\n") if content else "(empty)")
         return False
-    if stripped.startswith("/cancel"):
+    if stripped.split(maxsplit=1)[0] == "/cancel":
         parts = stripped.split(maxsplit=1)
-        if len(parts) != 2 or not parts[1].strip():
-            runtime.echo("usage: /cancel <execution_id>")
+        if len(parts) == 1:
+            delivery = runtime.cancel_running()
+            if delivery is None:
+                runtime.echo("No Python execution is currently running.")
+                return False
+        elif parts[1].strip():
+            delivery = runtime.cancel(parts[1].strip())
+        else:
+            runtime.echo("usage: /cancel [execution_id]")
             return False
-        delivery = runtime.cancel(parts[1].strip())
         if not delivery.accepted:
             runtime.echo(f"[rejected] {delivery.reason}")
+        else:
+            runtime.echo("Cancellation requested.")
         return False
     if stripped == "/uninstall":
         runtime.echo("/uninstall requires an interactive terminal.")
@@ -323,6 +331,15 @@ def _show_status(runtime: Runtime) -> None:
     runtime.echo(f"{status['provider']}  {status['model']}")
     runtime.echo(str(status["workspace"]))
     runtime.echo(f"{actor}  python {python_state}  queue {status['python_queue']}")
+    python_active = status.get("python_active_execution")
+    if isinstance(python_active, dict):
+        execution_id = python_active.get("execution_id")
+        elapsed = python_active.get("elapsed_seconds")
+        timeout = python_active.get("timeout_seconds")
+        if isinstance(execution_id, str) and isinstance(elapsed, (int, float)) and isinstance(timeout, (int, float)):
+            runtime.echo(
+                f"  execution {execution_id}  elapsed {elapsed:.1f}s  timeout {timeout:g}s"
+            )
     runtime.echo(f"context  {used:,}/{limit:,}  {percent}%{compressing}")
     runtime.echo(f"worker epoch {status['worker_epoch']}  {journal}  api key {status['api_key']}")
 
@@ -537,7 +554,7 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
                     except EOFError:
                         break
                     except KeyboardInterrupt:
-                        echo("Input cleared. Use /cancel <execution_id> to stop Python execution.")
+                        echo("Input cleared. Use /cancel to stop the running Python execution, or /cancel <execution_id> for a specific execution.")
                         continue
                     if line.strip() == "/config" or line.strip().startswith("/config "):
                         await _handle_config_command(runtime, line.strip())

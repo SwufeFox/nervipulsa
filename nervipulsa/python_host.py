@@ -136,6 +136,17 @@ class PythonHost:
         current = self._current
         return current.event_id if current else None
 
+    def active_execution_facts(self) -> dict[str, Any] | None:
+        """Return timing details only after Python has actually started running."""
+        current = self._current
+        if current is None or current.state != "running" or current.started_monotonic is None:
+            return None
+        return {
+            "execution_id": current.event_id,
+            "elapsed_seconds": max(0.0, time.monotonic() - current.started_monotonic),
+            "timeout_seconds": current.timeout,
+        }
+
     @property
     def worker_epoch(self) -> int:
         return self._epoch

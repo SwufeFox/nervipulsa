@@ -132,12 +132,19 @@ class Runtime:
             {"execution_id": execution_id, "reason": reason},
         )
 
+    def cancel_running(self, reason: str = "cli") -> Delivery | None:
+        active = self.host.active_execution_facts()
+        if active is None:
+            return None
+        return self.cancel(str(active["execution_id"]), reason)
+
     def retry(self) -> Delivery:
         return self.user_emitter.call("agent.retry", {})
 
     def status(self) -> dict[str, Any]:
         paused = self.actor.paused
         context_chars = self.actor.projector.view_length()
+        active_execution = self.host.active_execution_facts()
         return {
             "model": self.settings.model or "(unset)",
             "provider": self.settings.provider,
@@ -146,6 +153,7 @@ class Runtime:
             "actor": "paused" if paused is not None else self.actor.phase,
             "pause_reason": None if paused is None else paused.error_kind,
             "python": self.host.current_execution_id or "idle",
+            "python_active_execution": active_execution,
             "python_queue": self.host.queue_size,
             "transcript_chars": context_chars,
             "context_limit_chars": self.actor.context_limit,

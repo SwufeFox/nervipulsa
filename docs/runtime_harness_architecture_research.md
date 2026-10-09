@@ -562,3 +562,17 @@ Reviewed selected official documentation for OpenAI Agents SDK and hosted Agents
 Paired local microbenchmark: a fixed 16-message JSON transcript plus eight tool schemas, 100 calls per sample, warm-up followed by nine alternating samples. The transcript payload targets were about 10 KB, 50 KB, and 200 KB; tool schemas serialized to 1,632 characters. Direct serialization medians were **121.10 / 366.88 / 1,522.90 μs**; cached lookup with type guards was **0.451 / 0.486 / 1.249 μs**, saving approximately **0.121 / 0.366 / 1.522 ms per activation**. Counts matched exactly in every case.
 
 This isolates character-accounting overhead on prebuilt objects. It does not include actor dispatch, provider serialization/network time, model inference, or prove an end-to-end coding-task speedup. AST parsing and `git diff --check` passed; no tests were added or run.
+
+## 2026-10-09 — Session-scoped Journal identities
+
+### Source and finding
+
+Source message: user-provided Nervipulsa review sent-at `2026-10-09T01:19:02.161Z` (original timezone: Asia/Shanghai). Source inspection confirmed a deterministic collision path: each `Bus` starts its sequence at zero and generates IDs as `evt_{seq:08d}`, while `events.id` was a global primary key. `INSERT OR IGNORE` therefore silently discarded same-numbered events from later sessions. Python execution IDs reuse the request event ID; the global `executions.execution_id` key let a later session's upsert change fields on the earlier row while leaving its `session_id` unchanged. Activation IDs are UUID-derived and were not part of this deterministic collision path.
+
+### Change
+
+`events` now uses `(session_id, id)` as its primary key and retains `UNIQUE(session_id, seq)`. `executions` now uses `(session_id, execution_id)`, and its upsert is session-scoped. Startup detects the legacy primary keys with `PRAGMA table_info`, then transactionally rebuilds only those tables and copies existing columns explicitly. Same-session event ignore and execution upsert behavior are retained. The writer also flushes a partial batch after its 0.2-second queue wait times out idle, narrowing the in-memory observation window without changing event admission. Regression coverage exercises repeated IDs across two sessions, migration of existing rows, and idle flushing of one record. The stale non-interactive CLI test expectation was updated from a 30-second timeout to `timeout=None`, matching the existing EOF-drain behavior.
+
+### Verification and limits
+
+The independent targeted run `python -m pytest tests/test_journal.py tests/test_cli.py -v` completed with **16 passed in 3.10s**. The idle partial-batch test, legacy migration and cross-session identity cases, and the non-TTY EOF case passed. The main shell's repeated pytest invocations timed out without results; the independent runner completed the targeted command. No full suite was run. `git diff --check` passed after the implementation changes. The migration prevents future collisions but cannot reconstruct rows already silently dropped or recover overwritten historical execution fields. Idle flush narrows the observation loss window, but the Journal remains asynchronous and uses WAL with `synchronous=NORMAL`; it is not a durable admission or task-recovery store. Changes are currently uncommitted and unpushed.

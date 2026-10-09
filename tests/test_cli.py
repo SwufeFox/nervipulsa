@@ -30,7 +30,7 @@ def test_non_tty_reads_lines_off_event_loop_and_waits_for_idle(tmp_path: Path, m
     main_thread = threading.get_ident()
     read_thread_ids: list[int] = []
     submitted: list[str] = []
-    idle_timeouts: list[int] = []
+    idle_timeouts: list[float | None] = []
 
     class Stdin:
         def isatty(self) -> bool:
@@ -53,7 +53,7 @@ def test_non_tty_reads_lines_off_event_loop_and_waits_for_idle(tmp_path: Path, m
             submitted.append(text)
             return SimpleNamespace(accepted=True, reason=None)
 
-        async def wait_until_idle(self, timeout: int) -> bool:
+        async def wait_until_idle(self, timeout: float | None) -> bool:
             idle_timeouts.append(timeout)
             return True
 
@@ -66,7 +66,7 @@ def test_non_tty_reads_lines_off_event_loop_and_waits_for_idle(tmp_path: Path, m
     assert asyncio.run(cli.run_cli(Settings(model="scripted"), tmp_path)) == 0
     assert read_thread_ids and all(thread_id != main_thread for thread_id in read_thread_ids)
     assert submitted == ["hello"]
-    assert idle_timeouts == [30]
+    assert idle_timeouts == [None]
 
 
     assert _completions("/config ") == {"show", "set", "profiles", "use"}

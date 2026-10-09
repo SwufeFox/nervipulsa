@@ -79,6 +79,52 @@ class Journal:
     def tool_call(self, record: dict[str, Any]) -> None:
         self._submit(("tool_call", dict(record)))
 
+    @staticmethod
+    def _migrate_session_primary_keys(connection: sqlite3.Connection) -> None:
+        def primary_key(table: str) -> tuple[str, ...]:
+            rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+            return tuple(str(row[1]) for row in sorted(rows, key=lambda row: int(row[5])) if row[5])
+
+        migrations = {
+            "events": (
+                ("id",),
+                """CREATE TABLE events_new (
+                    id TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL,
+                    type TEXT NOT NULL, source TEXT NOT NULL, target TEXT NOT NULL,
+                    reply_to TEXT, payload_json TEXT NOT NULL, accepted_at REAL NOT NULL,
+                    PRIMARY KEY(session_id, id), UNIQUE(session_id, seq)
+                )""",
+                "id,session_id,seq,type,source,target,reply_to,payload_json,accepted_at",
+            ),
+            "executions": (
+                ("execution_id",),
+                """CREATE TABLE executions_new (
+                    execution_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                    activation_id TEXT, worker_epoch INTEGER, status TEXT NOT NULL,
+                    queued_at REAL NOT NULL, started_at REAL, ended_at REAL,
+                    namespace_reset INTEGER NOT NULL DEFAULT 0, metadata_json TEXT,
+                    PRIMARY KEY(session_id, execution_id)
+                )""",
+                "execution_id,session_id,activation_id,worker_epoch,status,queued_at,started_at,ended_at,namespace_reset,metadata_json",
+            ),
+        }
+        old_tables = [table for table, (old_key, _, _) in migrations.items() if primary_key(table) == old_key]
+        if not old_tables:
+            return
+        connection.execute("BEGIN")
+        try:
+            for table in old_tables:
+                _, create_sql, columns = migrations[table]
+                connection.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+                connection.execute(create_sql)
+                connection.execute(f"INSERT INTO {table}_new ({columns}) SELECT {columns} FROM {table}_old")
+                connection.execute(f"DROP TABLE {table}_old")
+                connection.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
     def _writer(self) -> None:
         connection: sqlite3.Connection | None = None
         pending: list[object] = []
@@ -89,7 +135,7 @@ class Journal:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY,
+                    id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     seq INTEGER NOT NULL,
                     type TEXT NOT NULL,
@@ -98,6 +144,7 @@ class Journal:
                     reply_to TEXT,
                     payload_json TEXT NOT NULL,
                     accepted_at REAL NOT NULL,
+                    PRIMARY KEY(session_id, id),
                     UNIQUE(session_id, seq)
                 );
                 CREATE TABLE IF NOT EXISTS deliveries (
@@ -123,7 +170,7 @@ class Journal:
                     error_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS executions (
-                    execution_id TEXT PRIMARY KEY,
+                    execution_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     activation_id TEXT,
                     worker_epoch INTEGER,
@@ -132,7 +179,8 @@ class Journal:
                     started_at REAL,
                     ended_at REAL,
                     namespace_reset INTEGER NOT NULL DEFAULT 0,
-                    metadata_json TEXT
+                    metadata_json TEXT,
+                    PRIMARY KEY(session_id, execution_id)
                 );
                 CREATE TABLE IF NOT EXISTS tool_calls (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,6 +194,7 @@ class Journal:
                 );
                 """
             )
+            self._migrate_session_primary_keys(connection)
             columns = {
                 str(row[1]) for row in connection.execute("PRAGMA table_info(activations)")
             }
@@ -166,7 +215,7 @@ class Journal:
                     continue
                 if item is not None:
                     pending.append(item)
-                if len(pending) >= 64:
+                if len(pending) >= 64 or (item is None and pending):
                     self._flush(connection, pending)
         except Exception as exc:
             self._error = f"{type(exc).__name__}: {exc}"
@@ -262,7 +311,8 @@ class Journal:
                         )
                     )
             connection.executemany(
-                "INSERT OR IGNORE INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO events (id,session_id,seq,type,source,target,reply_to,payload_json,accepted_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows["events"],
             )
             connection.executemany(
@@ -291,7 +341,7 @@ class Journal:
                 INSERT INTO executions
                 (execution_id,session_id,activation_id,worker_epoch,status,queued_at,started_at,ended_at,namespace_reset,metadata_json)
                 VALUES(:execution_id,:session_id,:activation_id,:worker_epoch,:status,:queued_at,:started_at,:ended_at,:namespace_reset,:metadata_json)
-                ON CONFLICT(execution_id) DO UPDATE SET
+                ON CONFLICT(session_id,execution_id) DO UPDATE SET
                   activation_id=excluded.activation_id,
                   worker_epoch=excluded.worker_epoch,
                   status=excluded.status,

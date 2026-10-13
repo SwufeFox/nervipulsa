@@ -10,6 +10,8 @@ This checkout contains a v0.4 development implementation. The scripted runtime
 exercises the asynchronous event contract without credentials. Live model calls use the OpenAI Chat Completions HTTP protocol directly. Nervipulsa
 keeps its own tool execution, transcript, and retry state; no model SDK is required.
 
+Python executions use a durable effect journal. Before an execute frame is written to the worker IPC channel, the runtime commits an intent and then commits the `dispatching` state with SQLite `synchronous=FULL`. If either commit fails, the frame is not sent. A terminal worker result is recorded as `observed`; a timeout, cancellation, worker loss, or failed observation remains unresolved because the side effect may have happened. Use `/effects` to review unresolved executions after restart. This protocol records uncertainty; it does not replay or roll back Python side effects.
+
 ## Runtime extension points
 
 The composition boundary lives in `nervipulsa.application`: `create_backend(settings)` selects a provider registry and `create_runtime(settings, workspace, echo=...)` assembles a session. Implement `ModelBackend.complete(request)` for another provider transport and register it through a `ProviderRegistry.create(settings)` implementation. Tool adapters implement `Tool` (`name`, `schema`, `validate`, and async `invoke`) and receive a narrow `ToolContext`: workspace and timeout settings plus an `EventSink.call(...)` interface. Add adapters to `DefaultToolRegistry(tools)` or supply a custom `ToolRegistry.create(workspace)`; the catalog is the actor's only tool dispatch surface. Built-in adapters live in `nervipulsa.tools`; the actor validates calls, stores tool receipts, journals them, and safely resumes interrupted commits.

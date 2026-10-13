@@ -122,6 +122,8 @@ def _valid_payload(event_type: str, data: Mapping[str, Any]) -> bool:
         return (
             isinstance(data.get("status"), str)
             and data.get("status") in {"succeeded", "failed", "timeout", "cancelled"}
+            and isinstance(data.get("effect_state"), str)
+            and data.get("effect_state") in {"untracked", "not_started", "observed", "unknown"}
             and text("stdout")
             and text("stderr")
             and isinstance(data.get("duration_ms"), (int, float))

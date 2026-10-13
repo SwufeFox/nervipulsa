@@ -1,10 +1,90 @@
 from __future__ import annotations
 
+
+import pytest
 import sqlite3
 import time
 from pathlib import Path
 
 from nervipulsa.journal import Journal
+
+
+def _inject_commit_failure(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    import nervipulsa.journal as journal_module
+
+    connect = sqlite3.connect
+    failed = False
+
+    class ConnectionProxy:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+        def commit(self) -> None:
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise sqlite3.OperationalError("injected commit failure")
+            self._connection.commit()
+
+    monkeypatch.setattr(
+        journal_module.sqlite3,
+        "connect",
+        lambda *args, **kwargs: ConnectionProxy(connect(*args, **kwargs)),
+    )
+
+
+def test_effect_intent_commit_failure_rolls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = Journal(tmp_path / "journal.sqlite")
+    journal.start()
+    try:
+        assert journal.flush()
+        _inject_commit_failure(monkeypatch, journal.path)
+        with pytest.raises(sqlite3.OperationalError, match="injected commit failure"):
+            journal.prepare_effect("session-a", "exec-intent-fail")
+        monkeypatch.undo()
+        assert journal.unresolved_effects() == []
+    finally:
+        assert journal.close()
+
+
+def test_effect_dispatch_commit_failure_leaves_intent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = Journal(tmp_path / "journal.sqlite")
+    journal.start()
+    try:
+        assert journal.flush()
+        journal.prepare_effect("session-a", "exec-dispatch-fail")
+        _inject_commit_failure(monkeypatch, journal.path)
+        with pytest.raises(sqlite3.OperationalError, match="injected commit failure"):
+            journal.mark_effect_dispatching("session-a", "exec-dispatch-fail")
+        monkeypatch.undo()
+        pending = journal.unresolved_effects("session-a")
+        assert [(item["execution_id"], item["state"]) for item in pending] == [
+            ("exec-dispatch-fail", "intent")
+        ]
+    finally:
+        assert journal.close()
+
+
+def test_effect_observed_commit_failure_leaves_dispatching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = Journal(tmp_path / "journal.sqlite")
+    journal.start()
+    try:
+        assert journal.flush()
+        journal.prepare_effect("session-a", "exec-observed-fail")
+        journal.mark_effect_dispatching("session-a", "exec-observed-fail")
+        _inject_commit_failure(monkeypatch, journal.path)
+        with pytest.raises(sqlite3.OperationalError, match="injected commit failure"):
+            journal.observe_effect("session-a", "exec-observed-fail", "succeeded")
+        monkeypatch.undo()
+        pending = journal.unresolved_effects("session-a")
+        assert [(item["execution_id"], item["state"]) for item in pending] == [
+            ("exec-observed-fail", "dispatching")
+        ]
+    finally:
+        assert journal.close()
 
 
 def test_flush_preserves_per_table_upsert_order_when_grouping(tmp_path: Path) -> None:
@@ -83,6 +163,62 @@ def test_flush_preserves_per_table_upsert_order_when_grouping(tmp_path: Path) ->
         assert journal.error is None
     finally:
         assert journal.close()
+
+
+def test_durable_effect_intent_and_observed_commit(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "journal.sqlite")
+    journal.start()
+    try:
+        assert journal.flush()
+        journal.prepare_effect("session-a", "exec-pending")
+        journal.prepare_effect("session-a", "exec-observed")
+        journal.mark_effect_dispatching("session-a", "exec-observed")
+        journal.observe_effect("session-a", "exec-observed", "succeeded")
+        assert [(item["execution_id"], item["state"]) for item in journal.unresolved_effects("session-a")] == [
+            ("exec-pending", "intent")
+        ]
+        assert journal.unresolved_effects("session-b") == []
+        with sqlite3.connect(journal.path) as connection:
+            assert connection.execute(
+                "SELECT state,outcome FROM durable_effects WHERE execution_id='exec-observed'"
+            ).fetchone() == ("observed", "succeeded")
+    finally:
+        assert journal.close()
+
+def test_durable_effect_dispatching_is_unresolved(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "journal.sqlite")
+    journal.start()
+    try:
+        assert journal.flush()
+        journal.prepare_effect("session-a", "exec-dispatching")
+        journal.mark_effect_dispatching("session-a", "exec-dispatching")
+        pending = journal.unresolved_effects("session-a")
+        assert len(pending) == 1
+        assert pending[0]["state"] == "dispatching"
+        with pytest.raises(RuntimeError, match="already dispatched"):
+            journal.mark_effect_dispatching("session-a", "exec-dispatching")
+    finally:
+        assert journal.close()
+
+
+def test_effect_ids_are_scoped_by_session(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "journal.sqlite")
+    journal.start()
+    try:
+        assert journal.flush()
+        journal.prepare_effect("session-a", "same-execution")
+        journal.prepare_effect("session-b", "same-execution")
+        records = journal.unresolved_effects()
+        assert {
+            (item["session_id"], item["execution_id"], item["state"])
+            for item in records
+        } == {
+            ("session-a", "same-execution", "intent"),
+            ("session-b", "same-execution", "intent"),
+        }
+    finally:
+        assert journal.close()
+
 
 def test_session_scoped_event_and_execution_ids(tmp_path: Path) -> None:
     from nervipulsa.events import Event

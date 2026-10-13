@@ -166,10 +166,13 @@ class Runtime:
             "api_key": "set" if self.settings.api_key else "missing",
         }
 
+
     def logs(self, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
         self.journal.flush(timeout=2)
         return self.journal.recent(self.bus.session_id, limit)
 
+    def unresolved_effects(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self.journal.unresolved_effects(limit=limit)
     def apply_provider_settings(self, settings: Settings, backend: Any) -> None:
         self.settings = settings
         self.backend = backend

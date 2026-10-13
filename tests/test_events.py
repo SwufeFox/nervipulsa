@@ -10,6 +10,7 @@ from nervipulsa.events import MAX_HANDLER_RESULTS_PER_EXECUTION, Bus, Lane, Mail
 def _finished(execution_id: str = "exec-1", *, expected_handler_count: int = 0) -> dict:
     return {
         "status": "succeeded",
+        "effect_state": "untracked",
         "stdout": "",
         "stderr": "",
         "duration_ms": 1,
@@ -440,5 +441,29 @@ def test_call_during_handling_stays_in_the_next_batch() -> None:
         assert [event.payload["text"] for event in batch] == ["first"]
         nxt = await box.take_batch(10)
         assert [event.payload["text"] for event in nxt] == ["second"]
+
+    asyncio.run(body())
+
+
+def test_durable_effect_state_survives_event_routing() -> None:
+    async def body() -> None:
+        bus = Bus()
+        box = Mailbox("llm")
+        bus.register("python.finished", box)
+        bus.start()
+        payload = _finished()
+        payload["effect_state"] = "unknown"
+        delivery = bus.emitter("python_host").call("python.finished", payload, reply_to="exec-1")
+        assert delivery.accepted
+        event = box.drain_available(1)[0]
+        assert event.payload["effect_state"] == "unknown"
+        invalid_payload = _finished()
+        invalid_payload["effect_state"] = "maybe"
+        invalid = bus.emitter("python_host").call(
+            "python.finished", invalid_payload, reply_to="exec-invalid"
+        )
+        assert not invalid.accepted
+        assert invalid.reason == "invalid_payload"
+        bus.close()
 
     asyncio.run(body())

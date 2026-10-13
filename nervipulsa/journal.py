@@ -409,6 +409,103 @@ class Journal:
         finally:
             connection.close()
 
+    def unresolved_effects(self, session_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """List effects whose worker outcome has no durable observed commit."""
+        if not self.path.exists():
+            return []
+        connection = sqlite3.connect(self.path, timeout=2)
+        connection.row_factory = sqlite3.Row
+        try:
+            tables = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_effects'"
+            ).fetchone()
+            if tables is None:
+                return []
+            return [dict(row) for row in connection.execute(
+                "SELECT execution_id, session_id, state, intent_at, observed_at, outcome, error "
+                "FROM durable_effects WHERE state!='observed' "
+                + ("AND session_id=? " if session_id is not None else "")
+                + "ORDER BY intent_at DESC LIMIT ?",
+                ((session_id, limit) if session_id is not None else (limit,))
+            )]
+        finally:
+            connection.close()
+
+    def prepare_effect(self, session_id: str, execution_id: str) -> None:
+        """Synchronously commit intent before allowing worker execution."""
+        connection = sqlite3.connect(self.path, timeout=5)
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("""CREATE TABLE IF NOT EXISTS durable_effects (
+                session_id TEXT NOT NULL, execution_id TEXT NOT NULL,
+                state TEXT NOT NULL, intent_at REAL NOT NULL,
+                observed_at REAL, outcome TEXT, error TEXT,
+                PRIMARY KEY(session_id, execution_id))""")
+            connection.execute(
+                "INSERT OR IGNORE INTO durable_effects(session_id,execution_id,state,intent_at) VALUES(?,?,?,?)",
+                (session_id, execution_id, "intent", time.time()),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def mark_effect_dispatching(self, session_id: str, execution_id: str) -> None:
+        """Durably record that the execute frame was sent to the worker."""
+        connection = sqlite3.connect(self.path, timeout=5)
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            cursor = connection.execute(
+                "UPDATE durable_effects SET state='dispatching' WHERE session_id=? AND execution_id=? AND state='intent'",
+                (session_id, execution_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("durable effect intent is missing or already dispatched")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def observe_effect(self, session_id: str, execution_id: str, outcome: str) -> None:
+        """Synchronously commit the observed worker terminal."""
+        connection = sqlite3.connect(self.path, timeout=5)
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            cursor = connection.execute(
+                "UPDATE durable_effects SET state='observed', observed_at=?, outcome=?, error=NULL "
+                "WHERE session_id=? AND execution_id=? AND state='dispatching'",
+                (time.time(), outcome, session_id, execution_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("durable effect intent is missing")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def fail_effect_observation(self, session_id: str, execution_id: str, error: str) -> None:
+        connection = sqlite3.connect(self.path, timeout=5)
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            cursor = connection.execute(
+                "UPDATE durable_effects SET state='unknown', error=? WHERE session_id=? AND execution_id=? AND state='dispatching'",
+                (error[:1000], session_id, execution_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("durable effect intent is missing")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def execution_event(self, session_id: str, execution_id: str) -> dict[str, Any] | None:
         if not self.path.exists():
             return None

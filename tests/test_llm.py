@@ -247,6 +247,7 @@ def test_incomplete_handler_status_reaches_provider_activation(workspace: Path) 
                 "python.finished",
                 {
                     "status": "timeout",
+                    "effect_state": "unknown",
                     "stdout": "",
                     "stderr": "",
                     "duration_ms": 400,
@@ -972,6 +973,7 @@ def test_incremental_length_matches_a_full_serialization() -> None:
                 reply_to=f"e{seq}",
                 payload={
                     "status": "succeeded",
+                    "effect_state": "untracked",
                     "stdout": "x" * (step * 37),
                     "stderr": "",
                     "stdout_bytes": step * 37,
@@ -1348,3 +1350,16 @@ def test_host_delivery_rejection_status_reaches_provider_and_is_acknowledged(wor
             await runtime.shutdown()
 
     asyncio.run(body())
+
+
+
+def test_context_projector_keeps_durable_effect_state() -> None:
+    transcript = Transcript()
+    event = Event(
+        "session", "finished", 1, "python.finished", "python_host", "llm",
+        "exec-1", {"status": "failed", "effect_state": "unknown"}, 0.0,
+    )
+    assert transcript.project(event)["projected"] is True
+    projector = ContextProjector(transcript)
+    envelope = json.loads(projector.snapshot()[-1]["content"])
+    assert envelope["payload"]["effect_state"] == "unknown"

@@ -36,6 +36,7 @@ _TOP_LEVEL_COMMANDS = (
     "/cancel",
     "/retry",
     "/logs",
+    "/effects",
     "/output",
     "/exit",
     "/uninstall",
@@ -158,6 +159,7 @@ def handle_line(runtime: Runtime, line: str) -> bool:
         commands = (
             ("/status", "model, Python execution, and context budget"),
             ("/logs", "event ids, delivery, and context changes"),
+            ("/effects", "unresolved durable Python effects"),
             ("/output <id> [stdout|stderr|both]", "full saved output"),
             ("/cancel [id]", "stop the running execution, or the specified queued or running code"),
             ("/retry", "resume a paused model call"),
@@ -253,6 +255,17 @@ def handle_line(runtime: Runtime, line: str) -> bool:
             runtime.echo(
                 f"execution {execution['execution_id']} {execution['status']} epoch={execution['worker_epoch']}"
             )
+        return False
+    if stripped == "/effects":
+        unresolved = runtime.unresolved_effects()
+        if not unresolved:
+            runtime.echo("No unresolved durable effects.")
+        for effect in unresolved:
+            runtime.echo(
+                f"effect session={effect['session_id']} execution={effect['execution_id']} "
+                f"{effect['state']} intent_at={effect['intent_at']} error={effect.get('error') or '-'}"
+            )
+            runtime.echo("  Do not automatically replay: execution may already have taken effect.")
         return False
     if stripped.startswith("/output"):
         parts = stripped.split()

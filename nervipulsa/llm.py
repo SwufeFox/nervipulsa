@@ -497,6 +497,7 @@ class Transcript:
                             {
                                 "execution_id": envelope.get("reply_to"),
                                 "status": payload.get("status"),
+                                "effect_state": payload.get("effect_state"),
                                 "duration_ms": payload.get("duration_ms"),
                                 "stdout_bytes": payload.get("stdout_bytes"),
                                 "stderr_bytes": payload.get("stderr_bytes"),
@@ -950,6 +951,7 @@ class LLMActor:
                     "added_chars": added_chars,
                 }
                 if event.type == "python.finished":
+                    detail["effect_state"] = event.payload.get("effect_state")
                     detail["output_preview_chars"] = sum(
                         len(str(event.payload.get(stream) or ""))
                         for stream in ("stdout", "stderr")

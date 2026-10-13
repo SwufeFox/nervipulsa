@@ -420,3 +420,20 @@ def test_existing_journal_migrates_activation_context_column(tmp_path: Path) -> 
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(activations)")}
     assert "context_json" in columns
+
+
+def test_effects_command_lists_unresolved_records() -> None:
+    class RuntimeStub:
+        def __init__(self) -> None:
+            self.output: list[str] = []
+            self.echo = self.output.append
+
+        def unresolved_effects(self):
+            return [{"execution_id": "exec-1", "session_id": "session-2", "state": "dispatching", "intent_at": 12.5, "error": None}]
+
+    runtime = RuntimeStub()
+    assert handle_line(runtime, "/effects") is False
+    assert runtime.output == [
+        "effect session=session-2 execution=exec-1 dispatching intent_at=12.5 error=-",
+        "  Do not automatically replay: execution may already have taken effect.",
+    ]

@@ -1,7 +1,7 @@
 # Nervipulsa 的事件原生 Agent Runtime：有界 Handler 投递与生命周期语义
 
-**研究稿（持续研究中）**  
-**版本日期：** 2026-10-05（Asia/Shanghai）  
+- **状态：** 研究稿（持续研究中）
+- **版本日期：** 2026-10-05（Asia/Shanghai）
 - **项目：** Nervipulsa
 - **证据更新：** 2026-10-13（Asia/Shanghai）；见下方日期补记。
 
@@ -9,7 +9,7 @@
 
 基于工具调用循环构建的 Agent harness，通常把工具执行结果视为唯一的运行时反馈。本文研究一种事件原生扩展：持久 Python worker 可注册完成回调，回调结果作为独立事件进入 agent 的观察流；事件总线、邮箱和执行生命周期负责关联、排序、容量控制与审计。研究重点不是证明回调 API 可运行，而是确定在并发、背压、超时和 worker 重启下，回调结果能否以有限资源进入模型上下文，同时保留可解释的失败语义。
 
-Nervipulsa 当前实现采用每次 Python 请求的终态预留、最多 16 个 handler 结果槽位、全局有界 handler 容量、终态报告预期与缺失结果，以及按事件序号投影观察的 coalescer。源码审查与自动化测试覆盖这些主要账本路径；静态 `python_environment` 以受限路径、发行版 metadata 和 AST 线索发现自定义库，不导入代码、不自动安装。event-loop 阻塞回归证明环境扫描在线程执行期间，runtime loop 仍可接受后续用户消息，扫描结果随后进入模型上下文。2026-10-05 环境发现阶段的全量回归为 77 passed、1 skipped；2026-10-13 的 fault-semantics 研究版本全量套件为 124 passed。该研究版本新增两个经过门控的进程终止探针：Journal 预先 flush 后，在请求出队前和终态消费前重启都未从旧记录重放。它们只提供两个窗口的有限进程级证据，不构成通用跨进程恢复或断电保证。尚无并发负载证据。
+Nervipulsa 当前实现采用每次 Python 请求的终态预留、最多 16 个 handler 结果槽位、全局有界 handler 容量、终态报告预期与缺失结果，以及按事件序号投影观察的 coalescer。源码审查与自动化测试覆盖这些主要账本路径；静态 `python_environment` 以受限路径、发行版 metadata 和 AST 线索发现自定义库，不导入代码、不自动安装。event-loop 阻塞回归证明环境扫描在线程执行期间，runtime loop 仍可接受后续用户消息，扫描结果随后进入模型上下文。2026-10-05 环境发现阶段的全量回归为 77 passed、1 skipped；2026-10-13 的 fault-semantics 研究版本全量套件为 124 passed。该研究版本新增两个经过门控的进程终止探针：Journal 预先 flush 后，在请求出队前和终态消费前重启都未从旧记录重放。它们只提供两个窗口的有限进程级证据，不构成通用跨进程恢复或断电保证。尚无并发负载证据。另于 2026-10-13 合入 Durable Effect Protocol，以 `intent → dispatching → observed | unknown` 记录 Python 执行副作用的可观察状态，并用真实 SQLite commit 故障注入验证关键提交边界；该 ledger 提供未知结果的持久审阅，不恢复任务或 transcript，也不自动重放。合并两条分支并修正旧 worker-exit 断言后，全量测试为 137 passed in 102.03s。
 
 当前证据支持将其视为一个有真实端到端行为、具备初步有界投递契约的研究原型。它还不足以证明该桥接在成本、稳定性或通用性上优于普通工具调用循环。3425 handler 任务共两次 committed activation、一次 execution、9,589 provider usage tokens；静态环境发现任务则共三次 committed activation、一次 execution、14,134 tokens。两者是不同任务，不能作成本比较。高并发压力、cancel/shutdown 组合及严格配对成本比较仍需实验判定。
 
@@ -100,6 +100,14 @@ Host UI 错误不一定单独投影为模型消息，但 incomplete terminal 含
 最终 cleanup revision 的定向测试为 **2 passed in 7.49s**，全量套件为 **124 passed in 79.57s**。相关套件的一次早期运行有 1 项 `wait_until_idle(8)` 超时（66 passed、1 failed）；该项单独重跑通过，相关套件随后通过（67 passed in 132.35s）。这些数据来自研究 worktree；相关套件计时早于最后的 PID cleanup 收紧，全量与定向结果则是在 cleanup 收紧后取得。完整故障矩阵、命令与 JSON 记录见 [Failure Semantics Baseline](failure_semantics.md)、[`failure_baseline.json`](../benchmarks/failure_baseline.json) 和 [`test_subprocess_recovery.py`](../tests/test_subprocess_recovery.py)。
 
 
+### 4.6 Durable Effect Protocol
+
+提交 `6484416` 加入 per-execution `durable_effects` ledger。Host 在写 IPC execute frame 前先同步提交 `intent` 和 `dispatching`；dispatching commit 失败时不会发送 frame。收到 worker terminal 后，Host 先提交 `observed`，再发布 `python.finished`。若 observed commit 失败，Host 发出 `effect_state=unknown`；即使后续 unknown 写入失败，旧的 `dispatching` 行仍可由 `/effects` 发现。
+
+真实 SQLite commit 故障注入验证了 intent commit 回滚后无记录、dispatch commit 回滚后保留 intent、observed commit 回滚后保留 dispatching；Host 集成测试检查 dispatch fail-closed 和 observed failure 的 unknown terminal。该协议把副作用结果不确定性持久化供人工审阅；它不把 Python 副作用与 SQLite 做原子事务，不恢复 transcript，不自动重放，也不提供 exactly-once 或 power-loss 保证。状态机和测试证据见 [Durable Effect Protocol](durable_effect_protocol.md)。
+
+## 5. 讨论
+
 ### 5.1 架构判断
 
 目前较有证据支持的选择是保留窄的完成 handler bridge，并使用每执行预期数、有限 handler 槽位、独立终态预留和显式 incomplete/unknown 状态。每个成功投递的 handler 仍保留独立 journal 事件；这样既能审计单条结果，也避免无界 fan-out 挤占普通事件与终态容量。
@@ -128,9 +136,9 @@ Host UI 错误不一定单独投影为模型消息，但 incomplete terminal 含
 
 ## 6. 结论
 
-Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主干，并实现了 handler 结果的初步有界投递协议。历史 live CLI 试验提供了多个 handler 进入模型上下文的真实证据；2026-10-05 的 3425 CLI 复验验证了模型理解 `on_finished`、执行安全 Python 任务，并在后续 activation 中使用 terminal 与 handler 观察。静态环境发现任务也完成了先发现后 smoke test；event-loop 阻塞回归验证扫描期间 loop 可调度并接收后续输入。2026-10-05 全量结果为 77 passed、1 skipped（junction 集成因 runner 命令问题跳过）。2026-10-13 的 fault-semantics 研究分支在同一生产源码基线上加入五个 controlled Runtime probes 和两个进程终止 probes；cleanup revision 的全量套件为 124 passed in 79.57s。进程终止结果只覆盖两个 Journal 已预先 flush 的 fault point，不证明并发压力下的容量行为、WAL 写入中断、断电恢复或一般任务恢复。
+Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主干，并实现 handler 结果的初步有界投递协议。历史 live CLI 试验提供了多个 handler 进入模型上下文的真实证据；2026-10-05 的 3425 CLI 复验验证了模型理解 `on_finished`、执行 Python 任务，并在后续 activation 中使用 terminal 与 handler 观察。静态环境发现任务也完成先发现后 smoke test；event-loop 回归验证扫描期间 loop 能调度并接收后续输入。2026-10-13 fault-semantics 基线分支全量套件为 124 passed；其两个进程终止探针只覆盖预先 flush Journal 后的门控窗口。随后合入的 Durable Effect Protocol 增加每次 Python 执行的 `intent → dispatching → observed | unknown` ledger，并通过真实 SQLite commit 故障注入验证失败边界。合并两条分支并修正 worker-exit 回归断言后，`python -m pytest -q` 为 **137 passed in 102.03s**。这些结果不证明并发压力下的容量行为、WAL 写入中断、断电恢复、通用任务恢复或 exactly-once 外部效果。
 
-因此，当前结论是“已获得单轮当前版本 live 证据、可继续验证的事件原生 harness 原型”，而不是“已被证明更令人满意的新架构”。下一阶段优先验证 Journal 写入/flush 故障边界、并发容量与生命周期压力、缺失/拒绝结果对模型行为的影响，以及有/无 handler 的配对基准。完成这些实验后，再决定保留窄 bridge、扩展为通用订阅，或移除该机制。
+因此，当前结论仍是“已获得单轮当前版本 live 证据、可继续验证的事件原生 harness 原型”，不是“已被证明优于普通 harness 的新架构”。下一阶段优先覆盖 `dispatching` commit 前后及 worker 副作用前后的进程终止窗口，验证 `/effects` 在重启后的人工对账信息；另测并发容量与生命周期压力、缺失/拒绝结果对模型行为的影响，以及有/无 handler 的配对基准。电源故障和存储设备耐久性须与进程终止测试分开评估。完成这些实验后，再决定保留窄 bridge、扩展为通用订阅，或移除该机制。
 
 ## 参考材料
 
@@ -141,6 +149,7 @@ Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主
 5. “LLMs are General Asynchronous Agents,” [arXiv:2609.35427 v1](https://arxiv.org/abs/2609.35427v1)。
 6. 历史验证：`python -m pytest`，77 passed、1 skipped、47.32 s（2026-10-05；junction skip 原因见研究日志）。
 7. 2026-10-13 fault-semantics 专项报告：[failure_semantics.md](failure_semantics.md)，原始记录见 [`failure_baseline.json`](../benchmarks/failure_baseline.json)。cleanup revision 全量命令 `python -m pytest -q` 为 124 passed in 79.57s。
+8. 当前 effect ledger 状态与失败注入：[durable_effect_protocol.md](durable_effect_protocol.md)；实现提交 `6484416`。
 
 ## 后续实验清单
 
@@ -150,6 +159,7 @@ Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主
 4. 验证 handler 双路径拒绝时，模型是否得到可行动的 incomplete/error observation。
 5. 运行严格配对 benchmark，测量 activation、provider 请求、延迟、token 和任务正确率。
 6. 以用例和测量结果决定是否需要通用命名事件订阅 API。
+7. 在 Durable Effect Protocol 的 `dispatching` 提交前后、worker 副作用前后注入进程终止；重启后检查 `/effects` 并验证人工对账路径。不要把进程终止证据外推为断电或存储设备耐久性证据。
 
 ### 2026-10-05 补记：静态 Python 环境发现
 

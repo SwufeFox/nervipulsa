@@ -10,7 +10,7 @@ This checkout contains a v0.4 development implementation. The scripted runtime
 exercises the asynchronous event contract without credentials. Live model calls use the OpenAI Chat Completions HTTP protocol directly. Nervipulsa
 keeps its own tool execution, transcript, and retry state; no model SDK is required.
 
-Python executions use a durable effect journal. Before an execute frame is written to the worker IPC channel, the runtime commits an intent and then commits the `dispatching` state with SQLite `synchronous=FULL`. If either commit fails, the frame is not sent. A terminal worker result is recorded as `observed`; a timeout, cancellation, worker loss, or failed observation remains unresolved because the side effect may have happened. Use `/effects` to review unresolved executions after restart. This protocol records uncertainty; it does not replay or roll back Python side effects.
+Python executions use a durable effect ledger. Before an execute frame is written to the worker IPC channel, the runtime commits an `intent` and then `dispatching` with SQLite `synchronous=FULL`; if either commit fails, it does not send the frame. A worker terminal is committed as `observed` before `python.finished` is published. If outcome persistence fails after dispatch, the terminal reports `unknown` and `/effects` lists the unresolved row for review. The protocol does not automatically replay Python or roll back side effects.
 
 ## Runtime extension points
 
@@ -358,7 +358,7 @@ stale-tag recovery, or seen-line enforcement. This helper is not a Python sandbo
 
 ## Research documents
 
-See [`docs/README.md`](docs/README.md) for the architecture research log, paper draft, focused failure-semantics report, and reproducible evidence.
+See [`docs/README.md`](docs/README.md) for the architecture research log, paper draft, baseline failure report, durable effect protocol, and reproducible evidence.
 
 ## Development status
 
@@ -376,10 +376,11 @@ This package stays labeled v0.4-dev. Three claims are kept separate:
   was called after migration.
 
 Known boundaries: `python_exec` runs with the current user's permissions and is
-not a sandbox; acceptance is process-local, and the runtime does not provide
-general durable task/activation recovery or rollback of file writes. A 2026-10-13
-research probe found no replay at two gated crash points after explicitly flushing
-the Journal: an accepted request before host dequeue, and a queued terminal before
-actor consumption. This is limited process-termination evidence, not a power-loss,
-WAL-write interruption, or exactly-once guarantee. A provider may also have accepted
-a request whose response was lost.
+not a sandbox; event admission is process-local, and the runtime does not provide
+general task/transcript recovery, rollback of file writes, or exactly-once external
+effects. The durable effect ledger records intent and unresolved outcomes for
+manual review; it does not replay executions. The two 2026-10-13 process-kill probes
+in [`docs/failure_semantics.md`](docs/failure_semantics.md) predate that ledger and
+cover only their explicitly flushed baseline windows. See
+[`docs/durable_effect_protocol.md`](docs/durable_effect_protocol.md) for its current
+contract and fault-injection evidence.

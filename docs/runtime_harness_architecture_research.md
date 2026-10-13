@@ -609,4 +609,32 @@ The randomized A0/A1/A2 mechanism comparison ran five paired blocks (15/15 scrip
 
 ### Interpretation and next work
 
-The strongest supported conclusion is narrow: after confirmed Journal flush, a fresh Runtime did not replay the old accepted request or queued terminal at the two gated Windows process-kill points. Nervipulsa still has no general durable admission, task/transcript recovery, automatic effect reconciliation, or exactly-once guarantee in this baseline. Next, inject failures around Journal writer enqueue and SQLite commit; then compare explicit `unknown`, retry, and reconciliation behavior for side-effecting work. Keep model quality and cost measurement as a separate matched-task study.
+At the pre-protocol checkpoint, evidence supported only this narrow claim: after confirmed Journal flush, a fresh Runtime did not replay the old accepted request or queued terminal at the two gated Windows process-kill points. The baseline still had no durable admission, task/transcript recovery, automatic effect reconciliation, or exactly-once guarantee. The next-step commit-failure study described here was completed in the following slice; it did not change those recovery limits.
+
+## 2026-10-13 — Durable Effect Protocol and SQLite commit failures
+
+### Implementation and state contract
+
+Commit `6484416` adds a per-execution SQLite ledger keyed by `(session_id, execution_id)`. Before the Python worker receives an execute frame, the host synchronously commits `intent` and then `dispatching` using a connection set to `synchronous=FULL`. It records `observed` after receiving a worker terminal and before emitting `python.finished`. If the terminal commit fails, the event reports `effect_state=unknown`; if persisting that unknown marker also fails, the earlier `dispatching` row remains unresolved. `/effects` lists unresolved rows across sessions and warns against automatic replay.
+
+This is durable outcome bookkeeping, not a durable task or transcript store. It does not make arbitrary Python effects atomic with SQLite, replay work, roll back external changes, or guarantee exactly-once behavior. A pre-dispatch intent/dispatch commit failure prevents the execute frame from being sent. A lost or partial IPC write after the dispatch commit is treated as unknown.
+
+### Commit fault injection
+
+The earlier failure study identified commit boundaries but did not exercise SQLite commit failures. Three new Journal tests wrap a real SQLite connection and fail its first `commit()` call:
+
+- intent commit failure rolls back and leaves no effect row;
+- dispatch commit failure leaves the prior `intent` row;
+- observed commit failure leaves `dispatching` unresolved.
+
+Host-level tests verify the dispatch failure sends no execute frame and an observed commit failure produces an `unknown` terminal. Failure to persist the unknown marker keeps the prior `dispatching` row reviewable. See [durable_effect_protocol.md](durable_effect_protocol.md) for the full state table and links to tests.
+
+### Verification and limits
+
+The isolated protocol branch passed **29 protocol-focused tests** and **124 tests in its full suite**. `python -m compileall -q nervipulsa tests` and `git diff --check` passed. After both branches were merged, the first combined suite completed with **135 passed, 2 failed**: the two pre-protocol worker-exit assertions expected no `effect_state`, while the merged protocol correctly emits `unknown`. The regression now asserts `effect_state=unknown` for both marker outcomes; `python -m pytest tests/test_fault_semantics.py -q` passed **11 tests in 27.09s**. The combined rerun passed **137 tests in 102.03s**.
+
+These tests establish transaction behavior at injected SQLite commit failures and host ordering around dispatch/terminal publication. They do not test power loss, filesystem/controller guarantees, or arbitrary process termination while a ledger commit is in flight. The older two-point process probes are pre-protocol baseline tests; they do not verify recovery behavior of `durable_effects`.
+
+### Next experiments
+
+Inject termination after the durable `dispatching` commit but before, during, and after the worker side effect; reopen the ledger and verify `/effects` preserves an actionable unresolved state. Then test manual reconciliation behavior. Keep power-loss claims separate from process-kill tests, and do not add automatic replay without an idempotency or reconciliation contract.

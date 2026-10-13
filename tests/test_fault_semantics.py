@@ -121,7 +121,7 @@ def test_worker_exit_does_not_identify_external_effect(
             assert terminal.payload["status"] == "failed"
             assert terminal.payload["reason"] == "worker_exit"
             assert terminal.payload["namespace_reset"] is True
-            assert "effect_state" not in terminal.payload
+            assert terminal.payload["effect_state"] == "unknown"
             assert marker.exists() is effect_observed
             # Check for duplicate writes during a short, live-host observation window.
             await asyncio.sleep(0.15)

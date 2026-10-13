@@ -2,13 +2,14 @@
 
 **研究稿（持续研究中）**  
 **版本日期：** 2026-10-05（Asia/Shanghai）  
-**项目：** Nervipulsa
+- **项目：** Nervipulsa
+- **证据更新：** 2026-10-13（Asia/Shanghai）；见下方日期补记。
 
 ## 摘要
 
 基于工具调用循环构建的 Agent harness，通常把工具执行结果视为唯一的运行时反馈。本文研究一种事件原生扩展：持久 Python worker 可注册完成回调，回调结果作为独立事件进入 agent 的观察流；事件总线、邮箱和执行生命周期负责关联、排序、容量控制与审计。研究重点不是证明回调 API 可运行，而是确定在并发、背压、超时和 worker 重启下，回调结果能否以有限资源进入模型上下文，同时保留可解释的失败语义。
 
-Nervipulsa 当前实现采用每次 Python 请求的终态预留、最多 16 个 handler 结果槽位、全局有界 handler 容量、终态报告预期与缺失结果，以及按事件序号投影观察的 coalescer。源码审查与自动化测试覆盖这些主要账本路径；静态 `python_environment` 以受限路径、发行版 metadata 和 AST 线索发现自定义库，不导入代码、不自动安装。本文新增一次 event-loop 阻塞回归：环境扫描在线程执行期间，runtime loop 仍可接受后续用户消息，扫描结果随后进入模型上下文。最新全量回归为 77 passed、1 skipped。该实现已有本地 CLI 先发现后 smoke test 的行为证据，但尚无并发负载或跨进程恢复证据。
+Nervipulsa 当前实现采用每次 Python 请求的终态预留、最多 16 个 handler 结果槽位、全局有界 handler 容量、终态报告预期与缺失结果，以及按事件序号投影观察的 coalescer。源码审查与自动化测试覆盖这些主要账本路径；静态 `python_environment` 以受限路径、发行版 metadata 和 AST 线索发现自定义库，不导入代码、不自动安装。event-loop 阻塞回归证明环境扫描在线程执行期间，runtime loop 仍可接受后续用户消息，扫描结果随后进入模型上下文。2026-10-05 环境发现阶段的全量回归为 77 passed、1 skipped；2026-10-13 的 fault-semantics 研究版本全量套件为 124 passed。该研究版本新增两个经过门控的进程终止探针：Journal 预先 flush 后，在请求出队前和终态消费前重启都未从旧记录重放。它们只提供两个窗口的有限进程级证据，不构成通用跨进程恢复或断电保证。尚无并发负载证据。
 
 当前证据支持将其视为一个有真实端到端行为、具备初步有界投递契约的研究原型。它还不足以证明该桥接在成本、稳定性或通用性上优于普通工具调用循环。3425 handler 任务共两次 committed activation、一次 execution、9,589 provider usage tokens；静态环境发现任务则共三次 committed activation、一次 execution、14,134 tokens。两者是不同任务，不能作成本比较。高并发压力、cancel/shutdown 组合及严格配对成本比较仍需实验判定。
 
@@ -87,7 +88,17 @@ Host UI 错误不一定单独投影为模型消息，但 incomplete terminal 含
 
 源码审计发现，`python_environment` 的路径与 metadata/AST 扫描原本在工具派发函数内同步运行，会占住 `LLMActor` 所在线程。实现现已将扫描放入 `asyncio.to_thread`，并沿提交链路逐层 await；事件发布、activation 关联与失败回执形状保持不变。确定性回归用阻塞扫描函数制造可控等待，断言期间 loop callback 能运行，第二条 `user.message` 被接受，扫描释放后发现事件与该消息共同进入后续 provider 请求。该测试证明 loop 可调度性和消息入队，不证明 actor 在首个 activation 结束前并行推理或模型能同时处理两个任务。最新全量测试为 77 passed、1 skipped；没有进行 live CLI 或负载下性能比较。
 
-## 5. 讨论
+## 2026-10-13 补充：有限进程终止证据
+
+本轮在固定生产源码基线 `41c83d0c3f2fbc81d49993072cbfa585d7047742` 上新增研究测试，没有修改 runtime 生产源码。父进程启动独立 Python 子进程运行 Runtime、PythonHost 和 SQLite Journal，在两个明确的 mailbox gate 上记录 Journal 与 effect marker，先显式 flush Journal，再强制终止 Runtime 子进程树；随后以相同 workspace 和 Journal 启动新的 OS 进程及 Runtime。
+
+1. **请求已接纳、host 尚未 dequeue：**旧 session 的 `python.requested` 行已出现在 Journal，marker 尚不存在。新 Runtime 使用不同 session，不重放旧 request 或 terminal，marker 仍不存在。
+2. **终态已入队、actor 尚未消费：**worker 已写入 marker，`python.finished` 已排入 actor mailbox 且写入 Journal。终止后新 Runtime 不重放旧 request 或 terminal，marker 保持存在。
+
+这说明 Journal 行在这两个测试窗口中是观察记录，不是启动时的重放指令。测试验证的是**预先 flush 后的 Windows 进程终止**，不是断电、SQLite/WAL 写入中断或存储设备故障；marker 是本地文件 oracle，不代表远程副作用。结果也不证明任意 crash window 都没有 replay、自动恢复、exactly-once 或 retry safety。
+
+最终 cleanup revision 的定向测试为 **2 passed in 7.49s**，全量套件为 **124 passed in 79.57s**。相关套件的一次早期运行有 1 项 `wait_until_idle(8)` 超时（66 passed、1 failed）；该项单独重跑通过，相关套件随后通过（67 passed in 132.35s）。这些数据来自研究 worktree；相关套件计时早于最后的 PID cleanup 收紧，全量与定向结果则是在 cleanup 收紧后取得。完整故障矩阵、命令与 JSON 记录见 [Failure Semantics Baseline](failure_semantics.md)、[`failure_baseline.json`](../benchmarks/failure_baseline.json) 和 [`test_subprocess_recovery.py`](../tests/test_subprocess_recovery.py)。
+
 
 ### 5.1 架构判断
 
@@ -117,9 +128,9 @@ Host UI 错误不一定单独投影为模型消息，但 incomplete terminal 含
 
 ## 6. 结论
 
-Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主干，并实现了 handler 结果的初步有界投递协议。历史 live CLI 试验提供了多个 handler 进入模型上下文的真实证据；2026-10-05 的当前版本 3425 CLI 复验进一步验证了模型理解 `on_finished`、成功执行安全 Python 任务、terminal 与 handler 观察进入同一后续 activation，并被最终回答正确使用。当前静态环境发现版本也在本地 CLI 中完成 `widgetkit` 的先发现后 smoke test 流程；最新异步扫描改动由阻塞回归验证 event loop 可响应并接收后续输入。当前源码审计与 77 passed、1 skipped 的全量测试支持主要容量、关联、回滚、排序、发现结果回执和 event-loop 非阻塞路径；OS junction containment 集成仍因 runner 命令问题跳过。
+Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主干，并实现了 handler 结果的初步有界投递协议。历史 live CLI 试验提供了多个 handler 进入模型上下文的真实证据；2026-10-05 的 3425 CLI 复验验证了模型理解 `on_finished`、执行安全 Python 任务，并在后续 activation 中使用 terminal 与 handler 观察。静态环境发现任务也完成了先发现后 smoke test；event-loop 阻塞回归验证扫描期间 loop 可调度并接收后续输入。2026-10-05 全量结果为 77 passed、1 skipped（junction 集成因 runner 命令问题跳过）。2026-10-13 的 fault-semantics 研究分支在同一生产源码基线上加入五个 controlled Runtime probes 和两个进程终止 probes；cleanup revision 的全量套件为 124 passed in 79.57s。进程终止结果只覆盖两个 Journal 已预先 flush 的 fault point，不证明并发压力下的容量行为、WAL 写入中断、断电恢复或一般任务恢复。
 
-因此，当前结论是“已获得单轮当前版本 live 证据、可继续验证的事件原生 harness 原型”，而不是“已被证明更令人满意的新架构”。下一阶段应优先完成并发容量与生命周期压力测试、缺失/拒绝结果对模型可见性的验证，以及有/无 handler 的配对基准。完成这些实验后，再决定保留窄 bridge、扩展为通用订阅，或移除该机制。
+因此，当前结论是“已获得单轮当前版本 live 证据、可继续验证的事件原生 harness 原型”，而不是“已被证明更令人满意的新架构”。下一阶段优先验证 Journal 写入/flush 故障边界、并发容量与生命周期压力、缺失/拒绝结果对模型行为的影响，以及有/无 handler 的配对基准。完成这些实验后，再决定保留窄 bridge、扩展为通用订阅，或移除该机制。
 
 ## 参考材料
 
@@ -128,7 +139,8 @@ Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主
 3. “Act While Thinking: Accelerating LLM Agents via Pattern-Aware Speculative Tool Execution,” [arXiv:2603.18897 v3](https://arxiv.org/abs/2603.18897v3)。该预印本不同版本的摘要报告口径有变化，正文讨论采用明确标注版本的 v3 数值。
 4. “AsyncTool: Evaluating the Asynchronous Function Calling Capability under Multi-Task Scenarios,” [arXiv:2605.27995 v3](https://arxiv.org/abs/2605.27995v3)。
 5. “LLMs are General Asynchronous Agents,” [arXiv:2609.35427 v1](https://arxiv.org/abs/2609.35427v1)。
-6. 最新全量验证：`python -m pytest`，77 passed、1 skipped、47.32 s（2026-10-05；junction skip 原因见研究日志）。
+6. 历史验证：`python -m pytest`，77 passed、1 skipped、47.32 s（2026-10-05；junction skip 原因见研究日志）。
+7. 2026-10-13 fault-semantics 专项报告：[failure_semantics.md](failure_semantics.md)，原始记录见 [`failure_baseline.json`](../benchmarks/failure_baseline.json)。cleanup revision 全量命令 `python -m pytest -q` 为 124 passed in 79.57s。
 
 ## 后续实验清单
 

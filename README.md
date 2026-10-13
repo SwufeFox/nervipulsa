@@ -354,6 +354,10 @@ and stale content is rejected. The implementation is independently written in
 Python and supports only this PUT subset: no syntax-tree block edits, CUT, MV, REM,
 stale-tag recovery, or seen-line enforcement. This helper is not a Python sandbox.
 
+## Research documents
+
+See [`docs/README.md`](docs/README.md) for the architecture research log, paper draft, focused failure-semantics report, and reproducible evidence.
+
 ## Development status
 
 This package stays labeled v0.4-dev. Three claims are kept separate:
@@ -370,6 +374,10 @@ This package stays labeled v0.4-dev. Three claims are kept separate:
   was called after migration.
 
 Known boundaries: `python_exec` runs with the current user's permissions and is
-not a sandbox; there is no cross-process crash recovery, no rollback of file
-writes, and no exactly-once guarantee against a provider that may have already
-accepted a request whose response was lost.
+not a sandbox; acceptance is process-local, and the runtime does not provide
+general durable task/activation recovery or rollback of file writes. A 2026-10-13
+research probe found no replay at two gated crash points after explicitly flushing
+the Journal: an accepted request before host dequeue, and a queued terminal before
+actor consumption. This is limited process-termination evidence, not a power-loss,
+WAL-write interruption, or exactly-once guarantee. A provider may also have accepted
+a request whose response was lost.

@@ -576,3 +576,37 @@ Source message: user-provided Nervipulsa review sent-at `2026-10-09T01:19:02.161
 ### Verification and limits
 
 The independent targeted run `python -m pytest tests/test_journal.py tests/test_cli.py -v` completed with **16 passed in 3.10s**. The idle partial-batch test, legacy migration and cross-session identity cases, and the non-TTY EOF case passed. The main shell's repeated pytest invocations timed out without results; the independent runner completed the targeted command. No full suite was run. `git diff --check` passed after the implementation changes. The migration prevents future collisions but cannot reconstruct rows already silently dropped or recover overwritten historical execution fields. Idle flush narrows the observation loss window, but the Journal remains asynchronous and uses WAL with `synchronous=NORMAL`; it is not a durable admission or task-recovery store. Changes are currently uncommitted and unpushed.
+
+## 2026-10-13 — Failure semantics and OS process recovery
+
+### Scope and baseline
+
+This research slice continued the failure-semantics work from the 2026-10-09 Journal identity fix. Production source stayed at `41c83d0c3f2fbc81d49993072cbfa585d7047742`; this branch adds tests, a scripted mechanism benchmark, and research records only. The full matrix and machine-readable evidence are in [failure_semantics.md](failure_semantics.md) and [failure_baseline.json](../benchmarks/failure_baseline.json).
+
+### OS process termination probes
+
+A parent process launched an independent child OS process running Runtime and PythonHost against the fixture workspace and SQLite Journal. After a sentinel confirmed each fault point, the child explicitly flushed the Journal and reported the old session, request ID, worker PID, queued mailbox state, marker, and rows read back from the Journal. The parent then terminated the child Runtime process tree on Windows and launched a new OS process and Runtime against the same workspace.
+
+- **Accepted request before host dequeue:** the old `python.requested` row was in the flushed Journal, while the marker did not exist. The new session did not emit the old request or a terminal, and the marker stayed absent.
+- **Terminal queued before actor consumption:** the worker had written the marker and offered `python.finished`; both the request and terminal rows were in the flushed Journal. The new session did not replay them, and the marker remained present.
+
+These results show that Journal observations are not replay instructions at these two tested fault points. They do not establish behavior during SQLite/WAL writes, power loss, storage failure, other crash windows, automatic recovery, exactly-once effects, or remote-side-effect consistency. The marker is a local file oracle. Windows process-tree termination was exercised here; Linux behavior was not run in this slice.
+
+The cleanup path was tightened after review: a successful Windows `taskkill /T /F` is not followed by a kill against the recorded worker PID, avoiding a stale-PID reuse hazard; POSIX uses a dedicated process group. The final Windows run found no surviving Nervipulsa worker process.
+
+### Handler and actor evidence
+
+The deterministic in-process fault matrix covers worker exit before/after a local marker effect, cancellation and timeout with handler slots reserved, host close, duplicate handler result, and five gated runtime crash windows. It confirms that identical worker-exit terminals do not reveal whether the marker effect occurred, and that controlled Runtime restart does not rehydrate queued events. These tests are distinct from the two abrupt OS-process probes.
+
+The randomized A0/A1/A2 mechanism comparison ran five paired blocks (15/15 scripted trials). Status-input delay until first observation by `ScriptedBackend` averaged 222.133 ms for A0, 0.508 ms for A1, and 0.352 ms for A2. This measures the scripted actor/worker mechanism only; it is not real provider latency, task quality, token cost, or evidence of a general Handler advantage.
+
+### Verification and failures
+
+- `python -m pytest tests/test_subprocess_recovery.py -q`: **2 passed in 7.49s** on the final cleanup revision.
+- The first combined run had **66 passed and 1 failed**: `test_python_environment_tool_runs_before_smoke_test` exceeded its 8-second idle wait. The test passed alone in **2.37s**; a repeat combined suite passed **67 tests in 132.35s**. That combined rerun preceded the final PID-cleanup-only test revision.
+- `python -m pytest -q`: **124 passed in 79.57s** after the cleanup revision.
+- Final static checks passed: JSON parsing, Python AST parsing, report links, whitespace, and `git diff --check`; `.scratch` and worker-process checks were clean.
+
+### Interpretation and next work
+
+The strongest supported conclusion is narrow: after confirmed Journal flush, a fresh Runtime did not replay the old accepted request or queued terminal at the two gated Windows process-kill points. Nervipulsa still has no general durable admission, task/transcript recovery, automatic effect reconciliation, or exactly-once guarantee in this baseline. Next, inject failures around Journal writer enqueue and SQLite commit; then compare explicit `unknown`, retry, and reconciliation behavior for side-effecting work. Keep model quality and cost measurement as a separate matched-task study.

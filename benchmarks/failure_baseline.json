@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "status": "measured_fault_matrices_and_ablation",
+  "baseline": {
+    "git_commit": "41c83d0c3f2fbc81d49993072cbfa585d7047742",
+    "branch": "research/fault-semantics",
+    "production_source_changed": false,
+    "git_dirty_at_start": false,
+    "captured_at_local": "2026-10-13",
+    "timezone": "UTC+08:00"
+  },
+  "environment": {
+    "os": "Windows-11-10.0.26300-SP0",
+    "architecture": "AMD64",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+    "python": "3.13.14",
+    "pytest": "9.1.1"
+  },
+  "experiment": {
+    "name": "worker_exit_effect_observability",
+    "oracle": "workspace marker file written by worker; local stand-in only",
+    "test_runs": [
+      {
+        "command": "python -m pytest tests/test_fault_semantics.py -q",
+        "result": "2 passed",
+        "elapsed_seconds": 3.16
+      },
+      {
+        "command": "python -m pytest tests/test_fault_semantics.py tests/test_events.py tests/test_python_host.py tests/test_providers.py tests/test_llm.py -q",
+        "result": "56 passed",
+        "elapsed_seconds": 49.68,
+        "note": "The focused probe was included; this was not the full repository suite."
+      },
+      {
+        "command": "python -m pytest -q",
+        "result": "113 passed",
+        "elapsed_seconds": 65.35,
+        "note": "Full repository suite on the fixed production commit plus research test artifacts."
+      }
+    ],
+    "observations": [
+      {
+        "fault_point": "worker exits before external marker write",
+        "runtime_terminal": {
+          "status": "failed",
+          "reason": "worker_exit",
+          "namespace_reset": true,
+          "effect_state_field_present": false
+        },
+        "effect_oracle": {
+          "marker_exists": false
+        }
+      },
+      {
+        "fault_point": "worker writes and closes marker, then exits before terminal frame",
+        "runtime_terminal": {
+          "status": "failed",
+          "reason": "worker_exit",
+          "namespace_reset": true,
+          "effect_state_field_present": false
+        },
+        "effect_oracle": {
+          "marker_exists": true,
+          "marker_contents": "effect\\n",
+          "post_terminal_replay_observed": false,
+          "observation_window_ms": 150
+        }
+      }
+    ],
+    "interpretation": "Both fault points produce the same host terminal, while the independent effect oracle differs. A failed worker terminal therefore does not establish that an external effect did not occur.",
+    "unmeasured": [
+      "real network service effects",
+      "whole host/runtime crash and restart",
+      "power loss",
+      "LLM false-success rate",
+      "automatic retry duplication",
+      "real-provider latency or token cost"
+    ]
+  },
+  "handler_fault_matrix": {
+    "source_commit": "41c83d0c3f2fbc81d49993072cbfa585d7047742",
+    "production_source_changed": false,
+    "mailbox_setup": {
+      "result_limit": 4,
+      "handler_result_limit": 4,
+      "global_handler_result_slots": 16,
+      "per_request_reserved_handler_slots": 16,
+      "python_worker_concurrency": 1
+    },
+    "cases": [
+      {
+        "name": "cancel at full handler budget",
+        "observation": "A second request was rejected while all slots were reserved; cancel consumed its terminal, released reservations, and a follow-up request was admitted."
+      },
+      {
+        "name": "timeout at full handler budget",
+        "observation": "The terminal reported timeout and incomplete handler results; a late handler result was rejected, reservations reached zero, and a follow-up request was admitted."
+      },
+      {
+        "name": "host close at full handler budget",
+        "observation": "Closing the live host and bus cleared reservations; later handler delivery was rejected as runtime_closing."
+      },
+      {
+        "name": "duplicate handler result",
+        "observation": "A duplicate injected after worker-frame parsing was not emitted twice; late_frames increased once and reservations reached zero after consumption."
+      }
+    ],
+    "test_runs": [
+      {
+        "command": "python -m pytest tests/test_fault_semantics.py -q",
+        "result": "6 passed",
+        "elapsed_seconds": 10.03
+      },
+      {
+        "command": "python -m pytest tests/test_fault_semantics.py tests/test_events.py tests/test_python_host.py tests/test_providers.py tests/test_llm.py -q",
+        "result": "60 passed",
+        "elapsed_seconds": 49.68
+      },
+      {
+        "command": "python -m pytest -q",
+        "result": "117 passed",
+        "elapsed_seconds": 60.13
+      }
+    ],
+    "limitations": [
+      "The test matrix covers a live host; it does not simulate abrupt host/runtime death or power loss.",
+      "Duplicate-frame injection occurs after worker-frame parsing and before bus delivery; it is not duplicate IPC bytes.",
+      "Admission saturation is deterministic but not a concurrent load or throughput stress test."
+    ]
+  },
+  "crash_window_matrix": {
+    "source_commit": "41c83d0c3f2fbc81d49993072cbfa585d7047742",
+    "production_source_changed": false,
+    "restart_method": "controlled Runtime shutdown followed by a fresh Runtime on the same workspace; no OS process kill or power-loss simulation",
+    "cases": [
+      {
+        "name": "accepted before host dequeue",
+        "observation": "A gate held PythonHost.take_batch after bus admission. The request stayed in the in-process mailbox; shutdown and a fresh Runtime did not replay it, and the marker remained absent."
+      },
+      {
+        "name": "complete frame delivered before injected send error",
+        "observation": "The worker wrote the marker after complete frame delivery. The host then reported cancelled with reason namespace_reset_before_start and namespace_reset=true.",
+        "fault_model": "Synthetic local OSError raised after the original write_frame returned; this is semantic ambiguity evidence, not a measurement of ordinary socket failure frequency."
+      },
+      {
+        "name": "terminal queued before actor consumption",
+        "observation": "The worker effect and python.finished terminal were present; an actor gate left the terminal queued with its reservation. Shutdown and a fresh Runtime did not replay it from the Journal."
+      },
+      {
+        "name": "terminal delivery to closed actor mailbox",
+        "observation": "Closing the LLM mailbox after python.started caused terminal rejection, incremented undelivered_terminals, and delivered agent.error to the UI; no terminal retry occurred."
+      },
+      {
+        "name": "terminal consumed before interrupted provider response",
+        "observation": "The scripted provider received python.finished in its request after mailbox consumption. Shutdown while the provider was blocked and a fresh Runtime did not restore the in-memory transcript."
+      }
+    ],
+    "test_runs": [
+      {
+        "command": "python -m pytest tests/test_fault_semantics.py -q",
+        "result": "11 passed",
+        "elapsed_seconds": 18.06
+      },
+      {
+        "command": "python -m pytest tests/test_fault_semantics.py tests/test_events.py tests/test_python_host.py tests/test_providers.py tests/test_llm.py -q",
+        "result": "65 passed",
+        "elapsed_seconds": 73.29
+      },
+      {
+        "command": "python -m pytest -q",
+        "result": "122 passed",
+        "elapsed_seconds": 85.23
+      }
+    ],
+    "limitations": [
+      "These are controlled in-process gates and Runtime restarts, not abrupt OS process termination or power loss.",
+      "The IPC case injects an error after full frame delivery and does not characterize native socket exception behavior.",
+      "The tests do not measure concurrent mailbox stress, real remote effects, model quality, provider latency, or token cost."
+    ]
+  },
+  "limitations": [
+    "The original worker-process effect oracle is not a power-loss or storage-failure experiment; the separate abrupt-process probes cover only two gated fault points.",
+    "The marker file is not a network service and does not model remote consistency or idempotency.",
+    "The original live-host no-replay window is 150 ms; subprocess restart checks separately cover two crash points.",
+    "No real-model performance or task-quality claim is measured; the scripted ablation is mechanism-only."
+  ],
+  "abrupt_process_recovery": {
+    "test": "tests/test_subprocess_recovery.py::test_os_process_death_does_not_replay_journaled_work",
+    "command": "python -m pytest tests/test_subprocess_recovery.py -q",
+    "result": "2 passed in 7.49s on the final cleanup revision",
+    "relevant_suite_command": "python -m pytest tests/test_subprocess_recovery.py tests/test_fault_semantics.py tests/test_events.py tests/test_python_host.py tests/test_providers.py tests/test_llm.py -q",
+    "relevant_suite_result": "Initial combined run: 66 passed, 1 failed because test_python_environment_tool_runs_before_smoke_test exceeded wait_until_idle(8); isolated retry passed, and the combined rerun passed 67.",
+    "methodology": [
+      "Each case launches a child OS process running Runtime and PythonHost against the fixture workspace and shared SQLite Journal.",
+      "Sentinel file reports session ID, accepted request ID, Python worker PID, marker state, queued mailbox count, and flushed Journal rows.",
+      "Case A holds python.requested before PythonHost.take_batch dequeue; case B holds the LLM actor before consumption after the worker writes the marker and python.finished is offered.",
+      "On Windows, the parent uses taskkill /T /F; a recorded worker PID fallback runs only if tree termination failed while the parent was live. POSIX children use a dedicated process group.",
+      "The restart uses a new session and does not emit either old request or terminal; marker state remains absent in case A and present in case B."
+    ],
+    "limitations": [
+      "Journal flush occurs before OS-process termination; this does not test loss during SQLite/WAL writes or power loss.",
+      "Short sentinel polling and bounded restart settling are used; barriers are deterministic at both fault points.",
+      "The marker is a local file oracle, not a remote effect or consistency test.",
+      "A scripted backend is used; provider state and model recovery are not tested.",
+      "Windows process-tree termination is validated only on this environment."
+    ],
+    "isolated_retry": {
+      "command": "python -m pytest tests/test_llm.py::test_python_environment_tool_runs_before_smoke_test -q",
+      "result": "1 passed in 2.37s"
+    },
+    "relevant_suite_rerun_result": "67 passed in 132.35s",
+    "full_suite": {
+      "command": "python -m pytest -q",
+      "result": "124 passed in 79.57s"
+    },
+    "worker_cleanup_check": "On Windows, a successful taskkill /T /F is treated as sufficient and is not followed by a stale-PID kill; worker PID fallback is attempted only when tree termination fails while the Runtime parent was live. POSIX uses a dedicated process group. No nervipulsa.python_worker process remained after the final targeted test."
+  }
+}

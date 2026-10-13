@@ -160,6 +160,70 @@ def test_namespace_cwd_streams_and_immediate_accept(workspace: Path) -> None:
     asyncio.run(body())
 
 
+def test_observed_effect_is_committed_before_finished(workspace: Path) -> None:
+    import sqlite3
+
+    from nervipulsa.journal import Journal
+
+    async def body() -> None:
+        journal = Journal(workspace / "effects-observed.sqlite")
+        journal.start()
+        assert journal.flush()
+        rig = HostRig(workspace)
+        rig.host._journal = journal
+        original_call = rig.host._results.call
+
+        def check_observed_before_terminal(event_type, payload, **kwargs):
+            if event_type == "python.finished":
+                with sqlite3.connect(journal.path) as connection:
+                    row = connection.execute(
+                        "SELECT state FROM durable_effects WHERE session_id=? AND execution_id=?",
+                        (rig.bus.session_id, kwargs["reply_to"]),
+                    ).fetchone()
+                assert row == ("observed",)
+            return original_call(event_type, payload, **kwargs)
+
+        rig.host._results.call = check_observed_before_terminal
+        try:
+            request = rig.request("print('tracked')")
+            result = await _wait(rig.llm, "python.finished", reply_to=request.event_id)
+            assert result.payload["status"] == "succeeded"
+            assert result.payload["effect_state"] == "observed"
+            assert journal.unresolved_effects() == []
+        finally:
+            await rig.close()
+            assert journal.close()
+
+    asyncio.run(body())
+
+
+def test_running_cancel_persists_unknown_effect(workspace: Path) -> None:
+    from nervipulsa.journal import Journal
+
+    async def body() -> None:
+        journal = Journal(workspace / "effects-cancel.sqlite")
+        journal.start()
+        assert journal.flush()
+        rig = HostRig(workspace)
+        rig.host._journal = journal
+        try:
+            request = rig.request("import time\ntime.sleep(10)")
+            await _wait(rig.ui, "python.started", reply_to=request.event_id)
+            assert rig.cancel(request.event_id, reason="test-stop").accepted
+            result = await _wait(rig.llm, "python.finished", reply_to=request.event_id)
+            assert result.payload["status"] == "cancelled"
+            assert result.payload["effect_state"] == "unknown"
+            unresolved = journal.unresolved_effects()
+            assert [(item["execution_id"], item["state"]) for item in unresolved] == [
+                (request.event_id, "unknown")
+            ]
+        finally:
+            await rig.close()
+            assert journal.close()
+
+    asyncio.run(body())
+
+
 def test_shutdown_closes_mailbox_handler_budget(workspace: Path) -> None:
     async def body() -> None:
         rig = HostRig(workspace)
@@ -653,6 +717,70 @@ def test_handler_timeout_discards_fired_frames_from_real_worker(workspace: Path)
             assert rig.llm.handler_reserved_size == 0
             await asyncio.sleep(0.2)
             assert not any(event.type == "agent.handler_fired" for event in rig.llm.drain_available(32))
+        finally:
+            await rig.close()
+
+    asyncio.run(body())
+
+
+def test_observed_commit_failure_is_not_reported_as_success(workspace: Path) -> None:
+    class FailingObserveJournal:
+        def prepare_effect(self, session_id: str, execution_id: str) -> None:
+            pass
+
+        def mark_effect_dispatching(self, session_id: str, execution_id: str) -> None:
+            pass
+
+        def observe_effect(self, session_id: str, execution_id: str, outcome: str) -> None:
+            raise OSError("observed commit unavailable")
+
+        def fail_effect_observation(self, session_id: str, execution_id: str, error: str) -> None:
+            self.unknown_error = error
+
+    async def body() -> None:
+        rig = HostRig(workspace)
+        journal = FailingObserveJournal()
+        rig.host._journal = journal
+        try:
+            request = rig.request("print('worker finished')")
+            result = await _wait(rig.llm, "python.finished", reply_to=request.event_id)
+            assert result.payload["status"] == "failed"
+            assert result.payload["effect_state"] == "unknown"
+            assert result.payload["reason"] == "observed_commit_failed"
+            assert "observed commit unavailable" in journal.unknown_error
+        finally:
+            await rig.close()
+
+    asyncio.run(body())
+
+
+def test_dispatch_journal_failure_fails_closed(workspace: Path, monkeypatch) -> None:
+    import nervipulsa.python_host as host_module
+
+    class FailingJournal:
+        def prepare_effect(self, session_id: str, execution_id: str) -> None:
+            self.prepared = True
+
+        def mark_effect_dispatching(self, session_id: str, execution_id: str) -> None:
+            raise OSError("journal unavailable")
+
+    async def body() -> None:
+        rig = HostRig(workspace)
+        sent: list[dict] = []
+        original_write = host_module.write_frame
+
+        def record_write(sock, frame):
+            sent.append(frame)
+            return original_write(sock, frame)
+
+        monkeypatch.setattr(host_module, "write_frame", record_write)
+        rig.host._journal = FailingJournal()
+        try:
+            request = rig.request("open('must-not-run.txt', 'w').write('x')")
+            result = await _wait(rig.llm, "python.finished", reply_to=request.event_id)
+            assert result.payload["effect_state"] == "not_started"
+            assert not sent
+            assert not (workspace / "must-not-run.txt").exists()
         finally:
             await rig.close()
 

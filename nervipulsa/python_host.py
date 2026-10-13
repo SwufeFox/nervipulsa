@@ -66,6 +66,7 @@ class ExecResult:
     handler_ids: list[str] | None = None
     missing_handler_ids: list[str] | None = None
     cleanup_failed: bool = False
+    effect_state: str = "untracked"
 
 
 class PythonHost:
@@ -604,6 +605,22 @@ class PythonHost:
         epoch = self._epoch
         record.worker_epoch = epoch
         send_at = time.monotonic()
+        if self._journal is not None:
+            try:
+                self._journal.prepare_effect(self.session_id, record.event_id)
+            except Exception as exc:
+                return ExecResult(
+                    "failed", "", f"execution rejected: durable intent commit failed: {exc}\n",
+                    0, False, "durable_intent_failed", epoch,
+                )
+        if self._journal is not None:
+            try:
+                self._journal.mark_effect_dispatching(self.session_id, record.event_id)
+            except Exception as exc:
+                return ExecResult(
+                    "failed", "", f"execution rejected: durable dispatch commit failed: {exc}\n",
+                    0, False, "durable_dispatch_failed", epoch,
+                )
         try:
             assert self._managed is not None
             write_frame(
@@ -616,8 +633,8 @@ class PythonHost:
                 },
             )
         except OSError as exc:
-            # sendall failed, so the worker never received a complete frame and
-            # the code cannot have started: this is a namespace reset, not a run.
+            # The durable state is already dispatching. sendall cannot tell us how
+            # much reached the worker, so report the effect outcome as unknown.
             return ExecResult(
                 "cancelled",
                 "",
@@ -626,6 +643,7 @@ class PythonHost:
                 True,
                 "namespace_reset_before_start",
                 epoch,
+                effect_state="unknown",
             )
         started = False
         handler_fired: list[dict[str, Any]] = []
@@ -805,6 +823,25 @@ class PythonHost:
                 else:
                     missing_handler_ids = None
                     self.late_frames += len(handler_fired)
+                if self._journal is not None:
+                    try:
+                        self._journal.observe_effect(self.session_id, record.event_id, str(status))
+                    except Exception as exc:
+                        try:
+                            self._journal.fail_effect_observation(
+                                self.session_id, record.event_id, f"{type(exc).__name__}: {exc}"
+                            )
+                        except Exception:
+                            pass
+                        return ExecResult(
+                            "failed", stdout, stderr,
+                            self._elapsed_ms(start), False,
+                            "observed_commit_failed", epoch,
+                            bool(frame.get("truncated")),
+                            stdout_bytes=stdout_bytes, stderr_bytes=stderr_bytes,
+                            exception=f"worker finished with {status}; durable observed commit failed: {exc}",
+                            effect_state="unknown",
+                        )
                 return ExecResult(
                     status,
                     stdout,
@@ -831,6 +868,7 @@ class PythonHost:
                         if isinstance(frame.get("exception"), str)
                         else None
                     ),
+                    effect_state="observed" if self._journal is not None else "untracked",
                 )
 
     def _cancelled_result(
@@ -855,6 +893,7 @@ class PythonHost:
             handler_ids=handler_ids,
             missing_handler_ids=(list(handler_ids) if handler_ids is not None else None),
             cleanup_failed=cleanup_failed,
+            effect_state="unknown",
         )
 
     def _timeout_result(
@@ -947,8 +986,22 @@ class PythonHost:
             or len(result.stdout) > _PREVIEW
             or len(result.stderr) > _PREVIEW
         )
+        effect_state = result.effect_state
+        if effect_state == "unknown" or result.reason in {"timeout", "worker_exit", "observed_commit_failed"}:
+            effect_state = "unknown"
+            if self._journal is not None and result.reason != "observed_commit_failed":
+                try:
+                    self._journal.fail_effect_observation(
+                        self.session_id, record.event_id,
+                        f"effect outcome unknown: {result.reason or result.status}",
+                    )
+                except Exception:
+                    pass
+        elif result.reason in {"durable_intent_failed", "durable_dispatch_failed", "queued_cancel", "worker_startup_failed", "namespace_reset_before_start", "shutdown"}:
+            effect_state = "not_started"
         payload: dict[str, Any] = {
             "status": result.status,
+            "effect_state": effect_state,
             "stdout": stdout,
             "stderr": stderr,
             "stdout_bytes": stdout_bytes,

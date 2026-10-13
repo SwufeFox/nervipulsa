@@ -8,6 +8,7 @@ This index separates the project’s chronological record, current synthesis, an
 | [Event-native runtime paper](event_native_runtime_paper.md) | Current synthesis of the runtime model, results, discussion, and limits. | Claims cite the underlying research record; this is a research draft, not a production-readiness claim. |
 | [Failure semantics baseline](failure_semantics.md) | Focused audit of admission, worker effects, handler capacity, and recovery windows. | Pinned to commit `41c83d0`; its process-kill evidence predates the durable effect ledger and is not a protocol recovery test. |
 | [Durable Effect Protocol](durable_effect_protocol.md) | Current ledger states, synchronous commit boundaries, `/effects` review, and injected failures. | Tracks intent and uncertainty; no automatic replay, rollback, or exactly-once guarantee. |
+| [User experience review](user_experience_review.md) | Code-based first-use journey, visible feedback, recovery friction, and prioritized improvements. | Source review only; no current live-provider run or first-time-user study. |
 | [Worker handler bridge research](research_worker_handler_bridge.md) | Design and lifecycle notes for worker callbacks. | Source and test observations do not alone establish process recovery. |
 | [Python environment discovery research](python_environment_discovery_research.md) | Static package and API discovery study. | CLI examples are individual observations, not general reliability claims. |
 

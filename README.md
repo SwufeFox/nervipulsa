@@ -358,7 +358,7 @@ stale-tag recovery, or seen-line enforcement. This helper is not a Python sandbo
 
 ## Research documents
 
-See [`docs/README.md`](docs/README.md) for the architecture research log, paper draft, baseline failure report, durable effect protocol, and reproducible evidence.
+See [`docs/README.md`](docs/README.md) for the architecture research log, paper draft, failure reports, user experience review, and reproducible evidence.
 
 ## Development status
 

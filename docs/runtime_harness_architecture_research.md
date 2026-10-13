@@ -638,3 +638,23 @@ These tests establish transaction behavior at injected SQLite commit failures an
 ### Next experiments
 
 Inject termination after the durable `dispatching` commit but before, during, and after the worker side effect; reopen the ledger and verify `/effects` preserves an actionable unresolved state. Then test manual reconciliation behavior. Keep power-loss claims separate from process-kill tests, and do not add automatic replay without an idempotency or reconciliation contract.
+
+## 2026-10-13 — Code-based first-use user experience review
+
+### Scope
+
+Reviewed the current `main` user journey from README installation and provider setup through Python task submission, mid-run input, cancellation, output retrieval, and effect reconciliation. This was a source/documentation review only: no CLI/provider was run, no first-time user was observed, and no code was changed.
+
+### Findings
+
+The strongest user-facing property is observability: the CLI exposes execution state, duration, output previews, context use, queue/worker status, and follow-up commands for full output and logs. Failure semantics are unusually candid: accepted is distinct from completed, cancellation initially means requested, and an uncertain external effect is surfaced through `effect_state=unknown` and `/effects` without blind replay.
+
+The main friction is the first-use and trust path. Provider, model, and local gateway prerequisites are spread across setup documentation; the first model request still depends on a selected model and a live endpoint. Before Python runs, the console shows only a bounded code excerpt, while `python_exec` uses the current OS user's permissions and `--dir` is not a sandbox. Recovery commands are available, but users must know that `/retry` retries a paused model activation, while an unknown Python outcome requires checking real side effects before deciding what to do.
+
+A second expectation gap is that users can submit input while Python is running, but the Python worker is serial and the LLM actor does not provide concurrent model inference for each new message. The message can steer a later activation; this is not immediate conversational interruption.
+
+The full journey, supporting paths, and three prioritized improvements are in [user_experience_review.md](user_experience_review.md). These are source-derived experience hypotheses, not user-study findings.
+
+### Next validation
+
+Run a current-version first-use task with a developer starting from a clean configuration. Record time to the first successful model request, time to a verified file change, configuration detours, questions asked, and recovery steps after one controlled failure. Separately test whether the user understands the distinction between cancellation requested and confirmed stopped, and whether an `unknown` effect prevents an unsafe retry. Keep this live/user evidence separate from source review and scripted tests.

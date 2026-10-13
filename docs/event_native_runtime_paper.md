@@ -106,6 +106,12 @@ Host UI 错误不一定单独投影为模型消息，但 incomplete terminal 含
 
 真实 SQLite commit 故障注入验证了 intent commit 回滚后无记录、dispatch commit 回滚后保留 intent、observed commit 回滚后保留 dispatching；Host 集成测试检查 dispatch fail-closed 和 observed failure 的 unknown terminal。该协议把副作用结果不确定性持久化供人工审阅；它不把 Python 副作用与 SQLite 做原子事务，不恢复 transcript，不自动重放，也不提供 exactly-once 或 power-loss 保证。状态机和测试证据见 [Durable Effect Protocol](durable_effect_protocol.md)。
 
+### 4.7 Code-based first-use user experience review
+
+README 与 CLI 源码走查显示，当前 CLI 能报告 execution 状态、耗时、输出预览和 context 用量，并提供 `/status`、`/logs`、`/output`、`/retry`、`/cancel` 与 `/effects` 等后续入口。第一次使用的主要摩擦在 provider/model/gateway 配置分散、执行前代码预览有长度上限，以及不同失败状态需要用户自行选恢复命令。Python 使用当前 OS 用户权限，`--dir` 不是 sandbox；因此这是一项用户信任与操作边界问题，而不只是输出布局问题。
+
+此评估仅由文档与源码推导，没有运行当前版本 provider CLI、观察首次使用者或验证模型对 `unknown` 的处理。具体旅程、证据路径和改进建议见 [用户体验评估](user_experience_review.md)。该审查不新增 live-run 或用户成功率证据。
+
 ## 5. 讨论
 
 ### 5.1 架构判断
@@ -150,6 +156,7 @@ Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主
 6. 历史验证：`python -m pytest`，77 passed、1 skipped、47.32 s（2026-10-05；junction skip 原因见研究日志）。
 7. 2026-10-13 fault-semantics 专项报告：[failure_semantics.md](failure_semantics.md)，原始记录见 [`failure_baseline.json`](../benchmarks/failure_baseline.json)。cleanup revision 全量命令 `python -m pytest -q` 为 124 passed in 79.57s。
 8. 当前 effect ledger 状态与失败注入：[durable_effect_protocol.md](durable_effect_protocol.md)；实现提交 `6484416`。
+9. 代码走查得出的首次使用旅程与体验摩擦：[user_experience_review.md](user_experience_review.md)；未进行当前版本 live provider 运行或首次使用者研究。
 
 ## 后续实验清单
 
@@ -160,6 +167,7 @@ Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主
 5. 运行严格配对 benchmark，测量 activation、provider 请求、延迟、token 和任务正确率。
 6. 以用例和测量结果决定是否需要通用命名事件订阅 API。
 7. 在 Durable Effect Protocol 的 `dispatching` 提交前后、worker 副作用前后注入进程终止；重启后检查 `/effects` 并验证人工对账路径。不要把进程终止证据外推为断电或存储设备耐久性证据。
+8. 进行当前版本首次使用者观察：从干净配置完成模型请求和文件修改任务，记录配置耗时、完成耗时、困惑点与失败后的恢复步骤；区分源代码推断、live CLI 观察与真实用户证据。
 
 ### 2026-10-05 补记：静态 Python 环境发现
 

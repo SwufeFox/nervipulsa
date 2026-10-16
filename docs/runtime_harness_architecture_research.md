@@ -658,3 +658,55 @@ The full journey, supporting paths, and three prioritized improvements are in [u
 ### Next validation
 
 Run a current-version first-use task with a developer starting from a clean configuration. Record time to the first successful model request, time to a verified file change, configuration detours, questions asked, and recovery steps after one controlled failure. Separately test whether the user understands the distinction between cancellation requested and confirmed stopped, and whether an `unknown` effect prevents an unsafe retry. Keep this live/user evidence separate from source review and scripted tests.
+
+## 2026-10-14 — Durable Effect Protocol T0–T4 process-termination experiment
+
+### Scope and method
+
+Added [`test_crash_boundaries.py`](../tests/test_crash_boundaries.py) with parent-gated Windows OS-process termination at five protocol boundaries. Each child starts a real Runtime, PythonHost, SQLite Journal, and worker; after the gate, the parent terminates the Runtime process tree. A new Runtime then opens the same workspace and ledger with a fresh session, runs a scripted activation probe, and inspects the actual CLI `/effects` response. The Python side effect appends one marker record so a repeat is detectable. No production runtime code changed.
+
+### Results
+
+| Point | State observed before termination | After restart |
+| --- | --- | --- |
+| T0: after intent commit, before dispatching commit | `intent`; no marker | `/effects` lists the old execution; no old request replay; marker remains absent. |
+| T1: after dispatching commit, before execute frame write | `dispatching`; no marker | `/effects` lists the old execution; no old request replay; marker remains absent. |
+| T2: after worker appends the marker, while it is held before terminal | `dispatching`; marker exists once | `/effects` lists unresolved; marker still has one entry; no replay. |
+| T3: host received worker terminal, before observed commit | `dispatching`; marker exists once | `/effects` lists unresolved; the process-local terminal is lost; marker remains one entry and no old terminal is replayed. |
+| T4: observed committed, `python.finished` routed to the LLM mailbox, actor held before consumption | `observed`; marker exists once; old trace saw the terminal | `/effects` reports no unresolved effects, but the new session and its model input do not contain the old terminal. |
+
+The experiment demonstrates conservative state reporting at the tested process-kill points. It also exposes the T4 boundary: an effect can be durably marked observed while the prior conversation still lacks model consumption of the result. A new session does not recover that model state. The local marker does not represent remote effects.
+
+### Verification and debugging record
+
+The final focused command `python -m pytest tests/test_crash_boundaries.py -q` passed **5 tests in 44.96s** after the T0–T3 `/effects` assertions were tightened to check the exact execution id, persisted state, and no-auto-replay warning. The strengthened test initially had four failures because the gate sentinel attempted to call a nonexistent mailbox `qsize()` method; it now uses the mailbox `size` property. The next T0-only run reached restart but failed while trying to read a marker that should be absent; the assertion now checks absence for T0/T1 and exactly one appended record for T2–T4. A broader run after the T4 gate correction and marker fix, before those last assertion-only additions, passed **36 tests in 187.57s** across crash boundaries, subprocess recovery, PythonHost, and Journal.
+
+The test uses `taskkill /T /F` on Windows through the existing process-tree helper, whose worker-PID fallback only runs when tree termination fails. This evidence covers OS-process termination after the specified SQLite commits. It does not cover power loss, kernel/storage failure, a kill during a SQLite/WAL commit, or recovery of arbitrary task/transcript state. Results are documented in [durable_effect_protocol.md](durable_effect_protocol.md).
+
+### Next research
+
+The protocol-level comparison is recorded in [literature_screening_2026-10-16.md](literature_screening_2026-10-16.md). `/effects` is currently read-only: operators can inspect external state, but the CLI has no supported way to persist their reconciliation decision. Next, design a truthful, auditable human-resolution record and compare A1/A2 on real coding-task quality and unsafe-retry behavior. Do not add automatic replay without a tool-specific idempotency or reconciliation contract.
+
+## 2026-10-16 — Literature screen and protocol comparison
+
+### Source review
+
+Checked canonical arXiv metadata and the relevant sections of Pollard and KedgeFlow, plus the supplied memory-reuse paper. The detailed comparison and references are in [`literature_screening_2026-10-16.md`](literature_screening_2026-10-16.md).
+
+- Pollard binds a caller-selected semantic step to parent, kind, attempt, and canonical input. Strict replay returns the verified stored result without invoking the wrapped operation. Its evaluations include store/process restart and lease-boundary tests, but do not restore a complete agent task, transcript, timers, or external-world state.
+- KedgeFlow separates exact-action authorization, one-time allowance claim, dispatch authorization, target commit, and retained outcome. Its lost-response test keeps the allowance consumed and refuses repeat dispatch. The reference evaluation uses three etcd members on one host and a mock target; its five crash intervals are code-derived, not crash-injection results. Native crash recovery and real-target exactly-once remain untested.
+- Temporal's documented workflow history restores workflow control state by replaying workflow code. Completed Activities return recorded results, while an Activity that did not report completion may be retried and execute again; the target service must implement idempotency for effect safety.
+- Transactional Outbox atomically couples a local database transaction to an outbox record. Its relay may publish duplicates, so consumers must be idempotent. It does not atomically include an arbitrary remote tool effect.
+- The supplied SciXa article is useful as a secondary terminology/checklist source, not an experiment. The rendered page in this review did not expose its author, publication date, article type, or source count; those metadata remain unverified. The memory-reuse paper addresses stale reasoning memories, not runtime effect recovery.
+
+### Runtime comparison and local evidence
+
+These mechanisms persist different things: workflow history reconstructs control state; an outbox couples local data and message publication; target idempotency suppresses repeated effects; Pollard reuses ancestry-bound step results; KedgeFlow governs permission to dispatch protected actions; Nervipulsa's ledger persists the observed or uncertain state of a Python execution. They should not be collapsed into a generic “durable log” claim.
+
+The 2026-10-14 local T0–T4 experiment remains evidence of Windows OS-process termination after specified SQLite commits, not power-loss or task recovery. T0–T3 remain unresolved and are not replayed; T4 shows `observed` does not restore actor consumption or transcript state. The focused command passed 5 tests in 44.96s. At this snapshot, `main` and `origin/main` still point to `993683921ce54ffefaa3fa4444574f272373a0e2`; the T0–T4 test and its documentation are uncommitted, so the GitHub `main` page correctly does not contain this experiment.
+
+Source review also found a concrete reconciliation gap: `/effects` lists unresolved rows and warns against automatic replay, but has no supported command/API to record external evidence or an operator decision. This is view-only visibility, not a closed manual-reconciliation workflow. Preserve this distinction in user-facing claims and evaluate an auditable resolution record before adding any retry behavior.
+
+### Updated research direction
+
+The strongest candidate contribution remains narrow: local coding-agent integration of durable effect uncertainty plus a measured boundary between effect observation and actor consumption. The current evidence does not support a “first” or “unique” claim, durable workflow recovery, or exactly-once effects. Next work is to define and validate the manual resolution path, bring T0–T4 into a committed/CI-visible state, and run paired A1/A2 real coding tasks for quality, false success, unsafe retries, handoff, token use, and latency.

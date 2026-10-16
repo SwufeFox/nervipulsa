@@ -104,7 +104,9 @@ Host UI 错误不一定单独投影为模型消息，但 incomplete terminal 含
 
 提交 `6484416` 加入 per-execution `durable_effects` ledger。Host 在写 IPC execute frame 前先同步提交 `intent` 和 `dispatching`；dispatching commit 失败时不会发送 frame。收到 worker terminal 后，Host 先提交 `observed`，再发布 `python.finished`。若 observed commit 失败，Host 发出 `effect_state=unknown`；即使后续 unknown 写入失败，旧的 `dispatching` 行仍可由 `/effects` 发现。
 
-真实 SQLite commit 故障注入验证了 intent commit 回滚后无记录、dispatch commit 回滚后保留 intent、observed commit 回滚后保留 dispatching；Host 集成测试检查 dispatch fail-closed 和 observed failure 的 unknown terminal。该协议把副作用结果不确定性持久化供人工审阅；它不把 Python 副作用与 SQLite 做原子事务，不恢复 transcript，不自动重放，也不提供 exactly-once 或 power-loss 保证。状态机和测试证据见 [Durable Effect Protocol](durable_effect_protocol.md)。
+真实 SQLite commit 故障注入验证了 intent commit 回滚后无记录、dispatch commit 回滚后保留 intent、observed commit 回滚后保留 dispatching；Host 集成测试检查 dispatch fail-closed 和 observed failure 的 unknown terminal。该协议把副作用结果不确定性持久化供人工审阅；它不把 Python 副作用与 SQLite 做原子事务，不恢复 transcript，不自动重放，也不提供 exactly-once 或 power-loss 保证。状态机和提交故障证据见 [Durable Effect Protocol](durable_effect_protocol.md)。
+
+2026-10-14 的 T0–T4 门控进程终止实验进一步覆盖了 intent commit 后、dispatching commit 后、side effect 后、Host 收到 terminal 后但 observed commit 前，以及 observed commit 后 terminal 已入队但 actor 尚未消费五个窗口。重启后 `/effects` 对前四种未观察状态保留 unresolved 项；T4 的 effect row 为 observed，但新 session 不会恢复旧 terminal 或 transcript。五个定向进程测试通过；这些证据不覆盖 commit 进行中、WAL 中断或断电恢复。完整状态矩阵与范围见 [Durable Effect Protocol](durable_effect_protocol.md) 和 [`test_crash_boundaries.py`](../tests/test_crash_boundaries.py)。
 
 ### 4.7 Code-based first-use user experience review
 
@@ -140,11 +142,17 @@ README 与 CLI 源码走查显示，当前 CLI 能报告 execution 状态、耗�
 
 这些论文提供三种不同的并发位置：工具 DAG 并行、推测工具执行、多个 LLM coroutine；而 Nervipulsa 当前已实现的是异步事件路由与有界 worker 结果回传。现有代码优化只确保同步静态扫描不会堵住 asyncio loop，不会让正在运行的 activation 被打断，也不会证明多任务吞吐提升。
 
+2026-10-16 的执行语义对照进一步收窄了相关工作边界。[Pollard](https://arxiv.org/abs/2610.16145v1) 用父步骤、kind、attempt 和规范化输入绑定语义 step，并在严格重放时返回经校验的结果而不调用 wrapped operation；调用方仍选择步骤边界，且旧结果不会恢复变化后的外部世界。[KedgeFlow](https://arxiv.org/abs/2610.14810v1) 约束精确动作授权、单次 allowance、dispatch 与目标结果；lost-response 后保留已消费额度，但其评估在单机 etcd 与 mock target 上，论文明确未测试 native crash recovery 或真实目标 exactly-once。两者都不能直接替代本项目的 T0–T4 host-process 实测，也没有证明完整 agent session 恢复。
+
+[Temporal 的 Event History](https://docs.temporal.io/encyclopedia/event-history.md) 展示了更完整的 workflow 控制状态恢复：worker 重启后 replay workflow code，已完成 Activity 取历史结果；未能报告完成的 Activity 仍可能重试，因此官方要求 effectful Activity 使用目标端幂等契约。[Transactional Outbox](https://microservices.io/patterns/data/transactional-outbox.html) 原子提交的是本地业务更新与 outbox message，relay 仍可能重复发布。它们分别解决任务历史与本地事务/消息一致性，均不等同于 Nervipulsa 当前只记录 Python execution 效果状态的 ledger。[Many Steps into One](https://arxiv.org/abs/2610.17544v1) 讨论可复用 reasoning memory 的 stale-answer 风险；除非 runtime 复用摘要或推理结果，否则与副作用恢复仅间接相关。SciXa 的 [durable execution 综合文章](https://scixa.com/article?slug=durable-execution-substrates)可作为术语检查表，本轮未能从页面提取验证作者、日期、文章类型或所称来源数量，不作为实验依据。
+
+本地 `/effects` 的源码检查还发现，当前 CLI 只有列出 unresolved rows 的只读路径，没有记录目标端证据或操作者判定的受支持命令/API。因此现有能力应称为“人工可见的 unresolved 状态”，尚不是可闭环的人工 reconciliation workflow。详细引用、证据等级与保证矩阵见[2026-10-16 文献筛选记录](literature_screening_2026-10-16.md)。
+
 ## 6. 结论
 
 Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主干，并实现 handler 结果的初步有界投递协议。历史 live CLI 试验提供了多个 handler 进入模型上下文的真实证据；2026-10-05 的 3425 CLI 复验验证了模型理解 `on_finished`、执行 Python 任务，并在后续 activation 中使用 terminal 与 handler 观察。静态环境发现任务也完成先发现后 smoke test；event-loop 回归验证扫描期间 loop 能调度并接收后续输入。2026-10-13 fault-semantics 基线分支全量套件为 124 passed；其两个进程终止探针只覆盖预先 flush Journal 后的门控窗口。随后合入的 Durable Effect Protocol 增加每次 Python 执行的 `intent → dispatching → observed | unknown` ledger，并通过真实 SQLite commit 故障注入验证失败边界。合并两条分支并修正 worker-exit 回归断言后，`python -m pytest -q` 为 **137 passed in 102.03s**。这些结果不证明并发压力下的容量行为、WAL 写入中断、断电恢复、通用任务恢复或 exactly-once 外部效果。
 
-因此，当前结论仍是“已获得单轮当前版本 live 证据、可继续验证的事件原生 harness 原型”，不是“已被证明优于普通 harness 的新架构”。下一阶段优先覆盖 `dispatching` commit 前后及 worker 副作用前后的进程终止窗口，验证 `/effects` 在重启后的人工对账信息；另测并发容量与生命周期压力、缺失/拒绝结果对模型行为的影响，以及有/无 handler 的配对基准。电源故障和存储设备耐久性须与进程终止测试分开评估。完成这些实验后，再决定保留窄 bridge、扩展为通用订阅，或移除该机制。
+因此，当前结论仍是“已获得单轮当前版本 live 证据、可继续验证的事件原生 harness 原型”，不是“已被证明优于普通 harness 的新架构”。T0–T4 的本地进程终止实验覆盖了 Durable Effect Protocol 的五个已提交状态边界，并显示 `observed` 持久化不恢复 actor transcript；该测试目前仍是本地未提交工作树证据，尚不在 `origin/main`。文献对照也表明，durable workflow、outbox、目标端幂等、语义重放与授权控制面记录的是不同对象，不能由“存在 ledger”推导出任务恢复或 exactly-once。后续优先补齐 `/effects` 之后可审计的人工 resolution 路径，再用真实本地编码任务检验 unknown 是否帮助用户避免危险重试，以及 A2 handler 相对 A1 是否改善任务质量或错误可见性。当前进程测试不覆盖 WAL 写入中断、断电、设备故障，也不证明 exactly-once。
 
 ## 参考材料
 
@@ -157,6 +165,12 @@ Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主
 7. 2026-10-13 fault-semantics 专项报告：[failure_semantics.md](failure_semantics.md)，原始记录见 [`failure_baseline.json`](../benchmarks/failure_baseline.json)。cleanup revision 全量命令 `python -m pytest -q` 为 124 passed in 79.57s。
 8. 当前 effect ledger 状态与失败注入：[durable_effect_protocol.md](durable_effect_protocol.md)；实现提交 `6484416`。
 9. 代码走查得出的首次使用旅程与体验摩擦：[user_experience_review.md](user_experience_review.md)；未进行当前版本 live provider 运行或首次使用者研究。
+10. Muntaser Syed、Marius C. Silaghi, “Pollard: Governed Semantic Execution Trees for Framework-Independent AI Agent Control and Replay,” [arXiv:2610.16145v1](https://arxiv.org/abs/2610.16145v1), 2026-10-12。
+11. Jun He、Deying Yu, “KedgeFlow: A Programmable Control Plane for Enterprise AI Agents,” [arXiv:2610.14810v1](https://arxiv.org/abs/2610.14810v1), 2026-10-10。
+12. Temporal 官方文档：[Event History](https://docs.temporal.io/encyclopedia/event-history.md)、[Workflow Activity](https://docs.temporal.io/workflow-activity.md)、[Activity Definition](https://docs.temporal.io/activity-definition.md)；文档访问日期 2026-10-16。
+13. Chris Richardson, [Pattern: Transactional Outbox](https://microservices.io/patterns/data/transactional-outbox.html)；页面访问日期 2026-10-16。
+14. Jianghong Zhou、Hao Rong、Chen Lin、Daoan Zhang, “Many Steps into One: Reasoning Contraction and the Limits of Safe Memory Reuse for LLM Agents,” [arXiv:2610.17544v1](https://arxiv.org/abs/2610.17544v1), 2026-10-13。
+15. SciXa, [Durable Execution Substrates for Interruption-Tolerant AI Agents](https://scixa.com/article?slug=durable-execution-substrates)；页面作者、日期和来源数量本轮未核实，作为二手背景材料而非实验依据。
 
 ## 后续实验清单
 
@@ -166,8 +180,9 @@ Nervipulsa 已从单纯的工具调用循环扩展出可观察的事件执行主
 4. 验证 handler 双路径拒绝时，模型是否得到可行动的 incomplete/error observation。
 5. 运行严格配对 benchmark，测量 activation、provider 请求、延迟、token 和任务正确率。
 6. 以用例和测量结果决定是否需要通用命名事件订阅 API。
-7. 在 Durable Effect Protocol 的 `dispatching` 提交前后、worker 副作用前后注入进程终止；重启后检查 `/effects` 并验证人工对账路径。不要把进程终止证据外推为断电或存储设备耐久性证据。
+7. 2026-10-16 已完成 durable workflow、transactional outbox、幂等执行、Pollard、KedgeFlow 与本地 effect ledger 的语义对照；结论见[文献筛选记录](literature_screening_2026-10-16.md)。后续设计并验证 `/effects` 之后的可审计人工 reconciliation 路径，避免把未知结果自动重放。
 8. 进行当前版本首次使用者观察：从干净配置完成模型请求和文件修改任务，记录配置耗时、完成耗时、困惑点与失败后的恢复步骤；区分源代码推断、live CLI 观察与真实用户证据。
+9. 用真实编码任务比较 A1 与 A2，测量任务质量、错误可见性、危险重试、人工接管和 token/延迟成本；脚本延迟差不能代替这些指标。
 
 ### 2026-10-05 补记：静态 Python 环境发现
 

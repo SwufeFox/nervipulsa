@@ -21,7 +21,7 @@ Timeout, cancellation after dispatch, worker loss, and uncertain IPC writes are 
 
 ## Operator visibility
 
-Use `/effects` to list unresolved rows across sessions. Each entry includes session and execution identity, state, intent time, and the last persistence error when available. The command explicitly tells the operator not to replay automatically. Resolution is a human reconciliation step; this implementation does not provide an automatic reconciler.
+Use `/effects` to list unresolved rows across sessions. Each entry includes session and execution identity, state, intent time, and the last persistence error when available. The command explicitly tells the operator not to replay automatically. The CLI has no supported command or API to record the operator's external verification or mark a row reconciled, so `/effects` is currently a read-only review surface; an externally confirmed result remains unresolved in the ledger. No automatic reconciler is provided.
 
 ## Failure-injection evidence
 
@@ -34,6 +34,22 @@ SQLite commit failures are injected through a proxy around a real SQLite connect
 
 Relevant coverage lives in [`test_journal.py`](../tests/test_journal.py), [`test_python_host.py`](../tests/test_python_host.py), [`test_cli.py`](../tests/test_cli.py), and [`test_llm.py`](../tests/test_llm.py). The isolated protocol branch passed 29 focused effect tests and 124 tests in its full suite before integration. After merging the protocol and fault-semantics branches, `python -m pytest -q` passed **137 tests in 102.03s**; the integration run also updated the worker-exit regression to expect the current `unknown` state. The chronological failures and reruns are in the [architecture research log](runtime_harness_architecture_research.md).
 
+## OS process-termination experiment (2026-10-14)
+
+The new [`test_crash_boundaries.py`](../tests/test_crash_boundaries.py) probes five gated points by forcibly terminating the Runtime OS process tree, then starting a new Runtime against the same workspace and SQLite file. The worker writes an append-only local marker so a duplicate execution is distinguishable from the original side effect.
+
+| Point | Kill boundary | Durable row after restart | Marker | `/effects` and replay observation |
+| --- | --- | --- | --- | --- |
+| T0 | After `intent` commit, before `dispatching` | `intent` | Absent | Listed unresolved; request is not replayed. |
+| T1 | After `dispatching` commit, before the execute frame is written | `dispatching` | Absent | Listed unresolved; request is not replayed. |
+| T2 | Worker wrote the marker and is held before returning a terminal | `dispatching` | Exactly one entry | Listed unresolved; the effect happened, but no terminal is inferred or replayed. |
+| T3 | Host received the worker terminal, before committing `observed` | `dispatching` | Exactly one entry | Listed unresolved; the in-memory terminal is lost with the process and not replayed. |
+| T4 | `observed` committed and `python.finished` entered the old LLM mailbox, with the actor held before consumption | `observed` | Exactly one entry | No longer unresolved; the old terminal is absent from the new session and its model input. |
+
+The restart probe also sends a fresh user message through a `ScriptedBackend` activation. For T0–T3 it invokes the actual CLI `/effects` handler and checks that the original execution is listed; for T4 it checks the no-unresolved message. Session IDs change on restart. T4 therefore separates durable effect observation from transcript/model recovery: the ledger says `observed`, while the new Runtime does not receive the old terminal.
+
+`python -m pytest tests/test_crash_boundaries.py -q` passed **5 tests in 44.96s** after the final `/effects` state and no-replay assertions were added. The broader regression command `python -m pytest tests/test_crash_boundaries.py tests/test_subprocess_recovery.py tests/test_python_host.py tests/test_journal.py -q` passed **36 tests in 187.57s** after the T4 gate correction and marker fix, before those final assertion-only additions. These are process-termination tests around completed SQLite commits, using a local file marker and scripted model backend. They do not test a kill during SQLite/WAL commit, power loss, storage-controller behavior, remote effects, general task recovery, or exactly-once execution. The ledger preserves uncertainty; it does not restore the prior task or transcript.
+
 ## Limits
 
-The ledger does not make arbitrary Python effects transactional with SQLite. It does not replay Python, roll back file or remote changes, restore a transcript, or guarantee exactly-once behavior. `synchronous=FULL` is a commit policy, not evidence of recovery under power loss, storage-controller failure, or every crash boundary. The earlier [Failure Semantics Baseline](failure_semantics.md) is pinned to commit `41c83d0`; its two process-kill probes predate this ledger and must not be presented as tests of this protocol.
+The ledger does not make arbitrary Python effects transactional with SQLite. It does not replay Python, roll back file or remote changes, restore a transcript, or guarantee exactly-once behavior. `synchronous=FULL` is a commit policy, not evidence of recovery under power loss, storage-controller failure, or every crash boundary. The earlier [Failure Semantics Baseline](failure_semantics.md) remains pinned to commit `41c83d0`; its two process-kill probes predate this ledger and are not protocol evidence. The newer [T0–T4 process-termination experiment](#os-process-termination-experiment-2026-10-14) covers only the specified points after SQLite commits; it does not cover a kill during a commit or WAL write.

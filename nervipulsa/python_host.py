@@ -25,6 +25,10 @@ _PREVIEW = 4 * 1024
 
 
 _IDLE_TICK = 0.25  # safety net only; real wakeups arrive via _signal_wake()
+# Worker interpreter startup is slow on some Windows installations, especially
+# cold starts. Keep both protocol waits bounded while allowing that latency.
+_WORKER_READY_TIMEOUT_SECONDS = 30.0
+_WORKER_EXECUTION_START_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass
@@ -414,7 +418,7 @@ class PythonHost:
                 daemon=True,
             )
             self._stderr_thread.start()
-        deadline = time.monotonic() + 8
+        deadline = time.monotonic() + _WORKER_READY_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             try:
                 item = self._frame_q.get(timeout=0.2)
@@ -649,7 +653,7 @@ class PythonHost:
         handler_fired: list[dict[str, Any]] = []
         handler_snapshot_ids: list[str] | None = None
         start = send_at
-        deadline = send_at + 10
+        deadline = send_at + _WORKER_EXECUTION_START_TIMEOUT_SECONDS
         while True:
             if record.cancel:
                 self._kill_current(record)

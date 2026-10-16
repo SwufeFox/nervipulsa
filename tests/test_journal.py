@@ -50,6 +50,61 @@ def test_effect_intent_commit_failure_rolls_back(tmp_path: Path, monkeypatch: py
         assert journal.close()
 
 
+def test_effect_assessments_append_without_changing_worker_state(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "journal.sqlite")
+    journal.start()
+    try:
+        assert journal.flush()
+        journal.prepare_effect("session-review", "exec-review")
+        journal.mark_effect_dispatching("session-review", "exec-review")
+
+        first = journal.record_effect_assessment(
+            "session-review", "exec-review", "occurred", "operator-a", "Target record 42 is present."
+        )
+        second = journal.record_effect_assessment(
+            "session-review", "exec-review", "not_occurred", "operator-b", "Second check did not find it."
+        )
+
+        pending = journal.unresolved_effects("session-review")
+        assert len(pending) == 1
+        assert pending[0]["state"] == "dispatching"
+        assert pending[0]["latest_assessment"]["id"] == second["id"]
+        assert pending[0]["latest_assessment"]["assessment"] == "not_occurred"
+        assert [row["id"] for row in journal.effect_assessments()] == [second["id"], first["id"]]
+        with sqlite3.connect(journal.path) as connection:
+            assert connection.execute(
+                "SELECT state FROM durable_effects WHERE session_id=? AND execution_id=?",
+                ("session-review", "exec-review"),
+            ).fetchone() == ("dispatching",)
+    finally:
+        assert journal.close()
+
+
+def test_effect_assessment_validates_target_and_required_fields(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "journal.sqlite")
+    journal.start()
+    try:
+        assert journal.flush()
+        journal.prepare_effect("session-review", "exec-open")
+        journal.prepare_effect("session-review", "exec-observed")
+        journal.mark_effect_dispatching("session-review", "exec-observed")
+        journal.observe_effect("session-review", "exec-observed", "succeeded")
+
+        with pytest.raises(ValueError, match="assessment must"):
+            journal.record_effect_assessment("session-review", "exec-open", "maybe", "op", "evidence")
+        with pytest.raises(ValueError, match="non-empty"):
+            journal.record_effect_assessment("session-review", "exec-open", "occurred", " ", "evidence")
+        with pytest.raises(ValueError, match="missing"):
+            journal.record_effect_assessment("session-review", "missing", "occurred", "op", "evidence")
+        with pytest.raises(ValueError, match="already observed"):
+            journal.record_effect_assessment("session-review", "exec-observed", "occurred", "op", "evidence")
+        with pytest.raises(ValueError, match="at most"):
+            journal.record_effect_assessment("session-review", "exec-open", "occurred", "op", "x" * 4001)
+        assert journal.effect_assessments() == []
+    finally:
+        assert journal.close()
+
+
 def test_effect_dispatch_commit_failure_leaves_intent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     journal = Journal(tmp_path / "journal.sqlite")
     journal.start()

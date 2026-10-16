@@ -21,7 +21,17 @@ Timeout, cancellation after dispatch, worker loss, and uncertain IPC writes are 
 
 ## Operator visibility
 
-Use `/effects` to list unresolved rows across sessions. Each entry includes session and execution identity, state, intent time, and the last persistence error when available. The command explicitly tells the operator not to replay automatically. The CLI has no supported command or API to record the operator's external verification or mark a row reconciled, so `/effects` is currently a read-only review surface; an externally confirmed result remains unresolved in the ledger. No automatic reconciler is provided.
+Use `/effects` to list unresolved rows across sessions. Each entry includes session and execution identity, worker state, intent time, and the last persistence error when available. If an operator assessment exists, the latest assessment is shown in a separate field; the row remains listed until a worker terminal is durably observed.
+
+Record an out-of-band assessment explicitly:
+
+```text
+/effects decide <session_id> <execution_id> <occurred|not_occurred|undetermined> --by "<operator>" --evidence "<what was checked and where>"
+/effects history [limit]
+```
+
+Assessments append to SQLite table `effect_assessments`; repeated or contradictory assessments remain in history, with the newest shown alongside the unresolved row. The record does not mutate `durable_effects`, convert a human statement into `observed`, enqueue Python, or authorize a retry. Evidence and operator labels are free-text attestations: Nervipulsa does not authenticate the operator or query the target system to verify the claim. `not_occurred` therefore does not prove that replay is safe. No automatic reconciler or replay is provided. On 2026-10-16, focused coverage via `python -m pytest tests/test_journal.py tests/test_cli.py -q` passed **27 tests**; this does not cover live target verification. The new [CI workflow](../.github/workflows/tests.yml) configures the full suite on Ubuntu and Windows, but has not yet produced a hosted run.
+
 
 ## Failure-injection evidence
 
@@ -48,7 +58,7 @@ The new [`test_crash_boundaries.py`](../tests/test_crash_boundaries.py) probes f
 
 The restart probe also sends a fresh user message through a `ScriptedBackend` activation. For T0–T3 it invokes the actual CLI `/effects` handler and checks that the original execution is listed; for T4 it checks the no-unresolved message. Session IDs change on restart. T4 therefore separates durable effect observation from transcript/model recovery: the ledger says `observed`, while the new Runtime does not receive the old terminal.
 
-`python -m pytest tests/test_crash_boundaries.py -q` passed **5 tests in 44.96s** after the final `/effects` state and no-replay assertions were added. The broader regression command `python -m pytest tests/test_crash_boundaries.py tests/test_subprocess_recovery.py tests/test_python_host.py tests/test_journal.py -q` passed **36 tests in 187.57s** after the T4 gate correction and marker fix, before those final assertion-only additions. These are process-termination tests around completed SQLite commits, using a local file marker and scripted model backend. They do not test a kill during SQLite/WAL commit, power loss, storage-controller behavior, remote effects, general task recovery, or exactly-once execution. The ledger preserves uncertainty; it does not restore the prior task or transcript.
+`python -m pytest tests/test_crash_boundaries.py -q` passed **5 tests in 44.96s** after the final `/effects` state and no-replay assertions were added. After the CLI assessment changes, the first repeat had four passes and a T3 child-startup gate timeout; isolated T3 passed in 11.71s, and the next full repeat passed **5 tests in 58.72s**. The broader regression command `python -m pytest tests/test_crash_boundaries.py tests/test_subprocess_recovery.py tests/test_python_host.py tests/test_journal.py -q` passed **36 tests in 187.57s** after the T4 gate correction and marker fix, before those final assertion-only additions. These are process-termination tests around completed SQLite commits, using a local file marker and scripted model backend. They do not test a kill during SQLite/WAL commit, power loss, storage-controller behavior, remote effects, general task recovery, or exactly-once execution. The ledger preserves uncertainty; it does not restore the prior task or transcript.
 
 ## Limits
 

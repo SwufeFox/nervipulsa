@@ -685,7 +685,7 @@ The test uses `taskkill /T /F` on Windows through the existing process-tree help
 
 ### Next research
 
-The protocol-level comparison is recorded in [literature_screening_2026-10-16.md](literature_screening_2026-10-16.md). `/effects` is currently read-only: operators can inspect external state, but the CLI has no supported way to persist their reconciliation decision. Next, design a truthful, auditable human-resolution record and compare A1/A2 on real coding-task quality and unsafe-retry behavior. Do not add automatic replay without a tool-specific idempotency or reconciliation contract.
+The protocol-level comparison is recorded in [`literature_screening_2026-10-16.md`](literature_screening_2026-10-16.md). The local working tree now has an append-only `/effects decide` assessment path and `/effects history`; operator attestations remain separate from worker state and do not trigger replay. This does not authenticate the operator or verify the target system. Next, validate the command and its audit behavior, then bring T0–T4 into Windows/Linux CI and compare A1/A2 on real coding-task quality and unsafe-retry behavior. Do not add automatic replay without a tool-specific idempotency or reconciliation contract.
 
 ## 2026-10-16 — Literature screen and protocol comparison
 
@@ -703,10 +703,30 @@ Checked canonical arXiv metadata and the relevant sections of Pollard and KedgeF
 
 These mechanisms persist different things: workflow history reconstructs control state; an outbox couples local data and message publication; target idempotency suppresses repeated effects; Pollard reuses ancestry-bound step results; KedgeFlow governs permission to dispatch protected actions; Nervipulsa's ledger persists the observed or uncertain state of a Python execution. They should not be collapsed into a generic “durable log” claim.
 
-The 2026-10-14 local T0–T4 experiment remains evidence of Windows OS-process termination after specified SQLite commits, not power-loss or task recovery. T0–T3 remain unresolved and are not replayed; T4 shows `observed` does not restore actor consumption or transcript state. The focused command passed 5 tests in 44.96s. At this snapshot, `main` and `origin/main` still point to `993683921ce54ffefaa3fa4444574f272373a0e2`; the T0–T4 test and its documentation are uncommitted, so the GitHub `main` page correctly does not contain this experiment.
+The 2026-10-14 local T0–T4 experiment remains evidence of Windows OS-process termination after specified SQLite commits, not power-loss or task recovery. T0–T3 remain unresolved and are not replayed; T4 shows `observed` does not restore actor consumption or transcript state. The focused command passed 5 tests in 44.96s. The experiment and documentation are committed to local `main` as `4d29135`, which is one commit ahead of `origin/main` and has not been pushed. The current operator-assessment implementation is a separate, uncommitted working-tree change.
 
-Source review also found a concrete reconciliation gap: `/effects` lists unresolved rows and warns against automatic replay, but has no supported command/API to record external evidence or an operator decision. This is view-only visibility, not a closed manual-reconciliation workflow. Preserve this distinction in user-facing claims and evaluate an auditable resolution record before adding any retry behavior.
+At the literature-review snapshot, source review found that `/effects` had no supported command/API for recording external evidence or an operator decision. The current working tree adds an append-only assessment record and history command; it does not close the epistemic gap because operator labels and evidence are self-reported, with no authenticated target query. This record is distinct from the worker ledger and cannot authorize replay.
 
 ### Updated research direction
 
-The strongest candidate contribution remains narrow: local coding-agent integration of durable effect uncertainty plus a measured boundary between effect observation and actor consumption. The current evidence does not support a “first” or “unique” claim, durable workflow recovery, or exactly-once effects. Next work is to define and validate the manual resolution path, bring T0–T4 into a committed/CI-visible state, and run paired A1/A2 real coding tasks for quality, false success, unsafe retries, handoff, token use, and latency.
+The strongest candidate contribution remains narrow: local coding-agent integration of durable effect uncertainty plus a measured boundary between effect observation and actor consumption. The current working tree now adds a separately auditable operator assessment, but the evidence does not support a “first” or “unique” claim, authenticated reconciliation, durable workflow recovery, or exactly-once effects. The focused assessment tests passed, and `.github/workflows/tests.yml` configures the full suite on Python 3.11 for Ubuntu and Windows; there is no hosted CI result because the changes have not been pushed. A local CPython 3.13 full-suite run was not green (143 passed, 3 timing/startup failures, each passing in an isolated rerun), so investigate that flakiness before interpreting hosted results. Next run a real target-side operator walkthrough, inspect the hosted matrix once available, and run paired A1/A2 coding tasks for quality, false success, unsafe retries, handoff, token use, and latency.
+
+## 2026-10-16 — Append-only operator assessments
+
+### Research question
+
+Can an operator record an out-of-band check without rewriting the worker's durable outcome or creating implicit retry permission?
+
+### Implementation
+
+Added `effect_assessments` as a separate append-only SQLite table keyed to the effect's `(session_id, execution_id)`. Each row stores a monotonic record ID, one of `occurred`, `not_occurred`, or `undetermined`, a required operator label, free-text evidence, and a timestamp. The write uses `synchronous=FULL` and an immediate transaction, rejects missing effects and rows already observed by the worker, and leaves `durable_effects` unchanged.
+
+The CLI now accepts `/effects decide <session_id> <execution_id> <assessment> --by "<operator>" --evidence "<what was checked>"`; `/effects` continues to list unresolved worker rows and separately shows the latest operator assessment; `/effects history [limit]` lists every assessment newest first. Contradictory entries append rather than overwrite. The command explicitly says the target was not independently verified, worker state was not changed, and Python was not replayed. `not_occurred` does not authorize or perform a retry.
+
+### Verification and limits
+
+`python -m pytest tests/test_journal.py tests/test_cli.py -q` passed **27 tests in 16.76s**. Coverage includes append-only and contradictory entries, worker-state preservation, invalid/missing/observed targets, quoted Windows-path evidence, CLI history, and no-replay output. The first focused run had one failure because the test fixture contained doubled backslashes; correcting the fixture to the literal Windows path made the rerun pass. After the CLI change, T0–T4 was rechecked: the first full attempt had four passes and one T3 child-startup gate timeout; isolated T3 passed in 11.71s, and a subsequent full run passed **5 tests in 58.72s**.
+
+The full local command `python -m pytest -q` ran on Windows CPython 3.13 and ended **143 passed, 3 failed in 378.27s**. Failures were `test_python_environment_tool_runs_before_smoke_test` (8-second idle timeout), `test_cross_file_edit_survives_compression_and_a_new_requirement` (8-second event wait), and `test_observed_effect_is_committed_before_finished` (Journal startup `flush()` returned false). Running those three tests together afterward passed **3 in 19.30s**. This supports a timing/resource-sensitive failure hypothesis but does not establish the root cause; the full suite is not green. No live provider/target test or hosted Linux CI run was performed.
+
+The evidence and operator label remain self-reported. The feature records human judgment; it does not authenticate the actor, prove the target state, make an effect safe to retry, or close an external workflow. `.github/workflows/tests.yml` configures a Python 3.11 full-suite matrix on Ubuntu and Windows. The code, docs, tests, and workflow are uncommitted; no hosted CI run is available until they are pushed.

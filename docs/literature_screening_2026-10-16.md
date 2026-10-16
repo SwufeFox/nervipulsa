@@ -53,24 +53,26 @@ Jianghong Zhou、Hao Rong、Chen Lin、Daoan Zhang，arXiv v1 于 2026-10-13 提
 
 ## 本地 T0–T4 结果与 GitHub `main` 的边界
 
-2026-10-14 的本地 Windows OS 进程树终止实验，对五个提交后窗口进行了门控测试：T0 `intent` 已提交、dispatching 前；T1 `dispatching` 已提交、execute frame 写出前；T2 worker 已追加文件 marker、terminal 前；T3 host 收到 terminal、`observed` 提交前；T4 `observed` 已提交且 `python.finished` 已入旧 mailbox、actor 尚未消费。重启后 T0–T3 都保留 unresolved 且不重放；T2/T3 的 marker 只出现一次。T4 ledger 显示 observed，但新 session 和 model input 没有恢复旧 terminal。定向测试 `python -m pytest tests/test_crash_boundaries.py -q`：5 passed。
+2026-10-14 的本地 Windows OS 进程树终止实验，对五个提交后窗口进行了门控测试：T0 `intent` 已提交、dispatching 前；T1 `dispatching` 已提交、execute frame 写出前；T2 worker 已追加文件 marker、terminal 前；T3 host 收到 terminal、`observed` 提交前；T4 `observed` 已提交且 `python.finished` 已入旧 mailbox、actor 尚未消费。重启后 T0–T3 都保留 unresolved 且不重放；T2/T3 的 marker 只出现一次。T4 ledger 显示 observed，但新 session 和 model input 没有恢复旧 terminal。原定向测试 `python -m pytest tests/test_crash_boundaries.py -q`：5 passed；2026-10-16 修改 CLI 后，第一次复跑有一次 T3 子进程门闩超时，隔离复跑 T3 通过，随后全套复跑 5 passed in 58.72s。
 
-这是已提交 SQLite commit 之后的 OS 进程终止证据，不覆盖 WAL commit 中断、断电、内核/设备故障、远端副作用、任务/transcript 恢复或 exactly-once。当前这批测试和文档仍未提交；远端 `main` 的文档快照不包含它们。因此应同时保留两句话：**本周筛到的论文没有提供与 T0–T4 等价的 Agent Runtime host-crash/task-recovery 实验；Nervipulsa 本地工作树已经有一个范围有限的 T0–T4 进程终止实验。**
+这是已提交 SQLite commit 之后的 OS 进程终止证据，不覆盖 WAL commit 中断、断电、内核/设备故障、远端副作用、任务/transcript 恢复或 exactly-once。T0–T4 测试与相关文档已提交到本地 `main` 的 `4d29135`，尚未推送，因此 GitHub `main` 仍不包含这项实验。当前人工 assessment 功能在工作区，`python -m pytest tests/test_journal.py tests/test_cli.py -q` 已通过 27 项，但尚未提交或进入 CI。应同时保留两句话：**本周筛到的论文没有提供与 T0–T4 等价的 Agent Runtime host-crash/task-recovery 实验；Nervipulsa 本地有一个范围有限的 T0–T4 进程终止实验。**
 
-## 人工核对路径：目前是可见性，不是可闭环对账
+## 人工核对路径：可追加操作者判断，尚无目标端验证
 
-源码检查发现 CLI `/effects` 只列出 `state != observed` 的行，并显示 session、execution、状态、时间、错误和“不要自动重放”警告（[`cli.py`](../nervipulsa/cli.py#L259)、[`journal.py`](../nervipulsa/journal.py#L412)）。当前没有 CLI/API 将操作者查到的外部事实写回 ledger，也没有受审计的 reconcile/resolve 状态。因此操作者可在外部检查效果，但无法通过产品支持的路径把结论记入该账本；该行会继续显示 unresolved。KedgeFlow 的 reconciliation 设计更完整，但它的参考实现也只用 scripted observations 测 reconciliation library，并未部署 authenticated target-query service。
+当前工作树新增 `/effects decide` 和 `/effects history`。人工记录以 append-only `effect_assessments` 表保存，包含 `(session_id, execution_id)`、判定、操作者标签、证据文本和追加顺序；`/effects` 仍显示所有 worker 状态不是 `observed` 的记录，并单独显示最新人工判断。重复或矛盾判断保留在历史中。实现见[`cli.py`](../nervipulsa/cli.py)、[`journal.py`](../nervipulsa/journal.py)和[`runtime.py`](../nervipulsa/runtime.py)。
 
-这是一项具体 UX/协议缺口。若补齐，应追加记录操作者、时间、execution/target、证据来源、判定（已发生/确认未发生/仍未知）及后续动作；保留原 `unknown` 事实，不把人工判断伪装成 worker 的 `observed` terminal，也不触发自动重放。需要再对照实际 effect 类型设计，避免一个“resolve”按钮把不同证据强度和重试权限混在一起。
+这补上了“外部核对后无处记载”的产品缺口，但不提供认证的操作者身份、目标端查询或外部证据验证。证据与操作者是自由文本自述。人工判断不改变原 `durable_effects` 状态、不把人工输入伪装成 worker `observed` terminal，也不发起执行。`not_occurred` 不证明重放安全；如果未来要重试，应另立新执行并制定目标端幂等或授权契约。KedgeFlow 的 reconciliation 设计可作机制对照，但其参考实现也只用 scripted observations 测 reconciliation library，并未部署 authenticated target-query service。
+
+这是可审计的人工判断记录，不是自动 reconciliation 或 durable recovery。`python -m pytest tests/test_journal.py tests/test_cli.py -q` 已通过 **27 tests**；本地 Windows CPython 3.13 全套测试为 **143 passed, 3 failed**，失败项单独复跑均通过，根因尚未确定。.github/workflows/tests.yml 已配置 Ubuntu 和 Windows 全套测试，但尚无托管运行结果。仍需用真实目标系统做人工走查；操作者须自行检查目标系统并选择后续动作。
 
 ## 研究判断与后续
 
-当前材料不支持声称 Nervipulsa 发明了 durable execution、unknown outcome、write-ahead intent、幂等重试或人工对账。可检验的候选贡献较窄：一个本地 coding-agent runtime 把 Python effect 的不确定状态持久化，并用 T0–T4 测量 effect 已知状态与 actor 消费/任务恢复之间的分界。尚需把本地实验合入、在 CI 重现，再做真实副作用类型的人工对账走查与 A1/A2 配对 coding task 测量。
+当前材料不支持声称 Nervipulsa 发明了 durable execution、unknown outcome、write-ahead intent、幂等重试或人工对账。可检验的候选贡献较窄：一个本地 coding-agent runtime 把 Python effect 的不确定状态持久化，并用 T0–T4 测量 effect 已知状态与 actor 消费/任务恢复之间的分界。T0–T4 已在本地 `main` 的 `4d29135` 固定；新 CI workflow 已配置 Ubuntu/Windows，但当前尚未推送，因而没有托管运行结果。人工 assessment 与 workflow 文件仍是未提交的工作区改动。
 
 下一轮优先级：
 
-1. 先补全 view-only `/effects` 后的人工作业路径设计和证据记录字段；实现前明确哪些结论只能由目标端回读证实。
-2. 提交或以新 commit 固定 T0–T4 测试与文档，再将同样边界纳入 Windows/Linux CI；另行设计 SQLite/WAL 写入中终止与持久性假设实验。
+1. 用一个可观测的真实副作用做人工走查：从 `/effects` 复制 session/execution ID，检查目标端，记录证据和判定，再从 `/effects history` 核对追加历史；确认结果不会被误读为自动证明或重试授权。
+2. 将当前本地 CI workflow 纳入远端后，检查 Ubuntu 与 Windows 的完整托管测试结果；另行设计 SQLite/WAL 写入中终止与持久性假设实验。
 3. 用同一组本地 coding tasks 配对比较 A1/A2：任务质量、false-success、unknown 的可理解性、危险重试、人工接管、token 和延迟；ScriptedBackend 消融只能解释机制，不能替代这组测量。
 
 ## 来源

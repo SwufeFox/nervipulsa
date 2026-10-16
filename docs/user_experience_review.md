@@ -55,7 +55,7 @@ CLI 提供 `/status`、`/logs`、`/output`、`/retry`、`/cancel` 和 `/effects`
 
 1. **做一次启动就绪检查。** 集中报告当前 profile、模型是否已选、key 是否已配置，以及本地 endpoint 是否可达；缺项旁直接给出下一条命令。保留 API key 遮蔽。
 2. **补一条完整的五分钟 quickstart。** 用临时或示例 workspace 演示读文件、生成并检查改动、运行验证、查看完整输出；明确 Python 使用的权限和执行目录。可探索 trusted workspace 的预览/确认选项，避免把所有用户都锁进逐次确认。
-3. **把恢复建议放到故障回执旁，并补齐人工对账记录。** 明确区分“取消已请求”与“已确认停止”，提醒 `/retry` 只重试模型轮次；对 `unknown` 直接提示先查 `/effects` 和实际副作用，不要盲目重跑。源码检查确认 `/effects` 目前只能列出 unresolved 项，没有受支持的命令/API 来记录外部证据或人工判定；它是只读可见性，不是完整对账闭环。后续应以追加记录保存操作者、证据来源、判定和后续动作，并保持未知状态的来源可追溯。
+3. **把恢复建议放到故障回执旁，并支持可审计的人工判断。** 明确区分“取消已请求”与“已确认停止”，提醒 `/retry` 只重试模型轮次；对 worker 状态为 `unknown` 的执行，先查目标系统再判断，不能盲目重跑。现在 `/effects decide <session_id> <execution_id> <occurred|not_occurred|undetermined> --by "<operator>" --evidence "<what was checked>"` 会追加保存人工判断，`/effects history` 可查看完整记录，`/effects` 仍显示原 worker 状态和最新人工判断。人工记录是操作者自述，不是目标端认证查询；它不把 `unknown` 改成 `observed`，也不授权或执行重试。
 
 ## 证据边界与下一步
 

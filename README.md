@@ -10,7 +10,7 @@ This checkout contains a v0.4 development implementation. The scripted runtime
 exercises the asynchronous event contract without credentials. Live model calls use the OpenAI Chat Completions HTTP protocol directly. Nervipulsa
 keeps its own tool execution, transcript, and retry state; no model SDK is required.
 
-Python executions use a durable effect ledger. Before an execute frame is written to the worker IPC channel, the runtime commits an `intent` and then `dispatching` with SQLite `synchronous=FULL`; if either commit fails, it does not send the frame. A worker terminal is committed as `observed` before `python.finished` is published. If outcome persistence fails after dispatch, the terminal reports `unknown` and `/effects` lists the unresolved row for review. The protocol does not automatically replay Python or roll back side effects.
+Python executions use a durable effect ledger. Before an execute frame is written to the worker IPC channel, the runtime commits an `intent` and then `dispatching` with SQLite `synchronous=FULL`; if either commit fails, it does not send the frame. A worker terminal is committed as `observed` before `python.finished` is published. If outcome persistence fails after dispatch, the terminal reports `unknown` and `/effects` lists the unresolved row for review. The protocol does not automatically replay Python or roll back side effects. Operators can append an out-of-band assessment with `/effects decide <session_id> <execution_id> <occurred|not_occurred|undetermined> --by "<operator>" --evidence "<what was checked>"` and inspect `/effects history`; these are self-reported attestations, do not change worker state, and never trigger a replay.
 
 ## Runtime extension points
 

@@ -52,14 +52,25 @@ async def main():
     await runtime.start()
     code = "from pathlib import Path\nimport time\np=Path('crash-effect.marker'); f=p.open('a', encoding='utf-8'); f.write('effect\\n'); f.close()\n"
     if fault == "T2": code += f"while not Path({str(gate)!r}).exists(): time.sleep(.01)\n"
-    delivery = runtime.host_emitter.call("python.requested", {"code": code, "timeout": 30}, reserve_result_for="llm")
+    delivery = runtime.host_emitter.call("python.requested", {"code": code, "timeout": 60 if fault == "T2" else 30}, reserve_result_for="llm")
     request_id[0] = delivery.event_id
     assert delivery.accepted
     if fault == "T2":
-        deadline = time.monotonic() + 20
-        while not (root / "crash-effect.marker").exists() and time.monotonic() < deadline: await asyncio.sleep(.01)
-        ready.write_text(json.dumps({"session_id": runtime.bus.session_id, "worker_pid": getattr(runtime.host._managed, "pid", None), "request_id": delivery.event_id, "trace_types": [e.type for e in runtime.trace], "marker": True}))
-        while not gate.exists(): await asyncio.sleep(.01)
+        deadline = time.monotonic() + 60
+        marker_path = root / "crash-effect.marker"
+        while not marker_path.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(.01)
+        if not marker_path.exists():
+            raise RuntimeError("T2 worker did not create the side-effect marker before the gate deadline")
+        ready.write_text(json.dumps({
+            "session_id": runtime.bus.session_id,
+            "worker_pid": getattr(runtime.host._managed, "pid", None),
+            "request_id": delivery.event_id,
+            "trace_types": [e.type for e in runtime.trace],
+            "marker": marker_path.exists(),
+        }))
+        while not gate.exists():
+            await asyncio.sleep(.01)
     if fault in ("T0", "T1", "T3", "T4"):
         while not ready.exists(): await asyncio.sleep(.01)
     while True: await asyncio.sleep(1)
@@ -73,7 +84,7 @@ def test_t0_t4_crash_boundaries(workspace: Path, fault: str, state: str, marker:
     restart = None
     worker_pid = None
     try:
-        before = _wait_json(ready, child)
+        before = _wait_json(ready, child, timeout=70)
         worker_pid = before["worker_pid"]
         assert before["session_id"] and before["request_id"]
         assert before["marker"] is marker
@@ -109,7 +120,7 @@ async def m():
  finally: await r.shutdown()
 asyncio.run(m())'''
         restart = subprocess.Popen([sys.executable, "-c", restart_code, str(workspace), str(restart_path)], cwd=Path(__file__).resolve().parents[1], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **({"start_new_session": True} if os.name != "nt" else {}))
-        after = _wait_json(restart_path, restart); restart.wait(timeout=10)
+        after = _wait_json(restart_path, restart, timeout=70); restart.wait(timeout=30)
         assert after["session"] != before["session_id"]
         assert "activation probe" in str(after["inputs"])
         assert "python.finished" not in str(after["inputs"])

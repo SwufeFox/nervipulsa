@@ -168,7 +168,7 @@ def test_observed_effect_is_committed_before_finished(workspace: Path) -> None:
     async def body() -> None:
         journal = Journal(workspace / "effects-observed.sqlite")
         journal.start()
-        assert journal.flush()
+        assert journal.flush(timeout=15), f"journal startup flush failed: error={journal.error!r}, dropped={journal.dropped}"
         rig = HostRig(workspace)
         rig.host._journal = journal
         original_call = rig.host._results.call
@@ -203,7 +203,7 @@ def test_running_cancel_persists_unknown_effect(workspace: Path) -> None:
     async def body() -> None:
         journal = Journal(workspace / "effects-cancel.sqlite")
         journal.start()
-        assert journal.flush()
+        assert journal.flush(timeout=15), f"journal startup flush failed: error={journal.error!r}, dropped={journal.dropped}"
         rig = HostRig(workspace)
         rig.host._journal = journal
         try:

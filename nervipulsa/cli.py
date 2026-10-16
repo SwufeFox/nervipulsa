@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import shutil
 import sys
+import shlex
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -159,7 +160,7 @@ def handle_line(runtime: Runtime, line: str) -> bool:
         commands = (
             ("/status", "model, Python execution, and context budget"),
             ("/logs", "event ids, delivery, and context changes"),
-            ("/effects", "unresolved durable Python effects"),
+            ("/effects", "unresolved effects; record operator assessments and history"),
             ("/output <id> [stdout|stderr|both]", "full saved output"),
             ("/cancel [id]", "stop the running execution, or the specified queued or running code"),
             ("/retry", "resume a paused model call"),
@@ -256,7 +257,50 @@ def handle_line(runtime: Runtime, line: str) -> bool:
                 f"execution {execution['execution_id']} {execution['status']} epoch={execution['worker_epoch']}"
             )
         return False
-    if stripped == "/effects":
+    if stripped == "/effects" or stripped.startswith("/effects "):
+        try:
+            parts = shlex.split(stripped, posix=False)
+            parts = [
+                part[1:-1]
+                if len(part) >= 2 and part[0] == part[-1] and part[0] in "\\\"'"
+                else part
+                for part in parts
+            ]
+            if len(parts) >= 2 and parts[1] == "decide":
+                usage = 'usage: /effects decide <session_id> <execution_id> <occurred|not_occurred|undetermined> --by "<operator>" --evidence "<evidence text>"'
+                if len(parts) != 9 or parts[5] != "--by" or parts[7] != "--evidence":
+                    raise ValueError(usage)
+                recorded = runtime.record_effect_assessment(
+                    parts[2], parts[3], parts[4], parts[6], parts[8]
+                )
+                runtime.echo(
+                    f"Recorded operator assessment #{recorded['id']}: "
+                    f"{recorded['assessment']} by {recorded['operator']}."
+                )
+                runtime.echo("This is an operator attestation; the target was not independently verified.")
+                runtime.echo("Worker state was not changed and Python was not replayed.")
+                if recorded["assessment"] == "not_occurred":
+                    runtime.echo("This assessment does not authorize or perform a retry.")
+                return False
+            if len(parts) in {2, 3} and parts[1] == "history":
+                limit = 100 if len(parts) == 2 else int(parts[2])
+                if limit < 1:
+                    raise ValueError("history limit must be positive")
+                history = runtime.effect_assessments(limit)
+                if not history:
+                    runtime.echo("No operator effect assessments.")
+                for item in history:
+                    runtime.echo(
+                        f"operator attestation #{item['id']} {item['assessment']} "
+                        f"session={item['session_id']} execution={item['execution_id']} "
+                        f"by={item['operator']} at={item['assessed_at']}: {item['evidence']}"
+                    )
+                return False
+            if len(parts) != 1:
+                raise ValueError("usage: /effects [history [limit] | decide ...]")
+        except (ValueError, IndexError) as exc:
+            runtime.echo(f"[effects error] {exc}")
+            return False
         unresolved = runtime.unresolved_effects()
         if not unresolved:
             runtime.echo("No unresolved durable effects.")
@@ -265,6 +309,15 @@ def handle_line(runtime: Runtime, line: str) -> bool:
                 f"effect session={effect['session_id']} execution={effect['execution_id']} "
                 f"{effect['state']} intent_at={effect['intent_at']} error={effect.get('error') or '-'}"
             )
+            latest = effect.get("latest_assessment")
+            if latest:
+                evidence_preview = latest["evidence"][:200]
+                if len(latest["evidence"]) > 200:
+                    evidence_preview += "…"
+                runtime.echo(
+                    f"  operator assessment: {latest['assessment']} by {latest['operator']} "
+                    f"at={latest['assessed_at']} evidence={evidence_preview}"
+                )
             runtime.echo("  Do not automatically replay: execution may already have taken effect.")
         return False
     if stripped.startswith("/output"):

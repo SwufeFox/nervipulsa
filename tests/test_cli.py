@@ -429,11 +429,80 @@ def test_effects_command_lists_unresolved_records() -> None:
             self.echo = self.output.append
 
         def unresolved_effects(self):
-            return [{"execution_id": "exec-1", "session_id": "session-2", "state": "dispatching", "intent_at": 12.5, "error": None}]
+            return [{
+                "execution_id": "exec-1",
+                "session_id": "session-2",
+                "state": "dispatching",
+                "intent_at": 12.5,
+                "error": None,
+                "latest_assessment": {
+                    "assessment": "occurred",
+                    "operator": "Lolin",
+                    "assessed_at": 13.5,
+                    "evidence": "Target record 42 exists.",
+                },
+            }]
 
     runtime = RuntimeStub()
     assert handle_line(runtime, "/effects") is False
     assert runtime.output == [
         "effect session=session-2 execution=exec-1 dispatching intent_at=12.5 error=-",
+        "  operator assessment: occurred by Lolin at=13.5 evidence=Target record 42 exists.",
         "  Do not automatically replay: execution may already have taken effect.",
     ]
+
+
+def test_effects_decide_preserves_quoted_windows_evidence() -> None:
+    class RuntimeStub:
+        def __init__(self) -> None:
+            self.output: list[str] = []
+            self.echo = self.output.append
+            self.recorded = None
+
+        def record_effect_assessment(self, *args):
+            self.recorded = args
+            return {
+                "id": 7,
+                "assessment": args[2],
+                "operator": args[3],
+                "evidence": args[4],
+            }
+
+    runtime = RuntimeStub()
+    command = r'/effects decide session-2 exec-1 not_occurred --by "Lolin" --evidence "Checked C:\workspace\results\effect.txt and found no entry."'
+    assert handle_line(runtime, command) is False
+    assert runtime.recorded == (
+        "session-2",
+        "exec-1",
+        "not_occurred",
+        "Lolin",
+        r"Checked C:\workspace\results\effect.txt and found no entry.",
+    )
+    assert "This is an operator attestation; the target was not independently verified." in runtime.output
+    assert "Worker state was not changed and Python was not replayed." in runtime.output
+    assert "This assessment does not authorize or perform a retry." in runtime.output
+
+
+def test_effects_history_defaults_limit_and_shows_all_records() -> None:
+    class RuntimeStub:
+        def __init__(self) -> None:
+            self.output: list[str] = []
+            self.echo = self.output.append
+            self.limit = None
+
+        def effect_assessments(self, limit):
+            self.limit = limit
+            return [{
+                "id": 2,
+                "assessment": "not_occurred",
+                "session_id": "session-2",
+                "execution_id": "exec-1",
+                "operator": "Lolin",
+                "assessed_at": 12.5,
+                "evidence": r"Checked C:\workspace\result.txt.",
+            }]
+
+    runtime = RuntimeStub()
+    assert handle_line(runtime, "/effects history") is False
+    assert runtime.limit == 100
+    assert "operator attestation #2 not_occurred session=session-2 execution=exec-1 by=Lolin at=12.5: " + r"Checked C:\workspace\result.txt." in runtime.output

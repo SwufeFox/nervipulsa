@@ -409,6 +409,90 @@ class Journal:
         finally:
             connection.close()
 
+    def record_effect_assessment(
+        self, session_id: str, execution_id: str, assessment: str, operator: str, evidence: str
+    ) -> dict[str, Any]:
+        """Append an operator assessment without changing worker state."""
+        if assessment not in {"occurred", "not_occurred", "undetermined"}:
+            raise ValueError("assessment must be occurred, not_occurred, or undetermined")
+        if not session_id.strip() or not execution_id.strip():
+            raise ValueError("session_id and execution_id must be non-empty")
+        operator = operator.strip()
+        evidence = evidence.strip()
+        if not operator or not evidence:
+            raise ValueError("operator and evidence must be non-empty")
+        if len(operator) > 200 or len(evidence) > 4000:
+            raise ValueError("operator must be at most 200 characters and evidence at most 4000 characters")
+
+        connection = sqlite3.connect(self.path, timeout=5)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("BEGIN IMMEDIATE")
+            has_effects = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_effects'"
+            ).fetchone()
+            if has_effects is None:
+                raise ValueError("effect is missing")
+            connection.execute("""CREATE TABLE IF NOT EXISTS effect_assessments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL, execution_id TEXT NOT NULL,
+                assessment TEXT NOT NULL CHECK(assessment IN ('occurred','not_occurred','undetermined')),
+                operator TEXT NOT NULL, evidence TEXT NOT NULL, assessed_at REAL NOT NULL)""")
+            effect = connection.execute(
+                "SELECT state FROM durable_effects WHERE session_id=? AND execution_id=?",
+                (session_id, execution_id),
+            ).fetchone()
+            if effect is None:
+                raise ValueError("effect is missing")
+            if effect["state"] == "observed":
+                raise ValueError("effect is already observed")
+            assessed_at = time.time()
+            cursor = connection.execute(
+                "INSERT INTO effect_assessments(session_id,execution_id,assessment,operator,evidence,assessed_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (session_id, execution_id, assessment, operator, evidence, assessed_at),
+            )
+            connection.commit()
+            return {
+                "id": cursor.lastrowid,
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "assessment": assessment,
+                "operator": operator,
+                "evidence": evidence,
+                "assessed_at": assessed_at,
+            }
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def effect_assessments(self, limit: int = 100) -> list[dict[str, Any]]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        if not self.path.exists():
+            return []
+        connection = sqlite3.connect(self.path, timeout=2)
+        connection.row_factory = sqlite3.Row
+        try:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='effect_assessments'"
+            ).fetchone()
+            if table is None:
+                return []
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT id,session_id,execution_id,assessment,operator,evidence,assessed_at "
+                    "FROM effect_assessments ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                )
+            ]
+        finally:
+            connection.close()
+
     def unresolved_effects(self, session_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """List effects whose worker outcome has no durable observed commit."""
         if not self.path.exists():
@@ -421,13 +505,29 @@ class Journal:
             ).fetchone()
             if tables is None:
                 return []
-            return [dict(row) for row in connection.execute(
-                "SELECT execution_id, session_id, state, intent_at, observed_at, outcome, error "
-                "FROM durable_effects WHERE state!='observed' "
-                + ("AND session_id=? " if session_id is not None else "")
-                + "ORDER BY intent_at DESC LIMIT ?",
-                ((session_id, limit) if session_id is not None else (limit,))
-            )]
+            results = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT execution_id, session_id, state, intent_at, observed_at, outcome, error "
+                    "FROM durable_effects WHERE state!='observed' "
+                    + ("AND session_id=? " if session_id is not None else "")
+                    + "ORDER BY intent_at DESC LIMIT ?",
+                    ((session_id, limit) if session_id is not None else (limit,)),
+                )
+            ]
+            assessment_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='effect_assessments'"
+            ).fetchone()
+            for effect in results:
+                latest = None
+                if assessment_table is not None:
+                    latest = connection.execute(
+                        "SELECT id,assessment,operator,evidence,assessed_at FROM effect_assessments "
+                        "WHERE session_id=? AND execution_id=? ORDER BY id DESC LIMIT 1",
+                        (effect["session_id"], effect["execution_id"]),
+                    ).fetchone()
+                effect["latest_assessment"] = dict(latest) if latest else None
+            return results
         finally:
             connection.close()
 

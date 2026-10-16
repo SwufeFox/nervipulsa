@@ -262,7 +262,7 @@ def test_incomplete_handler_status_reaches_provider_activation(workspace: Path) 
                 lane_key=request_id,
             )
             assert terminal.accepted
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
 
             # Assert the exact messages passed to the mock provider, not just the
             # journal, actor transcript, or activation ledger.
@@ -310,7 +310,7 @@ def test_messages_batch_and_arrivals_during_inference_wait(workspace: Path) -> N
             await started.wait()
             runtime.submit_text("during")
             release.set()
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             assert backend.calls == 2
             first_users = _user_texts(backend.requests[0])
             second_users = _user_texts(backend.requests[1])
@@ -340,7 +340,7 @@ def test_python_exec_default_adapter_emits_request_and_correlated_terminal(works
         try:
             await runtime.start()
             runtime.submit_text("run python")
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             requested = [event for event in runtime.trace if event.type == "python.requested"]
             finished = [event for event in runtime.trace if event.type == "python.finished"]
             assert len(requested) == len(finished) == 1
@@ -386,7 +386,7 @@ def test_python_exec_default_adapter_emits_request_and_correlated_terminal(works
         try:
             await runtime.start()
             runtime.submit_text("go")
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             assert not any(event.type == "python.requested" for event in runtime.trace)
             assert backend.calls == 2
         finally:
@@ -404,7 +404,7 @@ def test_python_exec_default_adapter_emits_request_and_correlated_terminal(works
         try:
             await runtime.start()
             runtime.submit_text("go")
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             requested = [event for event in runtime.trace if event.type == "python.requested"]
             finished = [event for event in runtime.trace if event.type == "python.finished"]
             assert len(requested) == 1
@@ -440,7 +440,7 @@ def test_commit_interruption_does_not_repeat_an_accepted_call(workspace: Path) -
             assert backend.calls == 1
             runtime.actor.after_tool = None
             assert runtime.retry().accepted
-            assert await runtime.wait_until_idle(10)
+            assert await runtime.wait_until_idle(30)
             finished = [event for event in runtime.trace if event.type == "python.finished"]
             stdout = "".join(str(event.payload.get("stdout") or "") for event in finished)
             assert stdout.count("A") == 1
@@ -470,7 +470,7 @@ def test_unknown_response_is_not_retried_until_asked(workspace: Path) -> None:
             await asyncio.sleep(0.3)
             assert backend.calls == 1
             assert runtime.retry().accepted
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             assert backend.calls >= 2
             assert any(message.get("content") == "resumed" for message in runtime.actor.transcript.messages)
         finally:
@@ -496,7 +496,7 @@ def test_safe_retry_does_not_duplicate_the_projected_batch(workspace: Path) -> N
             runtime.submit_text("hello")
             await _until(lambda: runtime.actor.paused is not None)
             runtime.submit_text("again")
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             assert seen[0] == ["hello"]
             assert seen[1] == ["hello"]
             assert "again" in seen[2][-1]
@@ -521,10 +521,10 @@ def test_budget_and_context_pause_without_dropping_history(workspace: Path) -> N
         try:
             await runtime.start()
             runtime.submit_text("loop")
-            await _until(lambda: runtime.actor.paused is not None and runtime.actor.paused.error_kind == "budget", timeout=10)
+            await _until(lambda: runtime.actor.paused is not None and runtime.actor.paused.error_kind == "budget", timeout=30)
             assert backend.calls == 2
             runtime.submit_text("stop")
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             assert backend.calls == 3
         finally:
             await runtime.shutdown()
@@ -581,7 +581,7 @@ def test_python_environment_runtime_error_becomes_failed_event(workspace: Path, 
         try:
             await runtime.start()
             runtime.submit_text("Inspect the Python environment")
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             event_payloads = [
                 json.loads(str(message["content"]))["payload"]
                 for message in backend.requests[1].messages
@@ -640,7 +640,7 @@ def test_python_environment_scan_does_not_block_actor_loop(workspace: Path, monk
             delivery = runtime.submit_text("follow-up during environment scan")
             assert delivery.accepted
             release_scan.set()
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             assert any(event.type == "python.environment_discovered" for event in runtime.trace)
             assert backend.calls == 2
             second_request = backend.requests[1]
@@ -676,7 +676,7 @@ def test_python_environment_tool_runs_before_smoke_test(workspace: Path) -> None
         try:
             await runtime.start()
             runtime.submit_text("Use unfamiliar customlib")
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             request = backend.requests[0]
             assert [tool["function"]["name"] for tool in request.tools] == ["python_exec", "python_environment"]
             receipts = [message for message in runtime.actor.transcript.messages if message.get("role") == "tool"]
@@ -714,7 +714,7 @@ def test_provider_usage_and_context_measurements_are_journaled(workspace: Path) 
         try:
             await runtime.start()
             runtime.submit_text("record context")
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
             activation = runtime.actor.activations[0]
             metrics = activation.context_metrics
             request = backend.requests[0]
@@ -882,7 +882,7 @@ def test_context_compaction_does_not_replay_completed_executions(workspace: Path
                     lambda: sum(event.type == "python.finished" for event in runtime.trace)
                     >= index + 1
                 )
-                assert await runtime.wait_until_idle(8)
+                assert await runtime.wait_until_idle(30)
 
             assert len(issued) == 12
             task_requests = [item for item in backend.requests if item.purpose != "context_summary"]
@@ -1024,7 +1024,7 @@ def test_shutdown_stops_a_running_worker_and_journal_omits_the_key(workspace: Pa
         try:
             await runtime.start()
             runtime.submit_text("run")
-            await _until(lambda: any(event.type == "python.started" for event in runtime.trace))
+            await _until(lambda: any(event.type == "python.started" for event in runtime.trace), timeout=30)
             pid = runtime.host.managed_pids()[0]
             await runtime.shutdown()
             assert runtime.host.managed_pids() == []
@@ -1231,12 +1231,12 @@ def test_cross_file_edit_survives_compression_and_a_new_requirement(workspace: P
                 "Make value() return 2 and total() return value() by editing left.py and right.py. "
                 "Then be ready to run test_app.py."
             )
-            await _until(lambda: sum(event.type == "python.requested" for event in runtime.trace) >= 2)
+            await _until(lambda: sum(event.type == "python.requested" for event in runtime.trace) >= 2, timeout=30)
             runtime.actor.context_limit = runtime.actor.projector.view_length() + 50
-            await asyncio.wait_for(summary_started.wait(), timeout=8)
+            await asyncio.wait_for(summary_started.wait(), timeout=30)
             runtime.submit_text(new_requirement)
             release_summary.set()
-            idle = await runtime.wait_until_idle(20)
+            idle = await runtime.wait_until_idle(60)
             if not idle:
                 paused = runtime.actor.paused
                 detail = (
@@ -1327,7 +1327,7 @@ def test_host_delivery_rejection_status_reaches_provider_and_is_acknowledged(wor
         try:
             await runtime.start()
             runtime.submit_text("Run Python and report handler delivery status.")
-            assert await runtime.wait_until_idle(8)
+            assert await runtime.wait_until_idle(30)
 
             terminals = [event for event in runtime.trace if event.type == "python.finished"]
             assert len(terminals) == 1

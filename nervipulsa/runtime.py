@@ -113,6 +113,9 @@ class Runtime:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
         self.journal.start()
+        if not await asyncio.to_thread(self.journal.flush, timeout=15):
+            detail = self.journal.error or "writer did not acknowledge startup flush"
+            raise RuntimeError(f"journal initialization failed: {detail}")
         self.bus.add_observer(self._observe)
         self.bus.add_delivery_sink(self._observe_delivery)
         self.bus.start()
@@ -168,11 +171,29 @@ class Runtime:
 
 
     def logs(self, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
-        self.journal.flush(timeout=2)
+        if not self.journal.flush(timeout=2):
+            detail = self.journal.error or "writer did not flush before timeout"
+            raise RuntimeError(f"journal flush failed: {detail}")
         return self.journal.recent(self.bus.session_id, limit)
 
     def unresolved_effects(self, limit: int = 100) -> list[dict[str, Any]]:
         return self.journal.unresolved_effects(limit=limit)
+
+    def record_effect_assessment(
+        self,
+        session_id: str,
+        execution_id: str,
+        assessment: str,
+        operator: str,
+        evidence: str,
+    ) -> dict[str, Any]:
+        return self.journal.record_effect_assessment(
+            session_id, execution_id, assessment, operator, evidence
+        )
+
+    def effect_assessments(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self.journal.effect_assessments(limit)
+
     def apply_provider_settings(self, settings: Settings, backend: Any) -> None:
         self.settings = settings
         self.backend = backend

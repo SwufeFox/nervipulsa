@@ -96,7 +96,7 @@ flowchart TD
 
 默认 worker 以当前用户权限执行任意 Python，workspace 只是 cwd，既不是访问根也不是沙箱。host 过滤传给 worker 的环境，配置 API key 不主动写入 journal/worker 环境；这不阻止默认 worker 以用户权限读取其他文件。journal、输出、代码和模型请求可能包含任务数据，不能视为脱敏存储。provider 地址与凭据是显式信任边界。
 
-Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：使用无 capability 的 AppContainer、临时 ACL 和 Job Object；启动前拒绝链接/reparse point/硬链接，设置失败不回退到普通进程。扫描与 ACL 之间仍有外部并发修改窗口，也不提供完整资源限制。详见 README 的执行边界。Hashline 的路径/tag 检查只保护该编辑 API；独立 socket 只防正常 stdout/stderr 混入控制帧，不构成对恶意 worker 的认证隔离。
+Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：使用无 capability 的 AppContainer、临时 ACL 和 Job Object；启动前拒绝链接/reparse point/硬链接，设置失败不回退到普通进程。该 worker 还必须能**读取自己的解释器目录**（容器启动第一步是加载 `python.exe` 及其 DLL），而 host 只对 runtime package 授权、不对解释器本身授权：Windows Store 版 Python 已对应用包授予读权限可直接使用，python.org / `hostedtoolcache` 类安装默认只授权 SYSTEM、Administrators 与交互用户，需要显式给解释器目录加 `ALL APPLICATION PACKAGES` 读权限，否则 worker 会在运行任何 Python 之前退出——host 现在会报告退出码与解释器路径，而不是仅给出空的启动错误。扫描与 ACL 之间仍有外部并发修改窗口，也不提供完整资源限制。详见 README 的执行边界。Hashline 的路径/tag 检查只保护该编辑 API；独立 socket 只防正常 stdout/stderr 混入控制帧，不构成对恶意 worker 的认证隔离。
 
 `--fingerprint-workspace` 保留为默认关闭的观测能力。启用后 host 在每次调度执行前后通过线程扫描共享树，排除任意深度 `.git` 和 `.nervipulsa`，摘要包含相对路径、节点类型、普通文件内容和符号链接目标文字。扫描失败记录 error/unavailable；两个 available 摘要不同时 changed=true，否则相同为 false，无法比较为 null。结果只进 executions.metadata_json 和 `/logs`，不进入 python.finished/model context，也不写入 effect ledger。
 

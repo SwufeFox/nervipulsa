@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 
 from nervipulsa.appcontainer import AppContainerUnavailable, launch
-from nervipulsa.process_tree import _cleanup_appcontainer, filtered_environment
+from nervipulsa.process_tree import (
+    LOADER_FAILURE_EXIT_CODES,
+    _cleanup_appcontainer,
+    describe_loader_failure,
+    filtered_environment,
+)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows AppContainer API")
@@ -65,7 +70,18 @@ Path(r'%s').write_text(json.dumps({'appcontainer': bool(value.value), 'inside': 
     try:
         proc, profile, metadata = launch(argv, env, workspace, output, control_child.fileno())
         control_child.close()
-        assert proc.wait(timeout=20) == 0, proc.stderr.read().decode("utf-8", "replace")
+        exit_code = proc.wait(timeout=20)
+        if (exit_code & 0xFFFFFFFF) in LOADER_FAILURE_EXIT_CODES:
+            # The container never ran Python. This is decided from the exit code
+            # actually observed, never from the platform, path or interpreter
+            # name: a loader failure is about the interpreter tree not being
+            # readable by the container, and a real isolation break must still
+            # fail rather than skip.
+            pytest.skip(
+                describe_loader_failure(exit_code)
+                or "worker could not load its image (0x%08X)" % (exit_code & 0xFFFFFFFF)
+            )
+        assert exit_code == 0, proc.stderr.read().decode("utf-8", "replace")
         state = json.loads(result_path.read_text(encoding="utf-8"))
         assert state == {"appcontainer": True, "inside": "worker-write", "outside_denied": True, "network_denied": True}
     except Exception:

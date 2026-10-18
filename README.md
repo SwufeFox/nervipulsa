@@ -310,7 +310,15 @@ the existing process tree cleanup status.
 This prototype is Windows only and requires AppContainer support, `icacls`,
 and permission to create/delete an AppContainer profile and adjust the selected
 ACLs. Any setup failure prevents worker startup; it never falls back to an
-ordinary process. It does not provide resource limits or a complete defense
+ordinary process. The worker also needs to **read its own interpreter tree**,
+because the container starts by loading `python.exe` and its DLLs; the host
+grants read access only to the runtime package, not to the interpreter. A
+Windows Store Python installation already grants application packages read
+access and works as-is, while a python.org or `hostedtoolcache` installation
+grants read access only to SYSTEM, Administrators, and the interactive user, so
+it needs an explicit `ALL APPLICATION PACKAGES` read grant on the interpreter
+tree. Without that grant the worker exits before running Python; the host
+reports the exit code and interpreter path instead of an empty startup error. It does not provide resource limits or a complete defense
 against all Windows brokered resources. The link scan happens before ACL changes,
 so a separate process that can mutate the selected trees concurrently could race
 that scan; use this prototype with a workspace that is not being changed by an

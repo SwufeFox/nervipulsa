@@ -17,6 +17,42 @@ import threading
 from pathlib import Path
 from typing import Any
 
+# Windows NTSTATUS values a process reports when it never reached its own entry
+# point because the image or one of its dependencies could not be loaded.
+LOADER_FAILURE_EXIT_CODES = {
+    0xC0000135: "STATUS_DLL_NOT_FOUND",
+    0xC0000142: "STATUS_DLL_INIT_FAILED",
+    0xC000007B: "STATUS_INVALID_IMAGE_FORMAT",
+}
+
+
+def describe_loader_failure(exit_code: int | None, interpreter: str | None = None) -> str | None:
+    """Explain a loader-class worker exit, or return None for other exits.
+
+    A worker that dies this way never ran a line of Python, so its stderr is
+    usually empty and the raw exit code is the only evidence. The common cause
+    under the AppContainer worker is that the interpreter directory is not
+    readable to the container: the child cannot map python.exe's DLLs.
+    """
+    if exit_code is None:
+        return None
+    unsigned = exit_code & 0xFFFFFFFF
+    name = LOADER_FAILURE_EXIT_CODES.get(unsigned)
+    if name is None:
+        return None
+    target = interpreter or sys.executable
+    return (
+        f"worker process could not load its image or DLLs before running Python "
+        f"(exit code 0x{unsigned:08X} {name}) for interpreter {target}; "
+        "the interpreter and its DLL directories must be readable by the worker "
+        "account. Under the experimental AppContainer worker that means the "
+        "interpreter tree needs read access granted to the container SID; a "
+        "python.org or hostedtoolcache install grants only SYSTEM, Administrators "
+        "and the interactive user, while a Windows Store Python already grants "
+        "application packages read access."
+    )
+
+
 _ALLOW = {
     "PATH",
     "PATHEXT",

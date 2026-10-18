@@ -800,3 +800,50 @@ LayerFS 管 Branch/Commit/Workspace 文件状态；Nervipulsa 管执行事件、
 - `git diff --check` 无输出（退出码 0）。
 
 证据边界：hosted CI 的失败是首次 Linux 全量运行暴露的线程时序竞态，本轮修复与对照验证在本机完成，未重跑 hosted CI，也未在 Linux 本地复现该竞态。10 秒有界等待是兜底值，不是对“取消必然调用 `_kill_current`”这一前提的独立验证；该前提若被后续改动打破，取消终态仍会退回读取当下（可能陈旧的）判定。本轮未提交、未推送。
+
+## 2026-10-18（第二轮）：windows-latest 两条失败的根因与本机复现
+
+来源边界：本节针对 hosted CI（GitHub Actions `windows-latest`，Python 3.11，`python -m pytest -q`）在 `ffd6edf` 上的运行结果 **2 failed / 146 passed**。两条失败均在本机复现到与 CI 一致的签名；本轮**未重跑 hosted CI**，因此下文区分「本机复现」与「CI 观测」。
+
+### 失败一：`test_llm.py::test_counted_handler_coalescing_is_bounded_and_uses_initial_batch`
+
+CI 签名：`assert 0.020 <= elapsed < 0.15`，实测 `elapsed = 0.016000000000019554`。
+
+根因（本机实测确认，与直觉相反）：不是「时钟测量不准」这么简单。`_coalesce_handler_results` 的 25ms 宽限期原用 `asyncio.get_running_loop().time()` 记 deadline。Windows 上该时钟在 Python 3.13 起才改为 QueryPerformanceCounter（CPython issue gh-88494 / PR #116781）；3.11 及更早仍是 GetTickCount64，粒度 15.625ms。
+
+本机证据：`time.get_clock_info("monotonic")` 在 3.10 为 `GetTickCount64(), resolution=0.015625`，在 3.13 为 `QueryPerformanceCounter(), resolution=1e-07`。更关键的是，仅把 deadline 换成 `perf_counter()` 不够——探针 `.scratch/probe_clock_truth.py` 在 3.10 下对照四种写法（各 12 次）：
+
+| 写法 | 3.10 实测（ms） |
+| --- | --- |
+| A 直接 `wait_for(coro, 0.025)` | 8.98–16.20 |
+| B perf_counter deadline，超时即 break | 14.69–16.55 |
+| C loop.time() deadline，超时即 break | 14.44–16.61 |
+| D perf_counter deadline，超时后重试直到 deadline 真到 | 25.00–25.12 |
+
+即：`asyncio.wait_for` 的定时器同样跑在事件循环时钟上，在粗糙时钟平台会让超时提前触发；只换 deadline 的 B 与原来的 C 一样大约 15.6ms。因此修复必须两者同时做：高分辨率 deadline + 超时后重试而非直接 break。
+
+修复：`deadline = time.perf_counter() + 0.025`，循环内比较与 remaining 均用 perf_counter，`except asyncio.TimeoutError: continue`（重新检查 deadline，而不是当作到期）。25ms 数值、legacy 无 count 才启用宽限期、declared zero 不等待这些语义不变。测试侧改用自己的 `time.perf_counter()` 计时并附注释说明断言测的是等待时长、不是平台时钟量化误差。
+
+修复后探针 `.scratch/probe_clock_fixed2.py` 对照（各 8 次）：3.10 下旧写法 12.67–16.82ms、新写法 25.00–25.13ms；3.13 下两者都是约 25ms。
+
+### 失败二：`test_appcontainer.py::test_appcontainer_isolation_boundaries`
+
+CI 签名：`proc.wait(timeout=20)` 返回 3221225781 = `0xC0000135`（STATUS_DLL_NOT_FOUND），子进程 stderr 为空。
+
+根因（本机复现同一退出码）：`launch()` 只对 write_roots（workspace/output）与 source_root/package_root 授权，**解释器自身目录没有对 AppContainer SID 的读取授权**，子进程因此无法加载 python.exe 及其 DLL，在运行任何 Python 代码之前就退出，所以 stderr 为空、只有退出码。本机同一个 `launch()`、同 env/workspace，仅更换 `argv[0]`（`.scratch/probe_appcontainer.py`）：
+
+| 解释器 | 退出码 |
+| --- | --- |
+| Store 版 `C:\Program Files\WindowsApps\...\Python3.13\python.exe` | `0x00000000` |
+| python.org 版 `...\AppData\Local\Programs\Python\Python310\python.exe` | `0xC0000135` |
+
+DACL 差异与该解释一致：Store 树含 `S-1-19-512-4096:(OI)(CI)(RX,...)` 等应用包/能力 ACE，python.org 树只有 SYSTEM / Administrators / 交互用户。用 Store 解释器起的容器进程实测读取 python.org 树报 `PermissionError [WinError 5]`（`.scratch/probe_appcontainer_read.py`）。CI 的解释器位于 `C:\hostedtoolcache\windows\Python\3.11.9\x64\`，属 python.org 类安装。
+
+修复（产品侧 + 测试侧，不掩盖）：
+1. `process_tree.py` 新增 `LOADER_FAILURE_EXIT_CODES` 与 `describe_loader_failure()`，对 `0xC0000135` / `0xC0000142` / `0xC000007B` 给出含退出码与解释器路径的成因说明。
+2. `python_host.py` 的 worker ready 等待在子进程 ready 前退出时，改走 `_startup_failure_text()`，把退出码纳入诊断，替代原先只有 stderr 的 `worker exited during startup`；成功路径未增加等待。
+3. 测试在**实测到加载器失败码**时跳过并给出 reason；其余环境保持全部原隔离断言（appcontainer=True / inside 写读 / outside_denied / network_denied / cleanup）不变。判定只看退出码，不看平台名或路径——真正的隔离缺陷仍会失败而不是跳过。
+
+### 本轮未验证
+
+未重跑 hosted CI（结论来自 CI 观测 + 本机复现）。本机 3.13 用 QPC 时钟，该平台上计时测试本来就通过，所以「3.13 通过」不能证明 3.11 场景已修；粗糙时钟结论来自 3.10 探针与 clock_info 证据。AppContainer 修复只在本机验证了错误信息与跳过判定，未在真正需要跳过（CI 那种具名安装）的环境复跑；「该解释器树对容器不可读」是本机配对实验 + DACL + 读取探针的因果推断，不是对 CI 机器的直接观测。本轮未提交、未推送。

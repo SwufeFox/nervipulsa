@@ -863,7 +863,12 @@ class LLMActor:
                 received.setdefault(request_id, set())
 
         register_finished(batch)
-        deadline = asyncio.get_running_loop().time() + 0.025
+        # Use the high-resolution clock, not loop.time(). On Windows before 3.13
+        # loop.time() is GetTickCount64 with a 15.625 ms granularity, so a 25 ms
+        # grace period is measured and, worse, quantised to one or two ticks; the
+        # wait could end after ~16 ms. perf_counter() is QueryPerformanceCounter on
+        # Windows and nanosecond-resolution on POSIX.
+        deadline = time.perf_counter() + 0.025
         found: list[Event] = []
 
         def count_handlers(events: list[Event]) -> None:
@@ -888,7 +893,7 @@ class LLMActor:
                 for request_id, count in expected.items()
             )
             legacy_pending = any(count is None for count in expected.values())
-            now = asyncio.get_running_loop().time()
+            now = time.perf_counter()
             if all_counted_complete and (not legacy_pending or now >= deadline):
                 break
             remaining = deadline - now
@@ -899,7 +904,11 @@ class LLMActor:
                     self.inbox.take_batch(self.batch_limit), remaining
                 )
             except asyncio.TimeoutError:
-                break
+                # asyncio schedules timers on the event loop clock, which is
+                # quantised on the same platforms, so this timeout can fire
+                # before the high-resolution deadline has actually passed.
+                # Re-check the deadline rather than treating it as expiry.
+                continue
             if not extra:
                 break
             found.extend(extra)

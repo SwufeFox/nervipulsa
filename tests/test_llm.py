@@ -153,9 +153,14 @@ def test_counted_handler_coalescing_is_bounded_and_uses_initial_batch() -> None:
         assert [event.seq for event in deduped] == [10, 10, 11, 12, 13]
         assert inbox.calls >= 2
 
-        started = asyncio.get_running_loop().time()
+        # Measure the wait with the high-resolution clock. This asserts the grace
+        # period is actually honoured; loop.time() is not usable here because on
+        # Windows before 3.13 it is GetTickCount64 with 15.625 ms granularity, so
+        # the measurement itself could read ~16 ms for a correctly observed 25 ms
+        # wait. Elapsed time is a duration question, not a platform-clock question.
+        started = time.perf_counter()
         missing = await actor._coalesce_handler_results([finished(3)])
-        elapsed = asyncio.get_running_loop().time() - started
+        elapsed = time.perf_counter() - started
         assert [event.id for event in missing] == ["finished-3"]
         assert 0.020 <= elapsed < 0.15
 

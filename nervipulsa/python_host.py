@@ -19,7 +19,7 @@ from typing import Any
 
 from .events import MAX_HANDLER_RESULTS_PER_EXECUTION, Emitter, Event, Lane, Mailbox
 from .framing import read_frame, write_frame
-from .process_tree import ManagedProcess, spawn_worker
+from .process_tree import ManagedProcess, describe_loader_failure, spawn_worker
 from .workspace_fingerprint import fingerprint_metadata, workspace_fingerprint
 
 _PREVIEW = 4 * 1024
@@ -457,10 +457,10 @@ class PythonHost:
                 item = self._frame_q.get(timeout=0.2)
             except queue.Empty:
                 if managed.poll() is not None:
-                    raise RuntimeError(self._boot_text() or "worker exited during startup")
+                    raise RuntimeError(self._startup_failure_text(managed))
                 continue
             if item[0] == "eof":
-                raise RuntimeError(self._boot_text() or "worker exited during startup")
+                raise RuntimeError(self._startup_failure_text(managed))
             frame = item[2]
             if isinstance(frame, dict) and frame.get("kind") == "ready" and frame.get("worker_epoch") == epoch:
                 return
@@ -530,6 +530,18 @@ class PythonHost:
         if not self._stderr_buf:
             return ""
         return self._stderr_buf.decode("utf-8", "replace")[-4000:]
+
+    def _startup_failure_text(self, managed: ManagedProcess) -> str:
+        """Describe a worker that died before becoming ready.
+
+        Worker stderr is empty for loader-class failures, so report the exit code
+        and the interpreter path instead of a bare "worker exited during startup".
+        """
+        stderr = self._boot_text()
+        explanation = describe_loader_failure(managed.poll())
+        if explanation is None:
+            return stderr or "worker exited during startup"
+        return explanation if not stderr else f"{explanation}; stderr: {stderr}"
 
     def _route_handler_frame(self, frame: dict[str, Any], epoch: int) -> bool:
         handler_id = frame.get("handler_id")

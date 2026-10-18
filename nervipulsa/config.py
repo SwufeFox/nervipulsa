@@ -85,6 +85,7 @@ class Settings:
     max_activations: int = 100
     max_timeout: float = 120
     default_timeout: float = 30
+    fingerprint_workspace: bool = False
     context_limit: int = 200_000
     ordinary_limit: int = 64
     result_limit: int = 4

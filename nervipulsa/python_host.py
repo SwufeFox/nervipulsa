@@ -20,6 +20,7 @@ from typing import Any
 from .events import MAX_HANDLER_RESULTS_PER_EXECUTION, Emitter, Event, Lane, Mailbox
 from .framing import read_frame, write_frame
 from .process_tree import ManagedProcess, spawn_worker
+from .workspace_fingerprint import fingerprint_metadata, workspace_fingerprint
 
 _PREVIEW = 4 * 1024
 
@@ -29,6 +30,19 @@ _IDLE_TICK = 0.25  # safety net only; real wakeups arrive via _signal_wake()
 # cold starts. Keep both protocol waits bounded while allowing that latency.
 _WORKER_READY_TIMEOUT_SECONDS = 30.0
 _WORKER_EXECUTION_START_TIMEOUT_SECONDS = 30.0
+
+
+def _valid_handler_snapshot(snapshot: Any, expected: Any) -> bool:
+    """Validate the shared handler.snapshot/finished frame fields."""
+    return (
+        isinstance(snapshot, list)
+        and len(snapshot) <= MAX_HANDLER_RESULTS_PER_EXECUTION
+        and all(isinstance(item, str) and len(item) == 12 and item.isalnum() for item in snapshot)
+        and len(set(snapshot)) == len(snapshot)
+        and isinstance(expected, int)
+        and not isinstance(expected, bool)
+        and expected == len(snapshot)
+    )
 
 
 @dataclass
@@ -70,6 +84,7 @@ class ExecResult:
     handler_ids: list[str] | None = None
     missing_handler_ids: list[str] | None = None
     cleanup_failed: bool = False
+    workspace_fingerprint: dict[str, Any] | None = None
     effect_state: str = "untracked"
 
 
@@ -84,6 +99,7 @@ class PythonHost:
         workspace: Path,
         output_dir: Path,
         max_timeout: float = 120,
+        fingerprint_workspace: bool = False,
         journal: Any | None = None,
         session_id: str = "",
     ) -> None:
@@ -94,6 +110,7 @@ class PythonHost:
         self.workspace = workspace
         self.output_dir = output_dir
         self.max_timeout = max_timeout
+        self.fingerprint_workspace = fingerprint_workspace
         self._journal = journal
         self.session_id = session_id
         self._pending: deque[Execution] = deque()
@@ -312,7 +329,13 @@ class PythonHost:
                     self._executing = True
                     result = None
                     try:
+                        before = None
+                        if self.fingerprint_workspace:
+                            before = await asyncio.to_thread(workspace_fingerprint, self.workspace)
                         result = await asyncio.to_thread(self._execute_blocking, record)
+                        if self.fingerprint_workspace:
+                            after = await asyncio.to_thread(workspace_fingerprint, self.workspace)
+                            result.workspace_fingerprint = fingerprint_metadata(before or {}, after)
                         self._apply_result(record, result)
                     except Exception as exc:
                         result = ExecResult(
@@ -741,16 +764,7 @@ class PythonHost:
                 valid_snapshot = (
                     handler_snapshot_ids is None
                     and frame.get("worker_epoch") == epoch
-                    and isinstance(snapshot, list)
-                    and len(snapshot) <= MAX_HANDLER_RESULTS_PER_EXECUTION
-                    and all(
-                        isinstance(item, str) and len(item) == 12 and item.isalnum()
-                        for item in snapshot
-                    )
-                    and len(set(snapshot)) == len(snapshot)
-                    and isinstance(expected, int)
-                    and not isinstance(expected, bool)
-                    and expected == len(snapshot)
+                    and _valid_handler_snapshot(snapshot, expected)
                 )
                 if valid_snapshot:
                     handler_snapshot_ids = list(snapshot)
@@ -782,13 +796,7 @@ class PythonHost:
                 snapshot = frame.get("handler_ids")
                 expected = frame.get("expected_handler_count")
                 valid_ids = (
-                    isinstance(snapshot, list)
-                    and len(snapshot) <= MAX_HANDLER_RESULTS_PER_EXECUTION
-                    and all(isinstance(item, str) and len(item) == 12 and item.isalnum() for item in snapshot)
-                    and len(set(snapshot)) == len(snapshot)
-                    and isinstance(expected, int)
-                    and not isinstance(expected, bool)
-                    and expected == len(snapshot)
+                    _valid_handler_snapshot(snapshot, expected)
                     and (handler_snapshot_ids is None or snapshot == handler_snapshot_ids)
                 )
                 handler_ids = list(snapshot) if valid_ids else handler_snapshot_ids
@@ -857,7 +865,7 @@ class PythonHost:
                     bool(frame.get("truncated")),
                     stdout_bytes=stdout_bytes,
                     stderr_bytes=stderr_bytes,
-                expected_handler_count=(len(handler_ids) if handler_ids is not None else 0),
+                    expected_handler_count=(len(handler_ids) if handler_ids is not None else 0),
                     stdout_artifact_path=(
                         stdout_artifact if isinstance(stdout_artifact, str) else None
                     ),
@@ -1051,20 +1059,23 @@ class PythonHost:
                     "message": f"terminal for {record.event_id} was not delivered: {delivery.reason}",
                 },
             )
+        metadata = {
+            "reason": result.reason,
+            "truncated": truncated,
+            "stdout_bytes": stdout_bytes,
+            "stderr_bytes": stderr_bytes,
+            "stdout_artifact_path": result.stdout_artifact_path,
+            "stderr_artifact_path": result.stderr_artifact_path,
+            "tool_call_id": record.tool_call_id,
+        }
+        if result.workspace_fingerprint is not None:
+            metadata["workspace_fingerprint"] = result.workspace_fingerprint
         self._journal_execution(
             record,
             result.status,
             reset=result.namespace_reset,
             epoch=result.worker_epoch,
-            metadata={
-                "reason": result.reason,
-                "truncated": truncated,
-                "stdout_bytes": stdout_bytes,
-                "stderr_bytes": stderr_bytes,
-                "stdout_artifact_path": result.stdout_artifact_path,
-                "stderr_artifact_path": result.stderr_artifact_path,
-                "tool_call_id": record.tool_call_id,
-            },
+            metadata=metadata,
         )
 
     def _emit_cancel_result(self, event: Event, status: str, execution_id: str) -> None:

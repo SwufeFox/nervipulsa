@@ -330,17 +330,7 @@ class Mailbox:
             if self._items:
                 break
             await self._wake.wait()
-        result: list[Event] = []
-        while self._items and len(result) < limit:
-            item = self._items.popleft()
-            if item.lane is Lane.ORDINARY:
-                self._ordinary_size -= 1
-            self._leased[item.event.id] = item
-            result.append(item.event)
-        result.sort(key=lambda event: event.seq)
-        if not self._items:
-            self._wake.clear()
-        return result
+        return self.drain_available(limit)
 
     def drain_available(self, limit: int) -> list[Event]:
         """Pop up to `limit` events already waiting. Never waits for new input."""

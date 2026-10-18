@@ -723,8 +723,52 @@ def test_handler_timeout_discards_fired_frames_from_real_worker(workspace: Path)
     asyncio.run(body())
 
 
+def test_scheduler_recovers_from_result_application_error(workspace: Path, monkeypatch) -> None:
+    async def body() -> None:
+        rig = HostRig(workspace)
+        apply_result = rig.host._apply_result
+        failed_once = False
+
+        def fail_first_result(record, result):
+            nonlocal failed_once
+            if not failed_once:
+                failed_once = True
+                raise RuntimeError("result application unavailable")
+            apply_result(record, result)
+
+        monkeypatch.setattr(rig.host, "_apply_result", fail_first_result)
+        try:
+            request = rig.request("print('first')")
+            queued = rig.request("print('must not run in the old namespace')")
+            terminal = await _wait(rig.llm, "python.finished", reply_to=request.event_id)
+            assert terminal.payload["status"] == "failed"
+            assert terminal.payload["reason"] == "worker_exit"
+            assert terminal.payload["namespace_reset"] is True
+            assert "result application unavailable" in terminal.payload["stderr"]
+            cancelled = await _wait(rig.llm, "python.finished", reply_to=queued.event_id)
+            assert cancelled.payload["status"] == "cancelled"
+            assert cancelled.payload["reason"] == "namespace_reset_before_start"
+            recovered = rig.request("print('recovered')")
+            result = await _wait(rig.llm, "python.finished", reply_to=recovered.event_id)
+            assert result.payload["status"] == "succeeded"
+            assert result.payload["stdout"].strip() == "recovered"
+            assert result.payload["worker_epoch"] > terminal.payload["worker_epoch"]
+            assert not rig.host._scheduler_task.done()
+            assert rig.host.current_execution_id is None
+            assert rig.host.idle
+            assert rig.llm.reserved_size == 0
+            assert rig.llm.handler_reserved_size == 0
+        finally:
+            await rig.close()
+
+    asyncio.run(body())
+
+
 def test_observed_commit_failure_is_not_reported_as_success(workspace: Path) -> None:
     class FailingObserveJournal:
+        def execution(self, record: dict) -> None:
+            pass
+
         def prepare_effect(self, session_id: str, execution_id: str) -> None:
             pass
 
@@ -758,6 +802,9 @@ def test_dispatch_journal_failure_fails_closed(workspace: Path, monkeypatch) -> 
     import nervipulsa.python_host as host_module
 
     class FailingJournal:
+        def execution(self, record: dict) -> None:
+            pass
+
         def prepare_effect(self, session_id: str, execution_id: str) -> None:
             self.prepared = True
 

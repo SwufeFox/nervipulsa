@@ -1,4 +1,7 @@
-"""Asynchronous SQLite observation journal (never on the event acceptance path)."""
+"""SQLite journal: asynchronous observations and synchronous durable effect commits.
+
+Event acceptance only queues observations; Python dispatch waits for effect commits.
+"""
 
 from __future__ import annotations
 
@@ -553,7 +556,7 @@ class Journal:
             connection.close()
 
     def mark_effect_dispatching(self, session_id: str, execution_id: str) -> None:
-        """Durably record that the execute frame was sent to the worker."""
+        """Commit the dispatch window before writing the execute frame to the worker."""
         connection = sqlite3.connect(self.path, timeout=5)
         try:
             connection.execute("PRAGMA synchronous=FULL")

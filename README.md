@@ -1,7 +1,5 @@
 # Nervipulsa v0.4-dev
 
-
-
 Nervipulsa is a local, event-driven coding-agent runtime. User messages, model
 actions, and Python results travel as events. Model inference never waits for
 Python execution, so the CLI can accept another message while code is running.
@@ -9,6 +7,11 @@ Python execution, so the CLI can accept another message while code is running.
 This checkout contains a v0.4 development implementation. The scripted runtime
 exercises the asynchronous event contract without credentials. Live model calls use the OpenAI Chat Completions HTTP protocol directly. Nervipulsa
 keeps its own tool execution, transcript, and retry state; no model SDK is required.
+
+For the current implementation, start with [Architecture](docs/architecture.md):
+request-to-terminal flow, module and state ownership, persistence, and security
+boundaries. This README covers usage and extension wiring; the [documentation
+index](docs/README.md) separates current references from historical research.
 
 Python executions use a durable effect ledger. Before an execute frame is written to the worker IPC channel, the runtime commits an `intent` and then `dispatching` with SQLite `synchronous=FULL`; if either commit fails, it does not send the frame. A worker terminal is committed as `observed` before `python.finished` is published. If outcome persistence fails after dispatch, the terminal reports `unknown` and `/effects` lists the unresolved row for review. The protocol does not automatically replay Python or roll back side effects. Operators can append an out-of-band assessment with `/effects decide <session_id> <execution_id> <occurred|not_occurred|undetermined> --by "<operator>" --evidence "<what was checked>"` and inspect `/effects history`; these are self-reported attestations, do not change worker state, and never trigger a replay.
 
@@ -58,9 +61,9 @@ runtime = create_runtime(
 )
 ```
 
-For event driven work, a tool can emit a routed event through `context.event_sink`; the runtime validates and delivers it. The built-in adapters demonstrate the `python.requested` reservation and `python.environment_discovered` patterns.
+For event driven work, a tool can emit a routed event through `context.event_sink`; the runtime validates and delivers it. The built-in adapters demonstrate the `python.requested` reservation and `python.environment_discovered` patterns. Existing `providers.tool_schema` and `providers.environment_tool_schema` exports remain compatibility aliases.
 
-
+## Getting started
 
 Python 3.11 or newer is required. From this directory:
 
@@ -71,6 +74,15 @@ Then start the interactive CLI:
     nervipulsa --dir .
 
 `python -m nervipulsa --dir .` runs the same entry point without installing.
+
+Workspace fingerprinting is an opt-in CLI feature: `nervipulsa --dir . --fingerprint-workspace`.
+When enabled, Nervipulsa reads and hashes the entire shared workspace immediately
+before and after every Python execution, excluding `.git` and `.nervipulsa` at any
+depth. This can add substantial filesystem I/O and execution cost, especially for
+large workspaces. Fingerprints are recorded in execution metadata and shown in
+`/logs`. Without this flag no workspace fingerprint scan runs and no fingerprint
+field is written. The Python worker continues to use the same shared workspace
+and directory permissions either way.
 
 The first run can open /config to set a provider, base URL, model, and API key.
 Configuration is saved under the platform user configuration directory,
@@ -253,7 +265,8 @@ provider, base URL, model, and key in the Magpie CLI for a separate live user te
 | `nervipulsa/python_worker.py` | IPC frames, persistent namespace, output |
 | `nervipulsa/framing.py` | Length-prefixed JSON control frames |
 | `nervipulsa/process_tree.py` | Filtered environment, spawn and tree cleanup |
-| `nervipulsa/journal.py` | SQLite observation records |
+| `nervipulsa/journal.py` | Asynchronous observations and synchronous durable effect commits |
+| `nervipulsa/workspace_fingerprint.py` | Opt-in before/after workspace observations |
 | `nervipulsa/config.py` | Precedence, persistence, redaction |
 | `nervipulsa/cli.py` | Input, display, commands |
 | `nervipulsa/runtime.py` | Session wiring and event routing |
@@ -262,26 +275,6 @@ provider, base URL, model, and key in the Magpie CLI for a separate live user te
 | `benchmarks/bench_runtime.py` | Credential-free mechanism benchmarks |
 | `docs/research_worker_handler_bridge.md` | v0.5 research: programmable worker event handlers |
 | `TEST_RESULTS.md` | Recorded scripted and real-model results |
-
-## Extension points
-
-`nervipulsa/ports.py` holds the provider-neutral request/response types and the
-`ModelBackend`, `Tool`, and `ToolCatalog` protocols. Provider implementations in
-`providers.py` translate their wire format to those types. Runtime composition is
-in `application.py`; `Runtime` receives the backend and tool catalog, then wires
-the event bus, LLM actor, journal, and the default Python host. The CLI handles
-terminal input, commands, and display, and starts a session through
-`create_runtime`.
-
-To add a provider, implement `ModelBackend.complete(request)` and supply a
-`ProviderRegistry` whose `create(settings)` returns it. To add a tool, implement
-`schema`, `validate`, and `invoke`, then supply it from a `ToolRegistry` to
-`create_runtime`. A tool gets a narrow context with workspace settings and an
-event sink; the built-in `python_exec` adapter uses that sink to submit
-`python.requested`, while terminal results still return asynchronously as
-`python.finished`. Existing `providers.tool_schema` and
-`providers.environment_tool_schema` imports remain available as compatibility
-aliases.
 
 ## Execution boundary
 
@@ -292,9 +285,11 @@ and imports between calls. Timeout and running cancellation terminate the
 worker and reset that namespace. File and external side effects are not rolled
 back.
 
-The SQLite journal is an asynchronous observer. Event acceptance does not mean
-the journal has been flushed to disk. A visible incomplete-journal marker is
-shown if its bounded observation queue fills or writing fails.
+The journal's event observation path is asynchronous. Event acceptance does not
+mean those observations have been flushed to disk. A visible incomplete-journal
+marker is shown if its bounded observation queue fills or writing fails. Python
+dispatch additionally uses synchronous durable effect commits in the same SQLite
+file, as described in [Architecture](docs/architecture.md#5-持久性边界).
 
 ### Experimental Windows AppContainer worker
 
@@ -356,9 +351,11 @@ and stale content is rejected. The implementation is independently written in
 Python and supports only this PUT subset: no syntax-tree block edits, CUT, MV, REM,
 stale-tag recovery, or seen-line enforcement. This helper is not a Python sandbox.
 
-## Research documents
+## Documentation
 
-See [`docs/README.md`](docs/README.md) for the architecture research log, paper draft, failure reports, user experience review, and reproducible evidence.
+Start with [Architecture](docs/architecture.md) for the current implementation.
+See the [documentation index](docs/README.md) for the append-only research log,
+paper draft, failure reports, user experience review, and their evidence boundaries.
 
 ## Development status
 

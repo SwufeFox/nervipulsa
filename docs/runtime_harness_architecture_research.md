@@ -730,3 +730,55 @@ The CLI now accepts `/effects decide <session_id> <execution_id> <assessment> --
 The full local command `python -m pytest -q` ran on Windows CPython 3.13 and ended **143 passed, 3 failed in 378.27s**. Failures were `test_python_environment_tool_runs_before_smoke_test` (8-second idle timeout), `test_cross_file_edit_survives_compression_and_a_new_requirement` (8-second event wait), and `test_observed_effect_is_committed_before_finished` (Journal startup `flush()` returned false). Running those three tests together afterward passed **3 in 19.30s**. This supports a timing/resource-sensitive failure hypothesis but does not establish the root cause; the full suite is not green. No live provider/target test or hosted Linux CI run was performed.
 
 The evidence and operator label remain self-reported. The feature records human judgment; it does not authenticate the actor, prove the target state, make an effect safe to retry, or close an external workflow. `.github/workflows/tests.yml` configures a Python 3.11 full-suite matrix on Ubuntu and Windows. The code, docs, tests, and workflow are uncommitted; no hosted CI run is available until they are pushed.
+
+## 2026-10-18 — LayerFS 文件状态历史与 Nervipulsa 接入边界
+
+### 研究问题与来源
+
+评估 LayerFS 是否适合作为 Nervipulsa 多候选 coding execution 的隔离文件状态层，以及它的提交/恢复语义如何与 Durable Effect Protocol 共存。来源包括 v0.1.7 release/tag、release record、版本化 SDK guide、当前 JS SDK guide、CAS/CDC/delta handbook 与 1.0 roadmap。完整结论和实验设计见 [`layerfs_research_2026-10-18.md`](layerfs_research_2026-10-18.md)。本轮没有克隆或运行 LayerFS，因此以下是上游文档研究，不是集成验证。
+
+### 版本和证据修正
+
+- v0.1.7 已于 2026-10-15 发布，采用重写的 `core/`、29-method JavaScript SDK 和 Sandbox daemon；删除 v0.1.6 CLI 与公开 Rust SDK，旧 Store 不支持原地迁移，组件版本需匹配。
+- GitHub 首页当日仍以 v0.1.6 为 banner，而 Release 页面和记录确认 v0.1.7 已发布。Stars/Forks API 请求受 rate limit，数字未独立复核。
+- v0.1.7 只执行 Disposable profile（WAL / `synchronous=OFF`）；Durable 未运行且禁用。daemon/container 重启恢复和不确定操作重放明确不支持。fresh Node process 重用保存的 Sandbox ID 不等于 daemon restart recovery。
+- 发布记录将 SDK live acceptance 与全套 release gate 分开：B7 未运行、A9 保留历史失败，完整 workspace suite 和独立 FUSE/container gate 未在 release commit 重跑。v0.1.7 不作性能主张；计数器 v5 的一次组件样本 +1.3351% 操作时间、分配相同，不是 Agent workload benchmark。
+- `DSH_LAYERFS_*` 是 SDK 配置 fallback，不是 Nervipulsa 集成插件。集成还需要 Docker/Linux daemon、Rust/native addon 和 Node 环境；当前 Windows PythonHost 不能直接把它当原生目录 API。
+
+### 架构判断
+
+LayerFS 管 Branch/Commit/Workspace 文件状态；Nervipulsa 管执行事件、模型上下文、调度和 effect uncertainty。两者适合作为关联系统而非共享数据库：记录基线 Commit、execution/attempt 和产出 Commit ID，以独立 effect 状态机核验两个 Store 间崩溃窗口。`sandbox.exec` 不自动 Commit，文件 rollback 也不会撤销 HTTP 或其他外部副作用。原提案 `Intent → Execute → Commit → Confirm → Record` 仍可能在 Commit 已发布、runtime 记录前崩溃；应把 Commit ID 查询和只读 reconciliation 写进协议，核验不足时保留 unknown，禁止猜测性重放。
+
+当前 Nervipulsa PythonHost 串行，因此首个可验证收益是文件状态隔离与候选比较，不应预先声称已经支持多 Agent 并行调度。建议先在 Linux VM 做外部 adapter 原型：同一基线创建三个隔离候选，测隔离、discard、Commit 读回、branch head 移动冲突、跨 Store fault windows 和非文件副作用；再与完整目录复制做配对性能测试。详细门槛与指标见专题报告。
+
+### 本轮实现状态交叉检查
+
+摘要记录中的 operator assessment 和 CI 改动已在 2026-10-16 后续落地并提交本地 `main`：`637b5b7 feat: record operator effect assessments`；本地完整 Windows suite 为 146 passed，`main` 工作区干净。该信息是本项目当前状态，不代表 LayerFS hosted CI 或真实目标端 assessment walkthrough 已完成。
+
+### LayerFS 思想的本地落点
+
+按用户澄清“吸收其中有价值的部分”，先落实低耦合的文件状态身份关联，不引入 LayerFS 依赖，也不改变同一会话多个 Python execution 共享工作目录的语义。新增 `workspace-fingerprint-v1`：在 `--fingerprint-workspace` 显式启用时，每次 Python execution 前后在线程中遍历工作区，记录 SHA-256 文件树 identity 到 execution metadata，并由 `/logs` 展示。默认关闭，避免大仓库每次执行都产生两遍全树读取。身份覆盖相对路径、节点类型、普通文件字节和 symlink 目标文本；不跟随 symlink，排除任意层级 `.git`/`.nervipulsa`，不包含权限、时间戳或 hard-link 拓扑。
+
+该 identity 不是可恢复快照，也不是原子观察；外部并发改动可能混入扫描，不能证明变化由该 execution 造成，也不覆盖网络等外部副作用。执行前/后扫描错误作为 metadata 状态记录，不应改变 Python execution 结果。实现仅经 Python 语法解析与 `git diff --check` 静态检查；本轮按要求未新增或运行测试，未提交或推送。后续如真实工作负载证明 identity 有价值，再考虑增量 Merkle cache 或真正可恢复的 workspace backend；未经测量不应把全树扫描升级为默认。
+
+## 2026-10-18：scheduler 异常边界回退修复（已完成聚焦验证）
+
+来源边界：本轮按当前用户要求，对照工作区与 `git show HEAD:nervipulsa/python_host.py`；未取得历史线程全文，不将此前摘要当作本轮运行证据。coding-agent CLI 的 status 命令因本机 EPERM 失败，改为直接审阅和修改。
+
+源码审查：fingerprint 集成时将 scheduler 的 except 缩窄到 `_execute_blocking`，使 `_apply_result` 的异常逃逸，scheduler 退出。最小修复恢复 HEAD 的整个执行/结果应用异常边界，保留既有 worker_exit、清理与 namespace reset 路径；未引入“异步观测失败影响 effect 状态”的新规则，也未改 durable effect 协议。
+
+测试变更：两个 durable commit 故障替身补 `execution(record)` no-op。host 入队、started、terminal 都调用这一异步观测接口；缺少该方法会在 queued 阶段产生 AttributeError，使测试到不了目标同步 commit 故障。no-op 只补齐测试替身协议，所有原断言保留。另补结果应用首次抛错的回归，验证失败终态、旧队列取消、新 epoch 可继续执行、scheduler 存活及预留释放。
+
+验证计划：运行完整 `python -m pytest tests/test_events.py tests/test_python_host.py -vv`，单次上限 600s，保留 startup flush 失败及耗时；如重现先定位，不增加既有 timeout。本轮未运行 CLI/provider、未提交或推送。结果随后在此节追加。
+
+### 本轮实际验证结果与过程事实
+
+- 环境：Windows，Python 3.13.14，pytest 9.1.1；HEAD 对照只读，保留已有未提交修改。
+- 完整聚焦组：`python -m pytest tests/test_events.py tests/test_python_host.py -vv`，收集 30 项，`30 passed in 163.80s (0:02:43)`，进程退出码 0；工具调用总耗时 205.509s（包含追加记录与启动开销，不用此值替代 pytest 的测试耗时），未触及 600s 上限。
+- `test_observed_effect_is_committed_before_finished`、`test_running_cancel_persists_unknown_effect`、新增 scheduler 恢复测试、两个同步 commit 故障替身测试均通过；events 全组（包括 observer 异常不撤销投递）通过。startup flush 本次未重现失败，保留既有 `flush(timeout=15)` 和 worker/执行启动等待值，不能据此宣称间歇性问题已根治。
+- 完整组输出保留在本机工具记录 `Bash-stdout-083e7746d1f3.log`（Alma tool-overflow），本节保存可复跑命令、环境和结果；日志不是项目运行依赖。
+- 为确认回归覆盖，在独立 Python 进程中用 inspect/exec 仅在内存恢复缩窄的 scheduler 异常边界，再由 `pytest.main` 执行新增单测。第一版探针缩进错误，`IndentationError`，未进入 pytest；修正探针后 `1 failed in 19.22s`，先等待不到首个 python.finished，最终 close 等待已失败 scheduler 时传播 `RuntimeError: result application unavailable`。这是预期的回退对照失败，不是修复版完整组失败；磁盘代码未被替换。输出保留在工具记录 `Bash-stdout-83ea7565c64a.log`。
+- 对照后固定版本单测复跑：`python -m pytest tests/test_python_host.py::test_scheduler_recovers_from_result_application_error -q`，最终明确输出 `1 passed in 11.28s`，退出码 0。另一次与目录/进程检查合并的复跑调用因输出截断未保留明确耗时，不计入上述确切结果。
+- `git diff --check` 无差异格式错误；Git 的 LF/CRLF 提示保留为环境提示，不冒充测试错误。额外探针只在内存运行，无脚本或二进制交付物；未清除工作区原有 scratch 内容。
+
+证据边界：本轮只恢复 HEAD 异常保护及其失败/重启行为。现有 worker_exit 可能尽力记录 unknown，这属于沿用行为；没有新增“异步 execution 观测异常直接驱动 effect ledger”的转换。第二次 `_apply_result` 再次抛错，以及已发 terminal 后再遇观测异常，仍受原实现限制，本轮不通过扩展协议掩盖。fingerprint 的非原子性和扫描竞态未新增验证。本轮未运行全库、真实 CLI 或 provider，未提交或推送。若后续 startup flush 再现，应记录 journal.error/dropped、初始化/连接/线程状态和时间线后再定位，不能以提高 timeout 代替根因证据。

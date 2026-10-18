@@ -782,3 +782,21 @@ LayerFS 管 Branch/Commit/Workspace 文件状态；Nervipulsa 管执行事件、
 - `git diff --check` 无差异格式错误；Git 的 LF/CRLF 提示保留为环境提示，不冒充测试错误。额外探针只在内存运行，无脚本或二进制交付物；未清除工作区原有 scratch 内容。
 
 证据边界：本轮只恢复 HEAD 异常保护及其失败/重启行为。现有 worker_exit 可能尽力记录 unknown，这属于沿用行为；没有新增“异步 execution 观测异常直接驱动 effect ledger”的转换。第二次 `_apply_result` 再次抛错，以及已发 terminal 后再遇观测异常，仍受原实现限制，本轮不通过扩展协议掩盖。fingerprint 的非原子性和扫描竞态未新增验证。本轮未运行全库、真实 CLI 或 provider，未提交或推送。若后续 startup flush 再现，应记录 journal.error/dropped、初始化/连接/线程状态和时间线后再定位，不能以提高 timeout 代替根因证据。
+## 2026-10-18：hosted CI 首次 Linux 全量运行与取消清理竞态修复
+
+来源边界：本节来自 hosted CI（GitHub Actions，`ubuntu-latest`，Python 3.11，`python -m pytest -q`）首次全量运行的失败，不是本地复现。该次运行结果：142 passed / 1 failed / 4 skipped；唯一失败是 `tests/test_python_host.py::test_cleanup_failure_is_visible_in_terminal_and_runtime_facts[False]`，报 `KeyError: 'process_tree_cleanup_failed'`；同一参数化测试的 `[True]`（timeout 分支）通过。此前 Windows 本地 `tests/test_events.py + tests/test_python_host.py` 聚焦组 30 passed 不能证明该竞态不存在：它是线程时序窗口，本地通过只说明当时未命中，不构成该路径的验收。
+
+根因（已复核代码，与分析一致）：`PythonHost._kill_current()` 先调用 `managed.terminate_tree()`，之后才写 `self.cleanup_failed` / `record.cleanup_failed` 并返回。取消路径是 `_on_cancel` → `await asyncio.to_thread(self._kill_current, record)`。`terminate_tree()` 关闭控制 socket，调度线程 `_execute_blocking` 因此立刻拿到 `eof`，走 `if record.cancel: return self._cancelled_result(..., cleanup_failed=record.cleanup_failed)`；此时另一个线程可能尚未写入 `record.cleanup_failed`，终态 payload 便缺 `process_tree_cleanup_failed`。timeout 分支在同一线程内联调用 `_kill_current` 后立即读取，所以是确定的、能通过——这正是 `[False]` 失败而 `[True]` 通过的原因。
+
+修复（最小改动，均在 `nervipulsa/python_host.py`）：`Execution` 增加 `cleanup_reported: threading.Event`；`_kill_current()` 先终止并判定结果，再设置 `record.cleanup_failed`，最后 `set()` 该事件；`managed is None` 的 early-return 路径也 `set()`，避免调用方等满超时。新增 `_await_cleanup_report()`，在 `_execute_blocking` 的两处取消 return 读取 `record.cleanup_failed` 之前对该事件做有界等待（`_CLEANUP_REPORT_TIMEOUT_SECONDS = 10.0`）。注释写明了所依赖的前提：`record.cancel` 目前只由 `_on_cancel`（运行中取消）和 `close()`（shutdown）设置，二者都会为该 record 调用 `_kill_current`；超时只是兜底，前提被破坏时按现状继续，不阻塞调度线程，也不当作成功。timeout、worker_exit、queued_cancel、shutdown 路径的语义未改，异常未被吞掉。
+
+回归测试：新增 `test_running_cancel_terminal_waits_for_cleanup_verdict`（`tests/test_python_host.py`，HostRig 风格）。它 monkeypatch `managed.terminate_tree` 为“调用真实实现 → 睡 0.3 秒模拟终止与标记之间的窗口 → 返回 False”，使竞态窗口确定化；断言取消后收到的 `python.finished` 带 `process_tree_cleanup_failed=True`，且 `runtime_facts()["cleanup_failed"] is True`。断言未放宽或删除。
+
+前后对照验证（本轮在 Windows / Python 3.13.14 / pytest 9.1.1 本地执行，仅临时移除第 2 步等待，未改断言）：
+
+- 移除等待（旧行为）：`python -m pytest tests/test_python_host.py::test_running_cancel_terminal_waits_for_cleanup_verdict -q` → `1 failed in 9.55s`，失败为 `tests\test_python_host.py:479: KeyError: 'process_tree_cleanup_failed'`，与 hosted CI 的失败签名一致。
+- 恢复修复后：同一单测 `1 passed in 3.40s`。
+- 完整文件：`python -m pytest tests/test_python_host.py -q` → `21 passed in 67.36s (0:01:07)`。
+- `git diff --check` 无输出（退出码 0）。
+
+证据边界：hosted CI 的失败是首次 Linux 全量运行暴露的线程时序竞态，本轮修复与对照验证在本机完成，未重跑 hosted CI，也未在 Linux 本地复现该竞态。10 秒有界等待是兜底值，不是对“取消必然调用 `_kill_current`”这一前提的独立验证；该前提若被后续改动打破，取消终态仍会退回读取当下（可能陈旧的）判定。本轮未提交、未推送。

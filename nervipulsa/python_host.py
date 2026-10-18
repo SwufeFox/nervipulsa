@@ -13,7 +13,7 @@ import socket
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,12 @@ _IDLE_TICK = 0.25  # safety net only; real wakeups arrive via _signal_wake()
 # cold starts. Keep both protocol waits bounded while allowing that latency.
 _WORKER_READY_TIMEOUT_SECONDS = 30.0
 _WORKER_EXECUTION_START_TIMEOUT_SECONDS = 30.0
+# Bounded wait for the cancel terminal to observe _kill_current's cleanup
+# verdict. Terminating the worker tree closes the control socket, so the
+# executing thread can reach its cancel return before the terminating thread
+# has recorded that verdict. Waiting keeps the terminal deterministic; the
+# timeout is only a fallback so a broken invariant cannot stall the scheduler.
+_CLEANUP_REPORT_TIMEOUT_SECONDS = 10.0
 
 
 def _valid_handler_snapshot(snapshot: Any, expected: Any) -> bool:
@@ -62,6 +68,10 @@ class Execution:
     timed_out: bool = False
     started_monotonic: float | None = None
     cleanup_failed: bool = False
+    # Set once _kill_current has recorded its cleanup verdict for this record.
+    # The cancel terminal waits on it so it cannot read cleanup_failed before
+    # the terminating thread has written it.
+    cleanup_reported: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass
@@ -616,17 +626,43 @@ class PythonHost:
     def _kill_current(self, record: Execution | None = None) -> bool:
         managed = self._managed
         if managed is None:
+            # No worker to terminate is a successful cleanup, and there is no
+            # verdict left to record; still release any waiter.
+            if record is not None:
+                record.cleanup_reported.set()
             return True
         cleanup_ok = managed.terminate_tree()
+        # Record the verdict before signalling: terminate_tree() closes the
+        # worker, so the executing thread may reach its cancel return while this
+        # thread is still between the call and these writes. The event is the
+        # only thing that orders record.cleanup_failed ahead of that return.
         if not cleanup_ok:
             self.cleanup_failed = True
             if record is not None:
                 record.cleanup_failed = True
+        if record is not None:
+            record.cleanup_reported.set()
         try:
             managed.control.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
         return cleanup_ok
+
+    def _await_cleanup_report(self, record: Execution) -> None:
+        """Wait for _kill_current to publish this record's cleanup verdict.
+
+        The executing thread can be woken by the control socket closing before
+        the thread that called _kill_current has written record.cleanup_failed,
+        so the cancel terminal reads a stale verdict unless it waits here.
+
+        Invariant relied on: record.cancel is only ever set by _on_cancel (a
+        running cancel) and by close() (shutdown), and both of those call
+        _kill_current for that record before the execution can return. The
+        bounded timeout is a fallback only: if that invariant ever breaks, the
+        terminal proceeds with the current (possibly stale) verdict rather than
+        blocking the scheduler forever. It must not be treated as success.
+        """
+        record.cleanup_reported.wait(_CLEANUP_REPORT_TIMEOUT_SECONDS)
 
     def _execute_blocking(self, record: Execution) -> ExecResult:
         epoch = self._epoch
@@ -680,6 +716,7 @@ class PythonHost:
         while True:
             if record.cancel:
                 self._kill_current(record)
+                self._await_cleanup_report(record)
                 return self._cancelled_result(
                     record,
                     start if started else send_at,
@@ -719,6 +756,7 @@ class PythonHost:
                     self.late_frames += 1
                     continue
                 if record.cancel:
+                    self._await_cleanup_report(record)
                     return self._cancelled_result(
                         record,
                         start if started else send_at,

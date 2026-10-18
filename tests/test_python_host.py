@@ -443,6 +443,47 @@ def test_cleanup_failure_is_visible_in_terminal_and_runtime_facts(
     asyncio.run(body())
 
 
+def test_running_cancel_terminal_waits_for_cleanup_verdict(
+    workspace: Path, monkeypatch
+) -> None:
+    """A cancel wins the race only after the cleanup verdict is published.
+
+    terminate_tree() closes the control socket, so the executing thread can
+    reach its cancel return before the cancelling thread has written
+    record.cleanup_failed. Delaying the verdict inside terminate_tree makes
+    that window deterministic: without the host's wait the terminal would omit
+    process_tree_cleanup_failed and the key lookup below would fail.
+    """
+
+    async def body() -> None:
+        rig = HostRig(workspace)
+        try:
+            request = rig.request("while True:\n    pass", timeout=30)
+            await _wait(rig.ui, "python.started", reply_to=request.event_id)
+            managed = rig.host._managed
+            assert managed is not None
+            terminate_tree = managed.terminate_tree
+
+            def terminate_then_report_failure_late() -> bool:
+                terminate_tree()
+                # Stand in for the window between terminating the tree and
+                # recording the verdict on the record.
+                time.sleep(0.3)
+                return False
+
+            monkeypatch.setattr(managed, "terminate_tree", terminate_then_report_failure_late)
+            rig.cancel(request.event_id, reason="test-cleanup-window")
+            finished = await _wait(rig.llm, "python.finished", reply_to=request.event_id)
+
+            assert finished.payload["status"] == "cancelled"
+            assert finished.payload["process_tree_cleanup_failed"] is True
+            assert rig.host.runtime_facts()["cleanup_failed"] is True
+        finally:
+            await rig.close()
+
+    asyncio.run(body())
+
+
 def test_worker_hashline_import_view_and_put_edit(workspace: Path) -> None:
     async def body() -> None:
         target = workspace / "sample.py"

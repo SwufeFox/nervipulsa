@@ -203,7 +203,6 @@ class Mailbox:
         self.handler_result_limit = handler_result_limit
         self._items: deque[_Queued] = deque()
         self._ordinary_size = 0
-        self._leased: dict[str, _Queued] = {}
         self._wake = asyncio.Event()
         self._reservations: set[str] = set()
         self._handler_slots: dict[str, list[int]] = {}  # available, queued or leased
@@ -341,7 +340,6 @@ class Mailbox:
             item = self._items.popleft()
             if item.lane is Lane.ORDINARY:
                 self._ordinary_size -= 1
-            self._leased[item.event.id] = item
             result.append(item.event)
         result.sort(key=lambda event: event.seq)
         if not self._items:
@@ -368,7 +366,6 @@ class Mailbox:
         self._closed = True
         self._items.clear()
         self._ordinary_size = 0
-        self._leased.clear()
         self._reservations.clear()
         self._handler_slots.clear()
         self._handler_events.clear()

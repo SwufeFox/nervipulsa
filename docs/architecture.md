@@ -112,8 +112,8 @@ Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：�
 - **Transcript 与 ContextProjector、旧 compact 与模型摘要路径**：前者记录与后者视图语义不同，旧接口存在兼容调用；去掉其中之一前需要调用面和上下文保留规则的独立验收。
 - **Journal 两种写入、两次执行前 commit**：观测与执行放行的失败处理不同，合并为队列或一个事务会改动 durable effect 崩溃窗口。本轮只纠正说明，不改协议。
 - **Host 的线程/loop 分工与 handler 镜像**：阻塞 IPC、进程终止与 SQLite 放在线程，Bus 交付留在 loop；镜像承担关联校验，并非 namespace 的第二份权威状态。重写并发模型风险大于本轮收益。
-- **预留、leased 与 trace 的生命周期**：容量预留有终态交付意义，不能按普通队列简化。`Mailbox._leased` 当前只积累/关闭时清空，Runtime.trace、执行记录和 Transcript archive 也随会话增长；是否逐步释放、设上限或改变调试可见性，需要先定保留契约。
-- **错误展示路径**：actor/host 会发 agent.error，但默认路由表未注册它，尽管 Runtime._render 支持该类型。这是待决的可见性缺口，不能把相关诊断描述为一定会显示；本轮未顺手增加路由、改变 UI 行为。
+- **预留与 trace 的生命周期**：容量预留有终态交付意义，不能按普通队列简化。`Mailbox` 原先的 `_leased` 字典只写不读、且是会话内无界增长，已于 2026-10-21 删除（消费后不再持有事件）。`Runtime.trace`、执行记录和 Transcript archive 仍随会话增长；是否逐步释放、设上限或改变调试可见性，需要先定保留契约。
+- **错误展示路径**：`agent.error → ui_box` 路由已于 2026-10-21 注册，`_pause`、feedback 未投递与上下文溢出拒绝 `/retry` 三处发送点不再落到 `unknown_route`。仍有残留边界：`ui_box` 的 `ordinary_limit=256`，UI 任务卡住或长时间反复出错时投递可能返回 `capacity_exceeded`，这仍是不会出现在 UI 的路径；是否改用预留车道或另设保留策略尚未决定。
 - **fingerprint**：保留刚授权能力；预算/取消响应、平台链接行为、稳定快照及是否需要更丰富差异属于后续评估，不因架构偏好删除，也不扩成新存储层。
 
 验证范围：初稿整理仅做静态检查；后续 scheduler 修复运行完整 `python -m pytest tests/test_events.py tests/test_python_host.py -vv`，Windows / Python 3.13.14 / pytest 9.1.1 下 30 passed（163.80s），包含真实 worker、取消/重启及 durable commit 故障替身。新增回归在内存恢复回退实现时失败，证明覆盖本次异常边界问题。本次未重现 startup flush 失败，未调整 timeout；一次通过不能排除间歇性 startup 问题。未运行全库测试、CLI/provider 或扫描竞态专项验证，以上测试不构成这些行为的验收。

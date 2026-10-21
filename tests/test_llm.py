@@ -1368,3 +1368,59 @@ def test_context_projector_keeps_durable_effect_state() -> None:
     projector = ContextProjector(transcript)
     envelope = json.loads(projector.snapshot()[-1]["content"])
     assert envelope["payload"]["effect_state"] == "unknown"
+
+
+def test_provider_pause_error_reaches_the_ui_mailbox_and_is_rendered(workspace: Path) -> None:
+    async def body() -> None:
+        backend = ScriptedBackend(lambda _request: _raise(ProviderError("response_unknown", "socket dropped")))
+        lines: list[str] = []
+        # Capture the routed ui events before shutdown closes every mailbox, so the
+        # assertion still sees the error even if the UI task drains it later.
+        ui_events: list[Event] = []
+        runtime = _runtime(workspace, backend)
+        runtime.echo = lines.append
+        runtime.bus.add_observer(
+            lambda event: ui_events.append(event) if event.type == "agent.error" else None
+        )
+        try:
+            await runtime.start()
+            runtime.submit_text("hello")
+            await _until(lambda: runtime.actor.paused is not None)
+            assert runtime.actor.paused.error_kind == "response_unknown"
+            errors = [event for event in ui_events if event.type == "agent.error"]
+            assert errors, "agent.error never reached the bus, so the route is unknown_route"
+            delivered = errors[0]
+            assert delivered.target == runtime.ui_box.name
+            assert delivered.payload["kind"] == "response_unknown"
+            await _until(lambda: any("socket dropped" in line for line in lines))
+            assert any(
+                line.startswith("error  ") and "socket dropped" in line
+                for line in lines
+            ), lines
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(body())
+
+
+def test_agent_error_is_a_registered_route_not_unknown_route(workspace: Path) -> None:
+    async def body() -> None:
+        runtime = _runtime(workspace, ScriptedBackend(lambda _request: text_response("unused")))
+        try:
+            await runtime.start()
+            delivery = runtime.llm_emitter.call(
+                "agent.error", {"kind": "probe", "message": "routed", "activation_id": "a"}
+            )
+            assert delivery.reason != "unknown_route"
+            assert delivery.accepted, delivery.reason
+            batch = await runtime.ui_box.take_batch(8)
+            assert [event.type for event in batch] == ["agent.error"]
+            assert batch[0].payload["kind"] == "probe"
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(body())
+
+
+def _raise(exc: Exception):
+    raise exc

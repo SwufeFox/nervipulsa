@@ -97,6 +97,7 @@ class Runtime:
             "python.finished": self.llm_box,
             "python.cancel": self.control_box,
             "python.cancel_result": self.ui_box,
+            "agent.error": self.ui_box,
             "agent.feedback": self.llm_box,
             "agent.handler_fired": self.llm_box,
             "agent.retry": self.llm_box,

@@ -847,3 +847,48 @@ DACL 差异与该解释一致：Store 树含 `S-1-19-512-4096:(OI)(CI)(RX,...)` 
 ### 本轮未验证
 
 未重跑 hosted CI（结论来自 CI 观测 + 本机复现）。本机 3.13 用 QPC 时钟，该平台上计时测试本来就通过，所以「3.13 通过」不能证明 3.11 场景已修；粗糙时钟结论来自 3.10 探针与 clock_info 证据。AppContainer 修复只在本机验证了错误信息与跳过判定，未在真正需要跳过（CI 那种具名安装）的环境复跑；「该解释器树对容器不可读」是本机配对实验 + DACL + 读取探针的因果推断，不是对 CI 机器的直接观测。本轮未提交、未推送。
+
+## 2026-10-21：外部只读审查两条缺陷的核实、修复与证据边界
+
+来源边界：本节回应外部只读审查提出的两条缺陷。审查结论只作为线索，全部结论以本仓库 `c856e94` 上的源码复核和本机运行为准；本轮未重跑 hosted CI，未提交、未推送。
+
+### 两处根因（源码核实，与审查一致）
+
+1. **`agent.error` 有发送方、有渲染分支、没有路由。** `nervipulsa/runtime.py::Runtime._register()` 的路由表登记了 13 个事件类型，其中没有 `agent.error`；而 `nervipulsa/llm.py` 有三处发送点：`_pause_inplace()`（约 L1416，激活暂停）、`_emit_feedback()`（约 L1396，feedback 未投递）、以及上下文超限时 `/retry` 被拒绝的分支（约 L799）。`nervipulsa/events.py::Bus.call()` 对未注册的事件类型返回 `Delivery(False, reason="unknown_route")`，并且**不抛异常**，所以这三处发送静默失败；同时 `Runtime._render()`（约 L399）已经实现了 `agent.error` 的显示分支。净效果是：模型暂停、provider 失败、feedback 未投递这些最需要用户看到的诊断走不到 UI。
+2. **`Mailbox._leased` 只写不读，构成会话内无界增长。** `drain_available()` 每出队一个事件就写 `self._leased[item.event.id] = item`，但 `mark_consumed()` 从不删除条目，只有 `close()` 里 `_leased.clear()`。全仓库检索确认 `_leased` 只有三处引用（初始化 L206 / 写入 L344 / close 清空 L371），**没有任何读取点**，也不是公开属性，因此每个已出队事件对象都被长期强引用。`tests/test_fault_semantics.py::next_event` 另有自己的 `_fault_semantics_stash` 列表来保留未消费事件（靠 `drain_available` 的返回值自己持有），已核实不依赖 `_leased`。
+
+### 修法（都取最小改动）
+
+- `nervipulsa/runtime.py`：路由表增加一行 `"agent.error": self.ui_box`。因为 `Bus.call` 对未注册路由返回 `unknown_route` 而非抛错，`llm.py` 的三处既有发送点无需改动。新增路由也顺带让这些发送进入 journal 的 delivery 观测（此前只会记录一条 unknown_route 拒绝）。
+- `nervipulsa/events.py`：删除 `_leased` 的初始化、写入与 `close()` 清空三处。`drain_available()` 的其余语义逐字未动——普通车道 `_ordinary_size` 递减、末尾 `result.sort(key=lambda event: event.seq)`、以及 `if not self._items: self._wake.clear()` 都保持原样，因此容量记账与唤醒行为不变。选择删除而不是在 `mark_consumed()` 里按 id 移除，依据是「没有任何读取点」这一实测事实：保留一个只写不读的容器，即便加了删除也要维护一条多余的生命周期契约。
+
+### 三方对照：其它「有发送方、有渲染分支、无路由」的事件类型
+
+把生产代码的发送点、`Runtime._render()` 的分支、`_register()` 的路由表三方对照，**没有发现第二处同类缺口**：`assistant.message`、`python.started`、`python.cancel_result` 都有发送方、有渲染分支、有路由；`agent.feedback`、`agent.handler_fired`、`python.environment_changed`、`python.environment_discovered`、`session.shutdown` 有发送方、有路由，只是没有 UI 渲染分支（它们分别投给 llm/lifecycle 邮箱，属预期）；`python.requested` 走 `_observe()` 而非 `_render()`。因此本轮只加 `agent.error` 一条路由，未擅自扩展其它类型。
+
+### 新增测试
+
+- `tests/test_llm.py::test_provider_pause_error_reaches_the_ui_mailbox_and_is_rendered`：真实产生路径。`ScriptedBackend` 抛 `ProviderError("response_unknown", ...)` 使 actor 暂停，断言 `agent.error` 经总线到达 `ui`  mailbox（`target == ui_box.name`、`payload["kind"] == "response_unknown"`），并且 `Runtime._render` 把 `error  response_unknown  socket dropped` 真正写进了 echo 输出。
+- `tests/test_llm.py::test_agent_error_is_a_registered_route_not_unknown_route`：直接断言该路由存在——投递 `accepted` 且 `reason != "unknown_route"`，并能从 `ui_box` 取出。
+- `tests/test_events.py::test_consumed_events_are_not_retained_by_the_mailbox`：`drain_available` + `mark_consumed` 之后断言 Mailbox 不保留该事件（详见下方「测试手法」）。
+
+三条测试都做了**非空验证**（在隔离副本里注入缺陷，确认断言会失败，隔离副本已删除，磁盘上的产品代码未被替换）：把路由行去掉后两条 `agent.error` 测试分别以 `AssertionError: agent.error never reached the bus, so the route is unknown_route` 和 `assert 'unknown_route' != 'unknown_route'` 失败；把 `_leased` 写回后，保留测试同时被两处断言拦下（`hasattr` 守卫与容器扫描，后者报 `_leased still holds {'evt_00000001','evt_00000002','evt_00000003'}`）。既有容量行为测试（普通车道计数、`_wake` 清理、排序、handler 槽位）未删改、未放宽。
+
+**测试手法说明（一处偏离审查建议）：** 审查建议用 `weakref` + `gc.collect()` 断言事件对象已释放，但`Event` 与内部 `_Queued` 都是 `@dataclass(slots=True/frozen)`，`__slots__` 只含字段、无 `__weakref__`，实测 `TypeError: cannot create weak reference to 'Event' object`，弱引用不可用。改为结构性断言：`assert not hasattr(box, "_leased")`，再扫描 `vars(box)` 中所有 dict/list/set/tuple，断言其中不含这些事件的 id、也不含这些事件对象的 `id()`。这样既覆盖「`_leased` 这个无界容器不存在」，也覆盖「任何别的容器也没有接管这些对象」。
+
+### 逐字测试结果（Windows / Python 3.13.14 / pytest 9.1.1，本机）
+
+- 聚焦组 `python -m pytest tests/test_events.py tests/test_llm.py tests/test_fault_semantics.py -q`：`47 passed in 194.18s (0:03:14)`
+- 全量 `python -m pytest -q`（带本轮改动）：第一次 `1 failed, 150 passed in 439.49s (0:07:19)`，唯一失败是 `tests/test_python_host.py::test_timeout_and_cancel_kill_the_process_tree`，签名为 `timed out waiting for python.finished reply_to=evt_00000001; held []`（该用例给子进程 `timeout=0.4`、给等待 8 秒）；该用例单跑 `1 passed in 8.55s`，同改动全量复跑 `151 passed in 182.68s (0:03:02)`。
+- 对照基线（`git stash` 掉本轮改动、于 `c856e94` 纯净树）全量 `python -m pytest -q`：`148 passed in 240.68s (0:04:00)`。测试数 151 vs 148 的差额正是本轮新增的 3 条。
+- `git diff --check` 无输出（退出码 0）。
+
+关于那次失败，本轮**不下结论**：它落在 `test_python_host.py`（不涉及 `_leased` 或 `agent.error`），只在该次异常慢的全量运行中出现（439s vs 183–241s），单跑与复跑全量均通过，因此本机现有证据只支持「疑似资源/时序敏感的间歇失败」，不支持「本轮改动引入的回归」，也不足以宣称该用例已稳定。此前 2026-10-16 的本地全量记录里也出现过同类 timing 失败（143 passed / 3 failed），说明这是既有属性而非本轮新增。
+
+### 对审查其它结论的澄清
+
+审查称 hosted CI（Windows）结果为「147 passed, 1 skipped」，被跳过的是 `test_appcontainer_isolation_boundaries`。就本仓库事实而言，该跳过是**有意设计**的判定，不是掩盖：`tests/test_appcontainer.py` 只在实测到加载器失败退出码（`0xC0000135` / `0xC0000142` / `0xC000007B`）时跳过并给出 reason，其余环境仍执行全部隔离断言，真正的隔离缺陷会失败而不是跳过；原因见 2026-10-18 第二轮记录（hostedtoolcache / python.org 类解释器树没有对 AppContainer SID 的读取授权）。但审查指出的要点成立并且应当保留：**CI 绿灯不能当作 Windows 沙箱已验证**。本节不声称 AppContainer 隔离已验收——本轮既未重跑 hosted CI，也未在真正需要跳过的环境复现该跳过，更没有做针对性的沙箱逃逸测试。
+
+### 证据边界
+
+以上全部为本机 Windows 结果，不等于 hosted CI 通过；本轮未提交、未推送，`.github/workflows/tests.yml` 的 Ubuntu/Windows 3.11 矩阵在本轮改动上尚无任何运行记录。修 2 只**消除了无界增长的结构**（不再有只写不读的强引用容器），**没有**实测长跑会话的内存曲线改善，也没有测量 RSS、对象数或 GC 压力；因此不能把本条读作「长跑内存问题已解决」。同理，修 1 证明的是 `agent.error` 能到达 `ui` mailbox 并被 `_render` 写成一行 echo，不代表终端 UI 的措辞、限流或 `/logs` 表现已验收。

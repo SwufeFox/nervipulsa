@@ -467,3 +467,38 @@ def test_durable_effect_state_survives_event_routing() -> None:
         bus.close()
 
     asyncio.run(body())
+
+
+def test_consumed_events_are_not_retained_by_the_mailbox() -> None:
+    async def body() -> None:
+        bus = Bus()
+        box = Mailbox("llm", ordinary_limit=8)
+        bus.register("user.message", box)
+        bus.start()
+        for index in range(3):
+            assert bus.call("cli", "user.message", {"text": f"m{index}"}).accepted
+
+        batch = box.drain_available(8)
+        assert [event.payload["text"] for event in batch] == ["m0", "m1", "m2"]
+        assert box.size == 0
+        assert box.ordinary_size == 0
+        consumed = {event.id for event in batch}
+        batch_ids = {id(event) for event in batch}
+        for event in batch:
+            box.mark_consumed(event)
+
+        # The mailbox must not keep draining-consumed events alive. Event and the
+        # internal queue entry use __slots__ without __weakref__, so a weakref is
+        # impossible; instead assert no container attribute still holds them.
+        assert not hasattr(box, "_leased")
+        for name, value in vars(box).items():
+            if not isinstance(value, (dict, list, set, tuple)):
+                continue
+            values = value.values() if isinstance(value, dict) else value
+            assert not consumed.intersection(value), f"{name} still holds {consumed}"
+            assert not batch_ids.intersection(id(item) for item in values), (
+                f"{name} still references a drained event"
+            )
+        bus.close()
+
+    asyncio.run(body())

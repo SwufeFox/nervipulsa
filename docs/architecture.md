@@ -72,6 +72,7 @@ flowchart TD
 - **Runtime**：CREATED → RUNNING → DRAINING → CLOSED。draining 拒绝新 user.message、python.requested、agent.retry，仍允许处理取消与结果。shutdown 停止 actor，关闭 host，再关闭 Bus、取消剩余 UI/lifecycle 任务并限时 flush/close Journal；它不等待模型完成所有业务意图。
 - **Activation**：输入投影后 running，响应/工具回执处理完成为 committed；provider 异常、未知响应、预算、上下文或提交中断会 paused。已知响应提交中断时，`/retry` 沿已有 response 和调用状态继续，跳过已 accepted/rejected 的调用；无响应时重试可能重新请求 provider。此保护只在当前进程内有效，工具副作用已发生但回执未记下的窗口仍存在。未知响应或 commit_interrupted 需要显式 retry，不因普通新输入自动重试。上下文超限单纯 retry 无法缩小记录。
 - **Execution**：host 的 record 从 queued → running → done，终态 payload 再区分 succeeded/failed/timeout/cancelled；调度已标 running 与 worker 实际 started 是不同时间点，`active_execution_facts()` 仅在后者后报告计时。
+- **Resume 状态机（v0.5 起，仅记录不自动推进）**：`committed/observed` 表示已落盘可检查；`observed-but-unconsumed`（T4：effect 已 observed 且 python.finished 进了旧 LLM mailbox，但新会话收不到）标记为“待继续（inspectable, not resumable）”，只能人工用 `/inspect` 查看后手动发新 user.message 继续，绝不由 Runtime 自动重放、回填 mailbox 或恢复 namespace；`commit_interrupted/response_unknown` 仍需显式 `/retry`，且只在原进程内有效。
 - **Worker epoch**：正常成功、普通 Python 异常都保留 namespace；执行超时、运行中取消或进程退出需要重建解释器。旧 epoch 排队代码会取消，避免在新 namespace 自动重放。空闲 worker 死亡可通过 environment_changed 通知 actor。排队取消无需销毁当前 namespace。
 - **Handler**：worker 的 on_finished/off_finished 管理注册；每次执行结束固定最多 16 个回调的快照。host 的 epoch/request/id 检查及邮箱预留防止跨执行串接；终态携带 expected count、missing ids 与 complete/incomplete/unknown，不能把缺帧当成成功完成。终态槽在 actor 消费结果后释放，取批本身不释放该额度。
 
@@ -81,9 +82,10 @@ flowchart TD
 
 | 数据/路径 | 提交保证 | 重启后能做什么 |
 | --- | --- | --- |
-| Bus admission、邮箱、Activation、Transcript、namespace | 进程内内存状态 | 新建 Runtime 不恢复这些对象或继续原任务 |
+| Bus admission、邮箱、Activation、Transcript、namespace（活对象） | 进程内内存状态 | 新建 Runtime 不恢复这些对象或继续原任务；durable 行为下仍不回填 mailbox、不重建 namespace |
 | events/deliveries/activations/executions/tool_calls | Journal 有界队列，后台线程批量写入，WAL + NORMAL | 查询已落盘观测；队列溢出/写失败通过 incomplete/dropped/error 暴露；接受与展示不保证观测已落盘 |
 | durable_effects | 独立同步连接，FULL commit；intent → dispatching → observed，无法确认时尽力改 unknown | `/effects` 查询所有非 observed 行；崩溃可能保留 intent/dispatching；没有自动执行或重放 |
+| durable_activation_commits / durable_transcript_snapshots / durable_tool_receipts | 独立同步连接，FULL + BEGIN IMMEDIATE，单事务提交 activation 行 + transcript 快照；receipt 单独同步提交；失败显式抛错并转 paused（commit_interrupted），不静默丢 | `/inspect [session_id]` 只读检查上次会话的 activation/transcript/receipt；明确标注“可检查、不可自动继续”；绝不自动重放 python、不推回 mailbox、不恢复 namespace |
 | effect_assessments | 同步 FULL commit、追加人工 assessment | 保存谁基于什么证据作出判断；不修改 worker 事实、不将原 effect 改 observed、不触发 replay |
 | `.nervipulsa/outputs/<session>/` | worker 输出管道写文件，大输出保留 artifact；非 effect 事务的一部分 | 终态引用存在时可 `/output` 读取完整流；进程中断、文件丢失或观察记录缺失可使完整输出不可用 |
 | workspace / 外部系统 | 任意 Python 自身的副作用 | 文件或网络副作用可跨 namespace 重置保留；无回滚或跨系统事务 |
@@ -115,5 +117,7 @@ Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：�
 - **预留与 trace 的生命周期**：容量预留有终态交付意义，不能按普通队列简化。`Mailbox` 原先的 `_leased` 字典只写不读、且是会话内无界增长，已于 2026-10-21 删除（消费后不再持有事件）。`Runtime.trace`、执行记录和 Transcript archive 仍随会话增长；是否逐步释放、设上限或改变调试可见性，需要先定保留契约。
 - **错误展示路径**：`agent.error → ui_box` 路由已于 2026-10-21 注册，`_pause`、feedback 未投递与上下文溢出拒绝 `/retry` 三处发送点不再落到 `unknown_route`。仍有残留边界：`ui_box` 的 `ordinary_limit=256`，UI 任务卡住或长时间反复出错时投递可能返回 `capacity_exceeded`，这仍是不会出现在 UI 的路径；是否改用预留车道或另设保留策略尚未决定。
 - **fingerprint**：保留刚授权能力；预算/取消响应、平台链接行为、稳定快照及是否需要更丰富差异属于后续评估，不因架构偏好删除，也不扩成新存储层。
+
+2026-10-21 durable memory 切片：Transcript/Activation/tool receipt 增加同步 durable 提交 （FULL + BEGIN IMMEDIATE，失败显式抛错转 commit_interrupted），重启后 `/inspect` 只读可查、绝不自动重放；新增 `tests/test_durable_memory.py` 5 项（commit 失败显式报错、落盘往返、重启可读且新会话空转、无重放、失败转暂停），本地 `python -m pytest tests/test_durable_memory.py -q` 5 passed；证据分层：本地验证通过，hosted CI / 长跑 / 真实模型未验证。
 
 验证范围：初稿整理仅做静态检查；后续 scheduler 修复运行完整 `python -m pytest tests/test_events.py tests/test_python_host.py -vv`，Windows / Python 3.13.14 / pytest 9.1.1 下 30 passed（163.80s），包含真实 worker、取消/重启及 durable commit 故障替身。新增回归在内存恢复回退实现时失败，证明覆盖本次异常边界问题。本次未重现 startup flush 失败，未调整 timeout；一次通过不能排除间歇性 startup 问题。未运行全库测试、CLI/provider 或扫描竞态专项验证，以上测试不构成这些行为的验收。

@@ -892,3 +892,39 @@ DACL 差异与该解释一致：Store 树含 `S-1-19-512-4096:(OI)(CI)(RX,...)` 
 ### 证据边界
 
 以上全部为本机 Windows 结果，不等于 hosted CI 通过；本轮未提交、未推送，`.github/workflows/tests.yml` 的 Ubuntu/Windows 3.11 矩阵在本轮改动上尚无任何运行记录。修 2 只**消除了无界增长的结构**（不再有只写不读的强引用容器），**没有**实测长跑会话的内存曲线改善，也没有测量 RSS、对象数或 GC 压力；因此不能把本条读作「长跑内存问题已解决」。同理，修 1 证明的是 `agent.error` 能到达 `ui` mailbox 并被 `_render` 写成一行 echo，不代表终端 UI 的措辞、限流或 `/logs` 表现已验收。
+
+## 2026-10-21 v0.5 durable memory 切片（Transcript / Activation / Tool Receipt 可检查、不可自动继续）
+
+### 做了什么
+- `nervipulsa/journal.py`：新增 `durable_transcript_snapshots` / `durable_activation_commits` / `durable_tool_receipts`
+  三表与同步提交 `commit_activation_snapshot` / `commit_tool_receipt`（`PRAGMA synchronous=FULL` + `BEGIN IMMEDIATE`，
+  单事务写 activation 行 + transcript 快照；任何异常 rollback 并显式抛出），以及只读查询
+  `durable_inspect(session_id)` / `durable_sessions()`（返回体带 `notice: READ-ONLY … not resumable`）。
+- `nervipulsa/llm.py`：`_activate` 输入投影后先同步落盘（失败转 `commit_interrupted` 暂停并 `agent.error` 到 UI，
+  不再发模型请求）；`_deliver_tools` 每个 receipt 落盘后才记 async 观测（失败同样转暂停并返回）；
+  `_finish` / `_pause` 均补同步落盘，`_finish` 失败时由 committed 转 paused。
+- `nervipulsa/runtime.py`：新增 `inspect_durable(session_id?)` / `durable_sessions()` 只读透出，不触碰活 mailbox / transcript / namespace。
+- `nervipulsa/cli.py`：新增 `/inspect [session_id]`，打印 notice + activation / transcript 版本与消息数 + receipt，
+  尾行固定声明“no auto-replay: rows are not pushed to any mailbox; namespace not restored”。
+- Resume 状态机（只定义、不自动推进）：`committed/observed` = 已落盘可查；`observed-but-unconsumed`（T4 语义：
+  旧 terminal 存在但新会话收不到）= “待继续”，只能人工 `/inspect` 后发新消息手动继续；`commit_interrupted/response_unknown`
+  仍需原进程内显式 `/retry`。实现只做状态记录与只读暴露，不做自动推进。
+- 回归 `tests/test_durable_memory.py`（5 项）：同步提交失败显式抛错且无残留行；receipt 失败同理；正常提交往返可查；
+  Runtime 重启后旧会话可查、新会话 transcript/activations 为空、无 python 重放；注入失败时 actor 显式 paused
+ （`commit_interrupted`）而非静默 committed。
+
+### 本地验证（已做）
+- `python -m py_compile nervipulsa/journal.py nervipulsa/llm.py nervipulsa/runtime.py nervipulsa/cli.py` 通过。
+- `python -m pytest tests/test_durable_memory.py -q` 本地 **5 passed**（约 18s，Windows / Python 3.13）。
+- 聚焦 `tests/test_journal.py tests/test_cli.py` 与全量套件在后台跑，逐字结果见本轮报告（未先行断言）。
+
+### 未验证（明确未做）
+- hosted CI（Ubuntu/Windows workflow）未跑；长跑 / 并发 / 大 transcript 压力未测；真实模型 provider 未接；
+  kill -9 / 断电 / 磁盘故障等崩溃窗口未覆盖；` synchronous=FULL` 的持久性仍依赖 SQLite / 文件系统 / 设备保证。
+- `/inspect` 的输出截断与超大快照分页未定；`Runtime.trace` / Transcript archive 的内存增长上限仍沿用既有保留契约，未改。
+
+### 仍未解决的缺口
+- T4 “待继续”只有文档定义与只读暴露，没有跨会话续跑协议（有意不做自动继续）。
+- transcript 快照按 activation 全量存（含大消息体），无增量 / 压缩 / GC，上限与保留期未定。
+- `ui_box ordinary_limit=256` 的 capacity_exceeded 仍可能吞掉 `agent.error`（含本次新增的 commit_interrupted），
+  是否改预留车道未决（沿用 architecture.md §7 既有条目）。

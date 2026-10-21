@@ -181,6 +181,21 @@ class Runtime:
     def unresolved_effects(self, limit: int = 100) -> list[dict[str, Any]]:
         return self.journal.unresolved_effects(limit=limit)
 
+    def inspect_durable(self, session_id: str | None = None, limit: int = 100) -> dict[str, Any]:
+        """Read-only inspection of durable memory commits (never auto-replays).
+
+        Defaults to the current session; pass an explicit old session_id after
+        restart to inspect the previous session. The returned payload carries a
+        ``notice`` stating it is inspectable but not resumable: no python_exec
+        replay, no mailbox restore, no namespace restore.
+        """
+        target = session_id or self.bus.session_id
+        return self.journal.durable_inspect(target, limit)
+
+    def durable_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
+        """List sessions with durable memory commits (newest first)."""
+        return self.journal.durable_sessions(limit)
+
     def record_effect_assessment(
         self,
         session_id: str,

@@ -970,6 +970,22 @@ class LLMActor:
                     detail["truncated"] = bool(event.payload.get("truncated"))
                 event_metrics.append(detail)
             record_after = self.transcript.serialized_length()
+            try:
+                self._durable_commit_activation(activation)
+            except Exception as exc:
+                activation.error_kind = "commit_interrupted"
+                activation.error_message = f"durable transcript commit failed: {exc}"
+                self._pause_inplace(activation)
+                self._ui.call(
+                    "agent.error",
+                    {
+                        "kind": "commit_interrupted",
+                        "message": activation.error_message,
+                        "activation_id": activation.id,
+                    },
+                )
+                self._journal_activation(activation)
+                return
             accounting_mismatch = record_after - before_chars != input_added_chars
             if (
                 not accounting_mismatch
@@ -1356,6 +1372,27 @@ class LLMActor:
                 activation.tool_calls[call.id] = status
                 execution_id = receipt.get("execution_id") if status == "accepted" else None
                 reason = receipt.get("reason") if status == "rejected" else None
+                try:
+                    self._durable_commit_tool_receipt(
+                        activation,
+                        call.id,
+                        execution_id if isinstance(execution_id, str) else None,
+                        status,
+                        receipt,
+                    )
+                except Exception as exc:
+                    activation.error_kind = "commit_interrupted"
+                    activation.error_message = f"commit interrupted: {exc}"
+                    self._pause_inplace(activation)
+                    self._ui.call(
+                        "agent.error",
+                        {
+                            "kind": "commit_interrupted",
+                            "message": activation.error_message,
+                            "activation_id": activation.id,
+                        },
+                    )
+                    return
                 self._journal_tool(
                     activation,
                     call.id,
@@ -1404,6 +1441,17 @@ class LLMActor:
         activation.error_kind = kind
         activation.error_message = message
         self._pause_inplace(activation)
+        try:
+            self._durable_commit_activation(activation)
+        except Exception as exc:
+            self._ui.call(
+                "agent.error",
+                {
+                    "kind": "commit_interrupted",
+                    "message": f"durable activation commit failed: {exc}",
+                    "activation_id": activation.id,
+                },
+            )
         self._journal_activation(activation)
 
     def _pause_inplace(self, activation: Activation) -> None:
@@ -1428,7 +1476,70 @@ class LLMActor:
                 )
         if self._paused is activation:
             self._paused = None
+        try:
+            self._durable_commit_activation(activation)
+        except Exception as exc:
+            activation.error_kind = "commit_interrupted"
+            activation.error_message = f"durable activation commit failed: {exc}"
+            self._pause_inplace(activation)
+            self._ui.call(
+                "agent.error",
+                {
+                    "kind": "commit_interrupted",
+                    "message": activation.error_message,
+                    "activation_id": activation.id,
+                },
+            )
+            self._journal_activation(activation)
+            return
         self._journal_activation(activation)
+
+    def _durable_commit_activation(self, activation: Activation) -> None:
+        """Sync durable commit of one activation plus transcript snapshot.
+
+        Raises on any SQLite failure so callers must fail explicitly instead of
+        silently marking committed. Read-only inspection material only; never
+        fed back into any mailbox or worker namespace.
+        """
+        journal = self._journal
+        if journal is None:
+            return
+        activation.transcript_version = self.transcript.version
+        error: dict[str, Any] | None = None
+        if activation.error_kind:
+            error = {"kind": activation.error_kind, "message": activation.error_message}
+        journal.commit_activation_snapshot(
+            session_id=self.session_id,
+            activation_id=activation.id,
+            status=activation.status,
+            input_event_ids=list(activation.input_event_ids),
+            transcript_version=activation.transcript_version,
+            context=dict(activation.context_metrics or {}),
+            error=error,
+            transcript_messages=self.transcript.messages,
+            transcript_event_ids=self.transcript.event_ids,
+            transcript_event_types=self.transcript.event_types,
+        )
+
+    def _durable_commit_tool_receipt(
+        self,
+        activation: Activation,
+        tool_call_id: str,
+        execution_id: str | None,
+        status: str,
+        receipt: dict[str, Any],
+    ) -> None:
+        journal = self._journal
+        if journal is None:
+            return
+        journal.commit_tool_receipt(
+            session_id=self.session_id,
+            activation_id=activation.id,
+            tool_call_id=tool_call_id,
+            execution_id=execution_id,
+            status=status,
+            receipt=dict(receipt),
+        )
 
     def _journal_activation(self, activation: Activation) -> None:
         journal = self._journal

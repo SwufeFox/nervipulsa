@@ -19,6 +19,33 @@ from .events import Delivery, Event
 _STOP = object()
 
 
+def _ensure_durable_memory_tables(connection: sqlite3.Connection) -> None:
+    """Tables for restart-inspectable (never auto-replayed) memory commits."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS durable_transcript_snapshots (
+        session_id TEXT NOT NULL, activation_id TEXT NOT NULL,
+        transcript_version INTEGER NOT NULL,
+        messages_json TEXT NOT NULL,
+        event_ids_json TEXT NOT NULL,
+        event_types_json TEXT NOT NULL,
+        committed_at REAL NOT NULL,
+        PRIMARY KEY(session_id, activation_id))""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS durable_activation_commits (
+        session_id TEXT NOT NULL, activation_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        input_event_ids_json TEXT NOT NULL,
+        transcript_version INTEGER NOT NULL,
+        context_json TEXT,
+        error_json TEXT,
+        committed_at REAL NOT NULL,
+        PRIMARY KEY(session_id, activation_id))""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS durable_tool_receipts (
+        session_id TEXT NOT NULL, activation_id TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL, execution_id TEXT,
+        status TEXT NOT NULL, receipt_json TEXT NOT NULL,
+        observed_at REAL NOT NULL,
+        PRIMARY KEY(session_id, activation_id, tool_call_id))""")
+
+
 class Journal:
     def __init__(self, path: Path, *, queue_limit: int = 4096) -> None:
         self.path = path
@@ -606,6 +633,230 @@ class Journal:
         except Exception:
             connection.rollback()
             raise
+        finally:
+            connection.close()
+
+
+    def commit_activation_snapshot(
+        self,
+        session_id: str,
+        activation_id: str,
+        status: str,
+        input_event_ids: list[str],
+        transcript_version: int,
+        context: dict[str, Any],
+        error: dict[str, Any] | None,
+        transcript_messages: list[dict[str, Any]],
+        transcript_event_ids: list[str | None],
+        transcript_event_types: list[str | None],
+    ) -> None:
+        """Synchronously commit one activation plus its transcript snapshot.
+
+        Same failure semantics as the effect ledger: ``PRAGMA synchronous=FULL``,
+        rollback on any error, and an explicit exception (never a silent drop).
+        The rows are read-only inspection material; no caller may auto-replay
+        them into a mailbox or worker namespace.
+        """
+        if not session_id.strip() or not activation_id.strip():
+            raise ValueError("session_id and activation_id must be non-empty")
+        if not isinstance(transcript_version, int) or isinstance(transcript_version, bool):
+            raise ValueError("transcript_version must be an integer")
+        connection = sqlite3.connect(self.path, timeout=5)
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            _ensure_durable_memory_tables(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            now = time.time()
+            connection.execute(
+                "INSERT OR REPLACE INTO durable_activation_commits"
+                "(session_id,activation_id,status,input_event_ids_json,transcript_version,"
+                "context_json,error_json,committed_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    session_id,
+                    activation_id,
+                    status,
+                    json.dumps(list(input_event_ids), ensure_ascii=False),
+                    transcript_version,
+                    json.dumps(dict(context or {}), ensure_ascii=False),
+                    json.dumps(error, ensure_ascii=False) if error is not None else None,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO durable_transcript_snapshots"
+                "(session_id,activation_id,transcript_version,messages_json,"
+                "event_ids_json,event_types_json,committed_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    session_id,
+                    activation_id,
+                    transcript_version,
+                    json.dumps(list(transcript_messages), ensure_ascii=False),
+                    json.dumps(list(transcript_event_ids), ensure_ascii=False),
+                    json.dumps(list(transcript_event_types), ensure_ascii=False),
+                    now,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            connection.close()
+
+    def commit_tool_receipt(
+        self,
+        session_id: str,
+        activation_id: str,
+        tool_call_id: str,
+        execution_id: str | None,
+        status: str,
+        receipt: dict[str, Any],
+    ) -> None:
+        """Synchronously commit one tool acceptance receipt.
+
+        Explicit failure semantics identical to :meth:`commit_activation_snapshot`:
+        FULL commit, rollback, raise. Read-only inspection material only.
+        """
+        if not session_id.strip() or not activation_id.strip() or not tool_call_id.strip():
+            raise ValueError("session_id, activation_id and tool_call_id must be non-empty")
+        if status not in {"accepted", "rejected", "pending"}:
+            raise ValueError("status must be accepted, rejected, or pending")
+        if not isinstance(receipt, dict):
+            raise ValueError("receipt must be a dict")
+        connection = sqlite3.connect(self.path, timeout=5)
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            _ensure_durable_memory_tables(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT OR REPLACE INTO durable_tool_receipts"
+                "(session_id,activation_id,tool_call_id,execution_id,status,"
+                "receipt_json,observed_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    session_id,
+                    activation_id,
+                    tool_call_id,
+                    execution_id,
+                    status,
+                    json.dumps(dict(receipt), ensure_ascii=False),
+                    time.time(),
+                ),
+            )
+            connection.commit()
+        except Exception:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            connection.close()
+
+    def durable_inspect(self, session_id: str, limit: int = 100) -> dict[str, Any]:
+        """Read-only inspection of one session's durable memory commits.
+
+        Returns snapshots, activation commits and tool receipts without touching
+        any live mailbox, transcript, or worker namespace. Callers must not feed
+        the returned rows back into execution; the ``notice`` field states this.
+        """
+        notice = (
+            "READ-ONLY: inspectable, not resumable. Do not auto-replay python_exec, "
+            "do not push observed rows back into any mailbox, do not restore namespace."
+        )
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        if not session_id.strip():
+            raise ValueError("session_id must be non-empty")
+        if not self.path.exists():
+            return {
+                "notice": notice,
+                "session_id": session_id,
+                "activations": [],
+                "transcript_snapshots": [],
+                "tool_receipts": [],
+            }
+        connection = sqlite3.connect(self.path, timeout=2)
+        connection.row_factory = sqlite3.Row
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            activations: list[dict[str, Any]] = []
+            snapshots: list[dict[str, Any]] = []
+            receipts: list[dict[str, Any]] = []
+            if "durable_activation_commits" in tables:
+                activations = [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT session_id,activation_id,status,input_event_ids_json,"
+                        "transcript_version,context_json,error_json,committed_at "
+                        "FROM durable_activation_commits WHERE session_id=? "
+                        "ORDER BY committed_at DESC LIMIT ?",
+                        (session_id, limit),
+                    )
+                ]
+            if "durable_transcript_snapshots" in tables:
+                snapshots = [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT session_id,activation_id,transcript_version,messages_json,"
+                        "event_ids_json,event_types_json,committed_at "
+                        "FROM durable_transcript_snapshots WHERE session_id=? "
+                        "ORDER BY committed_at DESC LIMIT ?",
+                        (session_id, limit),
+                    )
+                ]
+            if "durable_tool_receipts" in tables:
+                receipts = [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT session_id,activation_id,tool_call_id,execution_id,status,"
+                        "receipt_json,observed_at FROM durable_tool_receipts "
+                        "WHERE session_id=? ORDER BY observed_at DESC LIMIT ?",
+                        (session_id, limit),
+                    )
+                ]
+            return {
+                "notice": notice,
+                "session_id": session_id,
+                "activations": activations,
+                "transcript_snapshots": snapshots,
+                "tool_receipts": receipts,
+            }
+        finally:
+            connection.close()
+
+    def durable_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
+        """List sessions that have durable memory commits (newest first)."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        if not self.path.exists():
+            return []
+        connection = sqlite3.connect(self.path, timeout=2)
+        connection.row_factory = sqlite3.Row
+        try:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='durable_activation_commits'"
+            ).fetchone()
+            if table is None:
+                return []
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT session_id, COUNT(*) AS activation_commits, "
+                    "MAX(committed_at) AS last_committed_at "
+                    "FROM durable_activation_commits GROUP BY session_id "
+                    "ORDER BY last_committed_at DESC LIMIT ?",
+                    (limit,),
+                )
+            ]
         finally:
             connection.close()
 

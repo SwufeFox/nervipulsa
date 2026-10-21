@@ -289,6 +289,50 @@ def handle_line(runtime: Runtime, line: str) -> bool:
                     f"changed={fingerprint.get('changed', 'unknown')}"
                 )
         return False
+    if stripped == "/inspect" or stripped.startswith("/inspect "):
+        parts = stripped.split()
+        target = parts[1] if len(parts) > 1 else None
+        try:
+            if target is None:
+                sessions = runtime.durable_sessions(limit=20)
+                if sessions:
+                    runtime.echo("durable sessions (read-only; inspectable, not resumable)")
+                    for row in sessions:
+                        runtime.echo(
+                            f"  {row.get('session_id')}  activations={row.get('activation_commits')}"
+                        )
+                    target = str(sessions[0].get("session_id"))
+                else:
+                    target = runtime.bus.session_id
+            data = runtime.inspect_durable(session_id=target, limit=100)
+        except Exception as exc:
+            runtime.echo(f"[inspect] failed: {exc}")
+            return False
+        runtime.echo(str(data.get("notice") or "READ-ONLY durable memory"))
+        runtime.echo(f"session {data.get('session_id')}")
+        for activation in data.get("activations", []):
+            runtime.echo(
+                f"  activation {activation.get('activation_id')} "
+                f"status={activation.get('status')} "
+                f"transcript_version={activation.get('transcript_version')}"
+            )
+        for snap in data.get("transcript_snapshots", []):
+            try:
+                messages = json.loads(str(snap.get("messages_json") or "[]"))
+            except json.JSONDecodeError:
+                messages = []
+            runtime.echo(
+                f"  transcript {snap.get('activation_id')} "
+                f"version={snap.get('transcript_version')} messages={len(messages)}"
+            )
+        for receipt in data.get("tool_receipts", []):
+            runtime.echo(
+                f"  receipt {receipt.get('tool_call_id')} "
+                f"status={receipt.get('status')} "
+                f"execution={receipt.get('execution_id') or '-'}"
+            )
+        runtime.echo("no auto-replay: rows are not pushed to any mailbox; namespace not restored")
+        return False
     if stripped == "/effects" or stripped.startswith("/effects "):
         try:
             parts = shlex.split(stripped, posix=False)

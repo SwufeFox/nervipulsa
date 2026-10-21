@@ -963,3 +963,31 @@ test_fault_semantics` 51 passed；全量在后台跑，逐字结果待收。期�
 自己测试断言写错（`bus.close()` 后 `Bus.call` 返回 `runtime_closing` 而非邮箱层
 `receiver_unavailable`），已修正测试、未动产品代码——邮箱层的 `can_offer`
 断言本身是对的。长跑内存曲线、hosted CI、真实模型均未验证。
+
+## 2026-10-21 剪枝第一刀：删除 workspace fingerprint
+
+来源边界：洛铃提出“一直在加量，要不要简化和剪枝”。本节记录第一刀的依据、
+范围与验证；hosted CI 在本轮改动上尚无运行记录，不把本地结果读作远程验收。
+
+为什么是它：
+- 每次执行扫两遍全树（`asyncio.to_thread` 全量遍历 + SHA-256），大工作区下是
+  O(工作区字节数) 的常态开销，却只产出“前后是否变化”的线索。
+- 它不是快照、不是隔离、不能恢复、不归因单次执行、不覆盖外部副作用；
+  排查需求用版本控制或外部工具即可满足。
+- 自 2026-10-18 落地以来从未经运行时验证（当时文档原话），也没有测试覆盖。
+
+删除范围（整条 wiring，不留残桩）：
+- `nervipulsa/workspace_fingerprint.py` 整个模块删除。
+- `python_host.py`：import、`ExecResult.workspace_fingerprint` 字段、`__init__` 参数、
+  调度前后两次扫描、`_emit_finished` 的 metadata 写入。
+- `config.py` 的 `Settings.fingerprint_workspace`、`runtime.py` 的透传、
+  `cli.py` 的 `--fingerprint-workspace` flag 与 `/logs` 指纹展示段。
+- `README.md` 的特性段与模块表行；`architecture.md` 的模块表行、第 6 节指纹段落
+  与决策 bullet（改写为“已删除”，不是静默抹掉）；
+  `durable_effect_protocol.md` 的观测小节压缩为 3 行删除注记（保留日期可追溯）。
+- 研究日志与 LayerFS 专题的历史条目不动（append-only，删了才是篡改历史）。
+
+验证（逐字结果待全量收完后补）：源码零残留（`Select-String fingerprint`
+只剩 docs 历史条目）、4 文件 AST 通过、`git diff --check` 通过、
+`test_config + test_cli` 22 passed。测试文件无一处引用 fingerprint，
+所以没有“删了实现、测试还在测它”的悬空断言。

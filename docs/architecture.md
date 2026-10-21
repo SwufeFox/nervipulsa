@@ -61,7 +61,6 @@ flowchart TD
 | `python_worker.py` | compile/exec、持久 namespace、handler 注册/快照、输出捕获 | namespace/回调仅存在于该 worker epoch；host 镜像只用于关联和投递 |
 | `framing.py` / `process_tree.py` / `appcontainer.py` | 长度前缀 JSON socket、过滤环境和进程树管理、可选 Windows 隔离 | 控制帧与用户输出分离；平台清理失败必须保留诊断 |
 | `journal.py` | 异步观测表、同步 durable effect 表、人工评估与查询 | 两条写入路径共用 SQLite 文件，提交保证不同；不是通用状态恢复引擎 |
-| `workspace_fingerprint.py` | 可选执行前后文件树摘要与差异标记 | 只提供 execution metadata，不决定 effect 状态、权限或重试 |
 | `hashline_edit.py` | worker 可调用的文件快照/tag 与受限 PUT 编辑 | 防陈旧编辑的局部工具，不约束任意 Python 文件访问 |
 | `cli.py` | 交互输入、命令、配置与展示 | 经 application/Runtime 使用会话，退出时发起清理 |
 
@@ -94,15 +93,13 @@ flowchart TD
 
 协议详情及既有故障注入记录见 [Durable Effect Protocol](durable_effect_protocol.md)。[Failure semantics baseline](failure_semantics.md) 固定在协议前版本，不能用来证明当前 effect 协议。
 
-## 6. 安全与 fingerprint
+## 6. 安全边界
 
 默认 worker 以当前用户权限执行任意 Python，workspace 只是 cwd，既不是访问根也不是沙箱。host 过滤传给 worker 的环境，配置 API key 不主动写入 journal/worker 环境；这不阻止默认 worker 以用户权限读取其他文件。journal、输出、代码和模型请求可能包含任务数据，不能视为脱敏存储。provider 地址与凭据是显式信任边界。
 
 Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：使用无 capability 的 AppContainer、临时 ACL 和 Job Object；启动前拒绝链接/reparse point/硬链接，设置失败不回退到普通进程。该 worker 还必须能**读取自己的解释器目录**（容器启动第一步是加载 `python.exe` 及其 DLL），而 host 只对 runtime package 授权、不对解释器本身授权：Windows Store 版 Python 已对应用包授予读权限可直接使用，python.org / `hostedtoolcache` 类安装默认只授权 SYSTEM、Administrators 与交互用户，需要显式给解释器目录加 `ALL APPLICATION PACKAGES` 读权限，否则 worker 会在运行任何 Python 之前退出——host 现在会报告退出码与解释器路径，而不是仅给出空的启动错误。扫描与 ACL 之间仍有外部并发修改窗口，也不提供完整资源限制。详见 README 的执行边界。Hashline 的路径/tag 检查只保护该编辑 API；独立 socket 只防正常 stdout/stderr 混入控制帧，不构成对恶意 worker 的认证隔离。
 
-`--fingerprint-workspace` 保留为默认关闭的观测能力。启用后 host 在每次调度执行前后通过线程扫描共享树，排除任意深度 `.git` 和 `.nervipulsa`，摘要包含相对路径、节点类型、普通文件内容和符号链接目标文字。扫描失败记录 error/unavailable；两个 available 摘要不同时 changed=true，否则相同为 false，无法比较为 null。结果只进 executions.metadata_json 和 `/logs`，不进入 python.finished/model context，也不写入 effect ledger。
-
-其收益是为人工排查提供低侵入的前后差异线索；代价是每次执行两次全树读取，增加 I/O、延迟及路径记录内存。它不是原子快照，不归因于单次执行：编辑器/其他进程可改树，执行可改完再还原，外部副作用和被排除树不覆盖。权限、时间等元数据不进入摘要；路径大小写排序带平台语义。当前遍历虽不主动跟随已识别符号链接，但扫描与读取之间的替换竞态、Windows reparse/junction 行为仍需专项验证，不能用作安全边界。当前没有 LayerFS、增量缓存、快照恢复或以摘要相等推导安全重放的实现。
+文件状态历史不在本运行时内：`--fingerprint-workspace` 已于 2026-10-21 删除（每次执行扫两遍全树、未经运行时验证；历史见 git）。文件差异排查用版本控制或外部工具，不在执行路径里做全树哈希。
 
 ## 7. 本轮整理与保留的决策
 
@@ -116,7 +113,7 @@ Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：�
 - **Host 的线程/loop 分工与 handler 镜像**：阻塞 IPC、进程终止与 SQLite 放在线程，Bus 交付留在 loop；镜像承担关联校验，并非 namespace 的第二份权威状态。重写并发模型风险大于本轮收益。
 - **预留与 trace 的生命周期**：容量预留有终态交付意义，不能按普通队列简化。`Mailbox` 原先的 `_leased` 字典只写不读、且是会话内无界增长，已于 2026-10-21 删除（消费后不再持有事件）。`Runtime.trace`、执行记录和 Transcript archive 仍随会话增长；是否逐步释放、设上限或改变调试可见性，需要先定保留契约。
 - **错误展示路径**：`agent.error → ui_box` 路由已于 2026-10-21 注册；同日再增加有界诊断预留：`ui_box` 为 `ordinary_limit=256 + diagnostic_limit=16`，`agent.error` 全量改走 `Lane.DIAGNOSTIC`，普通队列满时诊断仍可接纳（单一 FIFO 消费顺序不变）。诊断预留也满时返回显式 `diagnostic_capacity_exceeded`、记 `diagnostic_dropped` 计数并向 stderr 直报一行，不伪装成功、不丢旧消息、不扩容。接纳保证不等于显示保证：UI 任务停滞时诊断只是在队列里等，不会被自动显示。
-- **fingerprint**：保留刚授权能力；预算/取消响应、平台链接行为、稳定快照及是否需要更丰富差异属于后续评估，不因架构偏好删除，也不扩成新存储层。
+- **fingerprint（已删除 2026-10-21）**：`workspace_fingerprint.py` 及整条 wiring（Settings/Runtime/host/CLI/`/logs`/docs）已移除。文件状态历史不是本运行时的职责；差异排查交给版本控制或外部工具。
 
 2026-10-21 durable memory 切片：Transcript/Activation/tool receipt 增加同步 durable 提交 （FULL + BEGIN IMMEDIATE，失败显式抛错转 commit_interrupted），重启后 `/inspect` 只读可查、绝不自动重放；新增 `tests/test_durable_memory.py` 5 项（commit 失败显式报错、落盘往返、重启可读且新会话空转、无重放、失败转暂停），本地 `python -m pytest tests/test_durable_memory.py -q` 5 passed；证据分层：本地验证通过，hosted CI / 长跑 / 真实模型未验证。
 

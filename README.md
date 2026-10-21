@@ -75,15 +75,6 @@ Then start the interactive CLI:
 
 `python -m nervipulsa --dir .` runs the same entry point without installing.
 
-Workspace fingerprinting is an opt-in CLI feature: `nervipulsa --dir . --fingerprint-workspace`.
-When enabled, Nervipulsa reads and hashes the entire shared workspace immediately
-before and after every Python execution, excluding `.git` and `.nervipulsa` at any
-depth. This can add substantial filesystem I/O and execution cost, especially for
-large workspaces. Fingerprints are recorded in execution metadata and shown in
-`/logs`. Without this flag no workspace fingerprint scan runs and no fingerprint
-field is written. The Python worker continues to use the same shared workspace
-and directory permissions either way.
-
 The first run can open /config to set a provider, base URL, model, and API key.
 Configuration is saved under the platform user configuration directory,
 outside the workspace. The key is hidden while entering and is never written to
@@ -266,7 +257,6 @@ provider, base URL, model, and key in the Magpie CLI for a separate live user te
 | `nervipulsa/framing.py` | Length-prefixed JSON control frames |
 | `nervipulsa/process_tree.py` | Filtered environment, spawn and tree cleanup |
 | `nervipulsa/journal.py` | Asynchronous observations and synchronous durable effect commits |
-| `nervipulsa/workspace_fingerprint.py` | Opt-in before/after workspace observations |
 | `nervipulsa/config.py` | Precedence, persistence, redaction |
 | `nervipulsa/cli.py` | Input, display, commands |
 | `nervipulsa/runtime.py` | Session wiring and event routing |

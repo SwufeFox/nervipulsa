@@ -61,7 +61,6 @@ class Runtime:
             workspace=self.workspace,
             output_dir=self.output_dir / self.bus.session_id,
             max_timeout=settings.max_timeout,
-            fingerprint_workspace=settings.fingerprint_workspace,
             journal=self.journal,
             session_id=self.bus.session_id,
         )

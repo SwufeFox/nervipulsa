@@ -113,14 +113,6 @@ class LineBuffer:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nervipulsa")
     parser.add_argument("--dir", default=None, help="Workspace directory for the whole session")
-    parser.add_argument(
-        "--fingerprint-workspace",
-        action="store_true",
-        help=(
-            "Opt in to reading the entire workspace before and after every Python execution "
-            "(excluding .git and .nervipulsa); this may significantly increase cost"
-        ),
-    )
     parser.add_argument("--provider", default=None)
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--model", default=None)
@@ -136,8 +128,6 @@ def settings_from_args(argv: list[str] | None = None) -> Settings:
     cli: dict[str, object] = {}
     if args.dir:
         cli["workspace"] = args.dir
-    if args.fingerprint_workspace:
-        cli["fingerprint_workspace"] = True
     if args.provider:
         cli["provider"] = args.provider
     if args.base_url:
@@ -266,28 +256,6 @@ def handle_line(runtime: Runtime, line: str) -> bool:
             runtime.echo(
                 f"execution {execution['execution_id']} {execution['status']} epoch={execution['worker_epoch']}"
             )
-            try:
-                metadata = json.loads(execution.get("metadata_json") or "{}")
-            except json.JSONDecodeError:
-                metadata = {}
-            if not isinstance(metadata, dict):
-                metadata = {}
-            fingerprint = metadata.get("workspace_fingerprint")
-            if isinstance(fingerprint, dict):
-                before = fingerprint.get("before") or {}
-                after = fingerprint.get("after") or {}
-                if not isinstance(before, dict):
-                    before = {}
-                if not isinstance(after, dict):
-                    after = {}
-                runtime.echo(
-                    f"  workspace fingerprint ({fingerprint.get('schema', 'unknown')}): "
-                    f"before={before.get('status', 'unavailable')} "
-                    f"{before.get('sha256') or before.get('error') or ''} "
-                    f"after={after.get('status', 'unavailable')} "
-                    f"{after.get('sha256') or after.get('error') or ''} "
-                    f"changed={fingerprint.get('changed', 'unknown')}"
-                )
         return False
     if stripped == "/inspect" or stripped.startswith("/inspect "):
         parts = stripped.split()

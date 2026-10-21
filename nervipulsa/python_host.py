@@ -20,7 +20,6 @@ from typing import Any
 from .events import MAX_HANDLER_RESULTS_PER_EXECUTION, Emitter, Event, Lane, Mailbox
 from .framing import read_frame, write_frame
 from .process_tree import ManagedProcess, describe_loader_failure, spawn_worker
-from .workspace_fingerprint import fingerprint_metadata, workspace_fingerprint
 
 _PREVIEW = 4 * 1024
 
@@ -94,7 +93,6 @@ class ExecResult:
     handler_ids: list[str] | None = None
     missing_handler_ids: list[str] | None = None
     cleanup_failed: bool = False
-    workspace_fingerprint: dict[str, Any] | None = None
     effect_state: str = "untracked"
 
 
@@ -109,7 +107,6 @@ class PythonHost:
         workspace: Path,
         output_dir: Path,
         max_timeout: float = 120,
-        fingerprint_workspace: bool = False,
         journal: Any | None = None,
         session_id: str = "",
     ) -> None:
@@ -120,7 +117,6 @@ class PythonHost:
         self.workspace = workspace
         self.output_dir = output_dir
         self.max_timeout = max_timeout
-        self.fingerprint_workspace = fingerprint_workspace
         self._journal = journal
         self.session_id = session_id
         self._pending: deque[Execution] = deque()
@@ -339,13 +335,7 @@ class PythonHost:
                     self._executing = True
                     result = None
                     try:
-                        before = None
-                        if self.fingerprint_workspace:
-                            before = await asyncio.to_thread(workspace_fingerprint, self.workspace)
                         result = await asyncio.to_thread(self._execute_blocking, record)
-                        if self.fingerprint_workspace:
-                            after = await asyncio.to_thread(workspace_fingerprint, self.workspace)
-                            result.workspace_fingerprint = fingerprint_metadata(before or {}, after)
                         self._apply_result(record, result)
                     except Exception as exc:
                         result = ExecResult(
@@ -1120,8 +1110,6 @@ class PythonHost:
             "stderr_artifact_path": result.stderr_artifact_path,
             "tool_call_id": record.tool_call_id,
         }
-        if result.workspace_fingerprint is not None:
-            metadata["workspace_fingerprint"] = result.workspace_fingerprint
         self._journal_execution(
             record,
             result.status,

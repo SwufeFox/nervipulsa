@@ -62,15 +62,12 @@ The restart probe also sends a fresh user message through a `ScriptedBackend` ac
 
 
 
-## Workspace fingerprint observations (2026-10-18)
+## Workspace fingerprint observations (2026-10-18, removed 2026-10-21)
 
-The default is off. Start the CLI with `--fingerprint-workspace` to opt in. When enabled, the PythonHost receives the setting through `Settings` and `Runtime` and reads the entire shared workspace immediately before and after every Python execution, excluding `.git` and `.nervipulsa` directories at any depth. This can add substantial filesystem I/O and execution cost, particularly in large workspaces. Without the flag, the host does not scan the workspace and the `workspace_fingerprint` key is omitted entirely from execution metadata. Fingerprinting does not change the worker's shared-directory or permission semantics.
-
-The `workspace-fingerprint-v1` digest is a deterministic SHA-256 Merkle-style stream over normalized workspace-relative paths, node kinds, ordinary-file bytes, and symlink target text. Directory entries are included (including empty directories). Symlinks are represented without traversing their targets; special nodes contribute path and kind. `.nervipulsa` and `.git` are pruned at any depth, using `os.path.normcase` for the host OS's case handling. File bytes are read in bounded chunks. Permissions, timestamps, ownership, hard-link topology, and other metadata are not part of identity.
-
-The host runs opted-in scans through `asyncio.to_thread`, outside the event loop. Each endpoint records `available`, `unavailable` (workspace missing or not a directory), or `error` (scan failure); a scan failure does not replace or alter the worker execution result. `changed` is `null` unless both endpoints are available. The pair describes two observations around execution, not an atomic filesystem snapshot: concurrent external edits may occur during either traversal and can yield a mixed view or escape detection. The digest does not prove which individual changes were caused by the execution.
-
-This entry records implementation and source review only. No tests were added or run for this change, and the fingerprint behavior has not been independently validated by runtime experiments.
+The opt-in `--fingerprint-workspace` execution file-tree digest was removed on
+2026-10-21 as a simplification cut: it scanned the whole workspace twice per
+execution, was never validated by runtime experiments, and its history is kept
+in git, not in this protocol document.
 
 ## Limits
 

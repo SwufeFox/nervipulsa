@@ -928,3 +928,38 @@ DACL 差异与该解释一致：Store 树含 `S-1-19-512-4096:(OI)(CI)(RX,...)` 
 - transcript 快照按 activation 全量存（含大消息体），无增量 / 压缩 / GC，上限与保留期未定。
 - `ui_box ordinary_limit=256` 的 capacity_exceeded 仍可能吞掉 `agent.error`（含本次新增的 commit_interrupted），
   是否改预留车道未决（沿用 architecture.md §7 既有条目）。
+
+## 2026-10-21 UI 诊断预留（有界，不做优先级调度）
+
+来源边界：本节是 504962b 推送后、洛铃拍板的下一笔独立提交。本机 Windows / Python 3.13 验证，
+hosted CI 在本轮改动上尚无运行记录，不把本地结果读作远程验收。
+
+做了什么：
+- `events.py` 新增 `Lane.DIAGNOSTIC`；`Mailbox` 增加 `diagnostic_limit=16`、
+  `_diagnostic_size` 计数与 `diagnostic_dropped` 计数。`can_offer` 对诊断满返回显式
+  `diagnostic_capacity_exceeded`（与普通 lane 的 `capacity_exceeded` 区分开），
+  并在 `Bus.call` 与 `offer` 两处对该原因记一次 drop 计数（不双记）。
+- `Emitter.call` 对诊断 lane 的投递失败（`diagnostic_capacity_exceeded` /
+  `receiver_unavailable`）向 stderr 直报一行
+  `[nervipulsa:diagnostic-dropped reason=... type=... kind=... message=...]`，
+  best-effort，不抛异常，不伪装成功。
+- `runtime.py` 的 `ui_box` 改为 `ordinary_limit=256, diagnostic_limit=16`，
+  新增 `ui_diagnostics_status()` 只读透出五项计数；`llm.py` 7 处与
+  `python_host.py` 2 处 `agent.error` 发送全量改走诊断 lane，
+  `assistant.message` / `python.started` / `python.cancel_result` 保持普通 lane。
+- 单一 FIFO 消费顺序不变：`drain_available` 按 seq 排序，不区分 lane；
+  不丢旧消息、不扩容、不改因果顺序。接纳保证不等于显示保证。
+
+测试（`tests/test_events.py` 新增 4 项）：
+- 普通队列满时诊断预留仍可接纳 16 条中的名额，且消费顺序按 seq 单一 FIFO。
+- 诊断满时返回显式 `diagnostic_capacity_exceeded` 并记 drop 计数；
+  普通 lane 的 `capacity_exceeded` 不污染该计数。
+- 诊断溢出走 `Emitter` 时 stderr 出现 `diagnostic-dropped` 行（`capsys` 断言）。
+- UI 停滞（先填满后 drain）与关闭过程（`can_offer` 双 lane 明确拒绝、
+  `take_batch` 不挂起、空返回）均覆盖。
+
+证据边界：本地 `tests/test_events.py` 15 passed；`test_llm + test_cli +
+test_fault_semantics` 51 passed；全量在后台跑，逐字结果待收。期间发现一处我
+自己测试断言写错（`bus.close()` 后 `Bus.call` 返回 `runtime_closing` 而非邮箱层
+`receiver_unavailable`），已修正测试、未动产品代码——邮箱层的 `can_offer`
+断言本身是对的。长跑内存曲线、hosted CI、真实模型均未验证。

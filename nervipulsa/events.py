@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import sys
 import uuid
 from collections import deque
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ class Lane(StrEnum):
     RESERVED_RESULT = "reserved_result"
     FEEDBACK = "feedback"
     HANDLER_RESULT = "handler_result"
+    DIAGNOSTIC = "diagnostic"
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,14 +197,18 @@ class Mailbox:
         result_limit: int = 4,
         feedback_limit: int = 1,
         handler_result_limit: int = 16,
+        diagnostic_limit: int = 16,
     ) -> None:
         self.name = name
         self.ordinary_limit = ordinary_limit
         self.result_limit = result_limit
         self.feedback_limit = feedback_limit
         self.handler_result_limit = handler_result_limit
+        self.diagnostic_limit = diagnostic_limit
         self._items: deque[_Queued] = deque()
         self._ordinary_size = 0
+        self._diagnostic_size = 0
+        self.diagnostic_dropped = 0
         self._wake = asyncio.Event()
         self._reservations: set[str] = set()
         self._handler_slots: dict[str, list[int]] = {}  # available, queued or leased
@@ -221,6 +227,14 @@ class Mailbox:
     @property
     def ordinary_size(self) -> int:
         return self._ordinary_size
+
+    @property
+    def diagnostic_size(self) -> int:
+        return self._diagnostic_size
+
+    def record_diagnostic_drop(self) -> None:
+        """Count one diagnostic admission refusal. Never raises."""
+        self.diagnostic_dropped += 1
 
     @property
     def reserved_size(self) -> int:
@@ -259,6 +273,8 @@ class Mailbox:
             return "receiver_unavailable"
         if lane is Lane.ORDINARY and self.ordinary_size >= self.ordinary_limit:
             return "capacity_exceeded"
+        if lane is Lane.DIAGNOSTIC and self._diagnostic_size >= self.diagnostic_limit:
+            return "diagnostic_capacity_exceeded"
         if lane is Lane.RESERVED_RESULT:
             if not key or key not in self._reservations:
                 return "invalid_payload"
@@ -316,6 +332,8 @@ class Mailbox:
         self._items.append(_Queued(event, lane))
         if lane is Lane.ORDINARY:
             self._ordinary_size += 1
+        elif lane is Lane.DIAGNOSTIC:
+            self._diagnostic_size += 1
         self._wake.set()
         return Delivery(True, event.id)
 
@@ -340,6 +358,8 @@ class Mailbox:
             item = self._items.popleft()
             if item.lane is Lane.ORDINARY:
                 self._ordinary_size -= 1
+            elif item.lane is Lane.DIAGNOSTIC:
+                self._diagnostic_size -= 1
             result.append(item.event)
         result.sort(key=lambda event: event.seq)
         if not self._items:
@@ -366,6 +386,7 @@ class Mailbox:
         self._closed = True
         self._items.clear()
         self._ordinary_size = 0
+        self._diagnostic_size = 0
         self._reservations.clear()
         self._handler_slots.clear()
         self._handler_events.clear()
@@ -467,6 +488,8 @@ class Bus:
         # Check admission before allocating a sequence or reserving downstream capacity.
         reason = receiver.can_offer(lane, key=lane_key)
         if reason:
+            if reason == "diagnostic_capacity_exceeded":
+                receiver.record_diagnostic_drop()
             return self._reject(None, receiver.name, Delivery(False, reason=reason))
 
         self._seq += 1
@@ -506,6 +529,8 @@ class Bus:
         )
         result = receiver.offer(event, lane, key=lane_key)
         if not result.accepted:
+            if result.reason == "diagnostic_capacity_exceeded":
+                receiver.record_diagnostic_drop()
             self._seq -= 1
             if reservation:
                 reservation[0].release_terminal(reservation[1])
@@ -565,7 +590,7 @@ class Emitter:
         reserve_result_for: str | None = None,
         reserve_handler_slots: int = 0,
     ) -> Delivery:
-        return self._bus.call(
+        delivery = self._bus.call(
             self.source,
             event_type,
             payload,
@@ -575,3 +600,20 @@ class Emitter:
             reserve_result_for=reserve_result_for,
             reserve_handler_slots=reserve_handler_slots,
         )
+        if (
+            not delivery.accepted
+            and lane is Lane.DIAGNOSTIC
+            and delivery.reason in {"diagnostic_capacity_exceeded", "receiver_unavailable"}
+        ):
+            # The diagnostic never made it to the mailbox, so surface it on
+            # stderr instead of pretending it was delivered. Best effort only.
+            try:
+                kind = payload.get("kind") if isinstance(payload, Mapping) else None
+                message = payload.get("message") if isinstance(payload, Mapping) else None
+                sys.stderr.write(
+                    f"[nervipulsa:diagnostic-dropped reason={delivery.reason} "
+                    f"type={event_type} kind={kind} message={message}]\n"
+                )
+            except Exception:
+                pass
+        return delivery

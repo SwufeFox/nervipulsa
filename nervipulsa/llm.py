@@ -801,6 +801,7 @@ class LLMActor:
                                     "kind": "context",
                                     "message": "Retry cannot reduce an oversized transcript; submit a new or shorter message. No provider request was sent.",
                                 },
+                            lane=Lane.DIAGNOSTIC
                             )
                         continue
                     if self._paused.error_kind in {"budget", "context"}:
@@ -983,6 +984,7 @@ class LLMActor:
                         "message": activation.error_message,
                         "activation_id": activation.id,
                     },
+                lane=Lane.DIAGNOSTIC
                 )
                 self._journal_activation(activation)
                 return
@@ -1391,6 +1393,7 @@ class LLMActor:
                             "message": activation.error_message,
                             "activation_id": activation.id,
                         },
+                    lane=Lane.DIAGNOSTIC
                     )
                     return
                 self._journal_tool(
@@ -1435,6 +1438,7 @@ class LLMActor:
                     "kind": "feedback_undelivered",
                     "message": f"correction feedback for {activation.id} was not delivered: {delivery.reason}",
                 },
+            lane=Lane.DIAGNOSTIC
             )
 
     async def _pause(self, activation: Activation, kind: str, message: str) -> None:
@@ -1451,6 +1455,7 @@ class LLMActor:
                     "message": f"durable activation commit failed: {exc}",
                     "activation_id": activation.id,
                 },
+            lane=Lane.DIAGNOSTIC
             )
         self._journal_activation(activation)
 
@@ -1461,7 +1466,7 @@ class LLMActor:
         message = activation.error_message or kind
         if kind == "response_unknown":
             message = f"{message}. Choose /retry, abandon, or check the provider; this request will not be repeated automatically."
-        self._ui.call("agent.error", {"kind": kind, "message": message, "activation_id": activation.id})
+        self._ui.call("agent.error", {"kind": kind, "message": message, "activation_id": activation.id}, lane=Lane.DIAGNOSTIC)
 
     def _finish(self, activation: Activation, status: str) -> None:
         activation.status = status
@@ -1489,6 +1494,7 @@ class LLMActor:
                     "message": activation.error_message,
                     "activation_id": activation.id,
                 },
+            lane=Lane.DIAGNOSTIC
             )
             self._journal_activation(activation)
             return

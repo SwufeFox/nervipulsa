@@ -284,6 +284,122 @@ def test_handler_slots_survive_dequeue_until_consumed_and_terminal_closes_unused
     asyncio.run(body())
 
 
+def _error_payload(kind: str = "paused", message: str = "boom") -> dict:
+    return {"kind": kind, "message": message}
+
+
+def test_diagnostic_reservation_survives_ordinary_saturation() -> None:
+    async def body() -> None:
+        bus = Bus()
+        box = Mailbox("ui", ordinary_limit=4, diagnostic_limit=2)
+        bus.register("user.message", box)
+        bus.register("agent.error", box)
+        bus.start()
+        for index in range(4):
+            assert bus.call("cli", "user.message", {"text": f"m{index}"}).accepted
+        full = bus.call("cli", "user.message", {"text": "overflow"})
+        assert full.accepted is False
+        assert full.reason == "capacity_exceeded"
+        # Ordinary saturation must not consume the diagnostic reservation.
+        first = bus.call("llm", "agent.error", _error_payload(), lane=Lane.DIAGNOSTIC)
+        second = bus.call("llm", "agent.error", _error_payload(), lane=Lane.DIAGNOSTIC)
+        assert first.accepted and second.accepted
+        assert box.size == 6
+        assert box.ordinary_size == 4
+        assert box.diagnostic_size == 2
+        # Single FIFO consumption order is preserved across lanes (by seq).
+        batch = box.drain_available(8)
+        assert [event.type for event in batch] == ["user.message"] * 4 + ["agent.error"] * 2
+        assert [event.seq for event in batch] == sorted(event.seq for event in batch)
+        assert box.ordinary_size == 0
+        assert box.diagnostic_size == 0
+        bus.close()
+
+    asyncio.run(body())
+
+
+def test_diagnostic_overflow_is_explicit_and_counted() -> None:
+    async def body() -> None:
+        bus = Bus()
+        box = Mailbox("ui", ordinary_limit=4, diagnostic_limit=2)
+        bus.register("user.message", box)
+        bus.register("agent.error", box)
+        bus.start()
+        assert bus.call("llm", "agent.error", _error_payload(), lane=Lane.DIAGNOSTIC).accepted
+        assert bus.call("llm", "agent.error", _error_payload(), lane=Lane.DIAGNOSTIC).accepted
+        dropped_before = box.diagnostic_dropped
+        refused = bus.call("llm", "agent.error", _error_payload(), lane=Lane.DIAGNOSTIC)
+        assert refused.accepted is False
+        # Explicit reason, distinct from the ordinary-lane reason.
+        assert refused.reason == "diagnostic_capacity_exceeded"
+        assert box.diagnostic_dropped == dropped_before + 1
+        # Ordinary-lane refusals must not pollute the diagnostic drop counter.
+        for index in range(4):
+            assert bus.call("cli", "user.message", {"text": f"m{index}"}).accepted
+        ordinary_refused = bus.call("cli", "user.message", {"text": "overflow"})
+        assert ordinary_refused.reason == "capacity_exceeded"
+        assert box.diagnostic_dropped == dropped_before + 1
+        # Admission is not a display guarantee: accepted diagnostics wait in the
+        # same FIFO; nothing is auto-displayed or reordered.
+        batch = box.drain_available(8)
+        assert len(batch) == 6
+        bus.close()
+
+    asyncio.run(body())
+
+
+def test_diagnostic_overflow_falls_back_to_stderr(capsys) -> None:
+    async def body() -> None:
+        bus = Bus()
+        box = Mailbox("ui", ordinary_limit=4, diagnostic_limit=1)
+        bus.register("agent.error", box)
+        bus.start()
+        emitter = bus.emitter("llm")
+        assert emitter.call("agent.error", _error_payload(), lane=Lane.DIAGNOSTIC).accepted
+        refused = emitter.call(
+            "agent.error",
+            {"kind": "paused", "message": "second"},
+            lane=Lane.DIAGNOSTIC,
+        )
+        assert refused.accepted is False
+        assert refused.reason == "diagnostic_capacity_exceeded"
+        assert box.diagnostic_dropped == 1
+        bus.close()
+
+    asyncio.run(body())
+    captured = capsys.readouterr()
+    assert "[nervipulsa:diagnostic-dropped" in captured.err
+    assert "diagnostic_capacity_exceeded" in captured.err
+
+
+def test_ui_stall_and_close_never_hang_diagnostics() -> None:
+    async def body() -> None:
+        bus = Bus()
+        box = Mailbox("ui", ordinary_limit=2, diagnostic_limit=1)
+        bus.register("user.message", box)
+        bus.register("agent.error", box)
+        bus.start()
+        # Stall: fill both lanes, consumer drains later; drain must not hang.
+        assert bus.call("cli", "user.message", {"text": "a"}).accepted
+        assert bus.call("cli", "user.message", {"text": "b"}).accepted
+        assert bus.call("llm", "agent.error", _error_payload(), lane=Lane.DIAGNOSTIC).accepted
+        assert box.size == 3
+        batch = await box.take_batch(8)
+        assert len(batch) == 3
+        assert box.size == 0
+        # Close: admission refuses on every lane with an explicit reason.
+        bus.close()
+        assert box.can_offer(Lane.ORDINARY) == "receiver_unavailable"
+        assert box.can_offer(Lane.DIAGNOSTIC) == "receiver_unavailable"
+        after = bus.call("llm", "agent.error", _error_payload(), lane=Lane.DIAGNOSTIC)
+        assert after.accepted is False
+        # Bus-level close short-circuits before mailbox admission.
+        assert after.reason == "runtime_closing"
+        assert await box.take_batch(8) == []
+
+    asyncio.run(body())
+
+
 def test_ordinary_fallback_for_handler_results_keeps_handler_accounting() -> None:
     async def body() -> None:
         bus = Bus()

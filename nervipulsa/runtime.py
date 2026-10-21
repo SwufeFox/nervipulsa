@@ -47,7 +47,7 @@ class Runtime:
         )
         self.python_box = Mailbox("python_host", ordinary_limit=max(8, settings.result_limit))
         self.control_box = Mailbox("python_host.control", ordinary_limit=32)
-        self.ui_box = Mailbox("ui", ordinary_limit=256)
+        self.ui_box = Mailbox("ui", ordinary_limit=256, diagnostic_limit=16)
         self.life_box = Mailbox("lifecycle", ordinary_limit=4)
         self._register()
         self.user_emitter = self.bus.emitter("cli")
@@ -195,6 +195,16 @@ class Runtime:
     def durable_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
         """List sessions with durable memory commits (newest first)."""
         return self.journal.durable_sessions(limit)
+
+    def ui_diagnostics_status(self) -> dict[str, int]:
+        """Bounded diagnostic reservation counters for the UI mailbox."""
+        return {
+            "ordinary_size": self.ui_box.ordinary_size,
+            "ordinary_limit": self.ui_box.ordinary_limit,
+            "diagnostic_size": self.ui_box.diagnostic_size,
+            "diagnostic_limit": self.ui_box.diagnostic_limit,
+            "diagnostic_dropped": self.ui_box.diagnostic_dropped,
+        }
 
     def record_effect_assessment(
         self,

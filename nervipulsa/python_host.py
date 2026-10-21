@@ -587,6 +587,7 @@ class PythonHost:
                     f"{delivery.reason}; fallback: {fallback.reason}"
                 ),
             },
+        lane=Lane.DIAGNOSTIC
         )
         return False
 
@@ -1108,6 +1109,7 @@ class PythonHost:
                     "kind": "result_undelivered",
                     "message": f"terminal for {record.event_id} was not delivered: {delivery.reason}",
                 },
+            lane=Lane.DIAGNOSTIC
             )
         metadata = {
             "reason": result.reason,

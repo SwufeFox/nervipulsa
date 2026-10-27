@@ -17,6 +17,50 @@ from .ports import ModelBackend, ToolCatalog
 from .tools import DefaultToolCatalog
 
 
+class NullPythonHost:
+    """A host that never starts a worker, holds no queue, and executes nothing.
+
+    Used when a runtime is built with `python_host=False`. It exists so the
+    application does not pay for (or fail to start because of) an interpreter it
+    can never reach: with an empty tool catalog the model has no way to request
+    execution, and `python.requested` is not routed at all.
+
+    Every attribute `Runtime` reads keeps working and reports "not available",
+    so callers do not need to branch on whether Python is present.
+    """
+
+    cleanup_failed = False
+    queue_size = 0
+    worker_epoch = 0
+    idle = True
+
+    @property
+    def current_execution_id(self) -> None:
+        return None
+
+    def active_execution_facts(self) -> None:
+        return None
+
+    def runtime_facts(self) -> dict[str, Any]:
+        return {
+            "worker_epoch": 0,
+            "cleanup_failed": False,
+            "namespace": "disabled",
+            "current_execution_id": None,
+            "queued_execution_ids": [],
+            "unfinished_execution_ids": [],
+        }
+
+    def managed_pids(self) -> list[int]:
+        return []
+
+    def start(self) -> None:
+        """Nothing to start. Present so Runtime.start() stays uniform."""
+
+    async def close(self) -> None:
+        """Nothing to close."""
+
+
 class Runtime:
     def __init__(
         self,
@@ -28,9 +72,13 @@ class Runtime:
         echo: Callable[[str], None] | None = None,
         tool_catalog: ToolCatalog | None = None,
         system_prompt: str = SYSTEM_PROMPT,
+        python_host: bool = True,
     ) -> None:
         if not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string")
+        if not isinstance(python_host, bool):
+            raise TypeError("python_host must be a bool")
+        self.python_enabled = python_host
         self.settings = settings
         self.backend = backend
         self.workspace = workspace.resolve()
@@ -56,17 +104,20 @@ class Runtime:
         self.user_emitter = self.bus.emitter("cli")
         self.llm_emitter = self.bus.emitter("llm")
         self.host_emitter = self.bus.emitter("python_host")
-        self.host = PythonHost(
-            requests=self.python_box,
-            control=self.control_box,
-            ui=self.host_emitter,
-            results=self.host_emitter,
-            workspace=self.workspace,
-            output_dir=self.output_dir / self.bus.session_id,
-            max_timeout=settings.max_timeout,
-            journal=self.journal,
-            session_id=self.bus.session_id,
-        )
+        if python_host:
+            self.host = PythonHost(
+                requests=self.python_box,
+                control=self.control_box,
+                ui=self.host_emitter,
+                results=self.host_emitter,
+                workspace=self.workspace,
+                output_dir=self.output_dir / self.bus.session_id,
+                max_timeout=settings.max_timeout,
+                journal=self.journal,
+                session_id=self.bus.session_id,
+            )
+        else:
+            self.host = NullPythonHost()
         self.actor = LLMActor(
             bus_state=lambda: self.bus.state,
             bus_seq=lambda: self.bus.seq,
@@ -95,19 +146,25 @@ class Runtime:
         routes = {
             "user.message": self.llm_box,
             "assistant.message": self.ui_box,
-            "python.requested": self.python_box,
-            "python.started": self.ui_box,
-            "python.finished": self.llm_box,
-            "python.cancel": self.control_box,
-            "python.cancel_result": self.ui_box,
             "agent.error": self.ui_box,
             "agent.feedback": self.llm_box,
             "agent.handler_fired": self.llm_box,
             "agent.retry": self.llm_box,
             "session.shutdown": self.life_box,
-            "python.environment_changed": self.llm_box,
-            "python.environment_discovered": self.llm_box,
         }
+        if self.python_enabled:
+            # With no host, these routes are absent rather than pointed at a
+            # mailbox nobody drains: a submission is refused at admission with
+            # `unknown_route` instead of being silently queued forever.
+            routes.update({
+                "python.requested": self.python_box,
+                "python.started": self.ui_box,
+                "python.finished": self.llm_box,
+                "python.cancel": self.control_box,
+                "python.cancel_result": self.ui_box,
+                "python.environment_changed": self.llm_box,
+                "python.environment_discovered": self.llm_box,
+            })
         for event_type, mailbox in routes.items():
             self.bus.register(event_type, mailbox)
 
@@ -160,7 +217,12 @@ class Runtime:
             "runtime": self.bus.state.value,
             "actor": "paused" if paused is not None else self.actor.phase,
             "pause_reason": None if paused is None else paused.error_kind,
-            "python": self.host.current_execution_id or "idle",
+            "python": (
+                (self.host.current_execution_id or "idle")
+                if self.python_enabled
+                else "disabled"
+            ),
+            "python_enabled": self.python_enabled,
             "python_active_execution": active_execution,
             "python_queue": self.host.queue_size,
             "transcript_chars": context_chars,

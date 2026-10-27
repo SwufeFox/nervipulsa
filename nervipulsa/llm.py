@@ -65,15 +65,20 @@ class Transcript:
 
     _SEPARATOR_CHARS = 2  # json.dumps list separator ", "
 
-    def __init__(self) -> None:
+    def __init__(self, *, system_prompt: str = SYSTEM_PROMPT) -> None:
+        if not isinstance(system_prompt, str):
+            raise TypeError("system_prompt must be a string")
+        # The prompt is owned here, not read from the module constant at each
+        # call site: size accounting, the projected view, and the compaction
+        # floor must all describe the same message that is actually sent.
+        self.system_prompt = system_prompt
         self.messages: list[dict[str, Any]] = []
         self.event_ids: list[str | None] = []
         self.event_types: list[str | None] = []
         self.seen: set[str] = set()
         self.version = 0
         self.archive: list[dict[str, Any]] = []
-        system = {"role": "system", "content": SYSTEM_PROMPT}
-        self._base_chars = len(json.dumps([system], ensure_ascii=False))
+        self._base_chars = len(json.dumps([self._system_message()], ensure_ascii=False))
         self._sizes: list[int] = []
         self._size_sum = 0
         self._signature = (0, 0)
@@ -97,6 +102,9 @@ class Transcript:
     def _index_cost(self, indices) -> int:
         self._sync_sizes()
         return sum(self._sizes[index] + self._SEPARATOR_CHARS for index in indices)
+
+    def _system_message(self) -> dict[str, Any]:
+        return {"role": "system", "content": self.system_prompt}
 
     def serialized_length(self) -> int:
         self._sync_sizes()
@@ -129,7 +137,7 @@ class Transcript:
         return {"projected": True, "duplicate": False, "added_chars": added_chars}
 
     def snapshot(self) -> list[dict[str, Any]]:
-        return [{"role": "system", "content": SYSTEM_PROMPT}, *self.messages]
+        return [self._system_message(), *self.messages]
 
     def add_assistant(self, response: ModelResponse) -> None:
         message: dict[str, Any] = {"role": "assistant", "content": response.content or ""}
@@ -666,7 +674,7 @@ class ContextProjector:
         }
 
     def snapshot(self) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages: list[dict[str, Any]] = [self.transcript._system_message()]
         status = self.status_message()
         if status is not None:
             messages.append(status)
@@ -721,6 +729,7 @@ class LLMActor:
         batch_limit: int = 32,
         runtime_facts: Callable[[], dict[str, Any]] | None = None,
         tool_catalog: ToolCatalog | None = None,
+        system_prompt: str = SYSTEM_PROMPT,
     ) -> None:
         self._bus_state = bus_state
         self._bus_seq = bus_seq
@@ -738,7 +747,7 @@ class LLMActor:
         self._tool_context = ToolExecutionContext(workspace, self.default_timeout, max_timeout, emitter)
         self.context_limit = context_limit
         self.batch_limit = batch_limit
-        self.transcript = Transcript()
+        self.transcript = Transcript(system_prompt=system_prompt)
         self.projector = ContextProjector(self.transcript, runtime_facts)
         self.compacting = False
         self.note: Callable[[str], None] | None = None
@@ -1109,7 +1118,7 @@ class LLMActor:
                 "pending_tool_interactions_kept": 0,
             }
         overhead = self.projector.status_overhead()
-        floor = len(json.dumps([{"role": "system", "content": SYSTEM_PROMPT}], ensure_ascii=False))
+        floor = len(json.dumps([self.transcript._system_message()], ensure_ascii=False))
         target = self.context_limit - overhead - SUMMARY_RESERVE
         if target < floor:
             return {

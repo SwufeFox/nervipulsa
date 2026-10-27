@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Settings
-from .events import Bus, Delivery, Event, Mailbox, RuntimeState
+from .events import SYSTEM_PROMPT, Bus, Delivery, Event, Mailbox, RuntimeState
 from .journal import Journal
 from .llm import LLMActor
 from .python_host import PythonHost
@@ -27,7 +27,10 @@ class Runtime:
         journal_path: Path | None = None,
         echo: Callable[[str], None] | None = None,
         tool_catalog: ToolCatalog | None = None,
+        system_prompt: str = SYSTEM_PROMPT,
     ) -> None:
+        if not isinstance(system_prompt, str):
+            raise TypeError("system_prompt must be a string")
         self.settings = settings
         self.backend = backend
         self.workspace = workspace.resolve()
@@ -82,6 +85,7 @@ class Runtime:
             batch_limit=settings.batch_limit,
             runtime_facts=self.host.runtime_facts,
             tool_catalog=self.tool_catalog,
+            system_prompt=system_prompt,
         )
         self.actor.note = self.echo
         self._tasks: list[asyncio.Task[None]] = []

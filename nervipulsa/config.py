@@ -86,6 +86,7 @@ class Settings:
     max_timeout: float = 120
     default_timeout: float = 30
     context_limit: int = 200_000
+    max_output_tokens: int | None = None
     ordinary_limit: int = 64
     result_limit: int = 4
     batch_limit: int = 32
@@ -110,6 +111,7 @@ _ENV = {
     "max_timeout": "NERVIPULSA_MAX_TIMEOUT",
     "default_timeout": "NERVIPULSA_TIMEOUT",
     "context_limit": "NERVIPULSA_CONTEXT_LIMIT",
+    "max_output_tokens": "NERVIPULSA_MAX_OUTPUT_TOKENS",
 }
 
 
@@ -216,6 +218,8 @@ def _coerce(settings: Settings) -> None:
     if settings.default_timeout <= 0 or settings.default_timeout > settings.max_timeout:
         settings.default_timeout = min(30.0, settings.max_timeout)
     settings.context_limit = max(1000, int(settings.context_limit))
+    if settings.max_output_tokens is not None:
+        settings.max_output_tokens = max(1, int(settings.max_output_tokens))
     settings.ordinary_limit = max(1, int(settings.ordinary_limit))
     settings.result_limit = max(1, int(settings.result_limit))
     settings.batch_limit = max(1, int(settings.batch_limit))

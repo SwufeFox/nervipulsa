@@ -133,6 +133,7 @@ class Runtime:
             max_timeout=settings.max_timeout,
             default_timeout=settings.default_timeout,
             context_limit=settings.context_limit,
+            max_output_tokens=settings.max_output_tokens,
             batch_limit=settings.batch_limit,
             runtime_facts=self.host.runtime_facts,
             tool_catalog=self.tool_catalog,

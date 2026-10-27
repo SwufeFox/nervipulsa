@@ -140,6 +140,6 @@ asyncio.run(m())'''
             assert not marker_path.exists()
     finally:
         _kill_tree(child, worker_pid)
-        if restart is not None and restart.poll() is None: _kill_tree(restart)
+        if restart is not None and restart.poll() is None: _kill_tree(restart, None)
         gate.unlink(missing_ok=True); ready.unlink(missing_ok=True)
         for name in ("crash-effect.marker", "crash-parent.gate", "restart.json"): (workspace / name).unlink(missing_ok=True)

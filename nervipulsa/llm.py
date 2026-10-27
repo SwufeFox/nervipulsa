@@ -726,6 +726,7 @@ class LLMActor:
         max_timeout: float = 120,
         default_timeout: float = 30,
         context_limit: int = 200_000,
+        max_output_tokens: int | None = None,
         batch_limit: int = 32,
         runtime_facts: Callable[[], dict[str, Any]] | None = None,
         tool_catalog: ToolCatalog | None = None,
@@ -746,6 +747,7 @@ class LLMActor:
         self.default_timeout = min(default_timeout, max_timeout)
         self._tool_context = ToolExecutionContext(workspace, self.default_timeout, max_timeout, emitter)
         self.context_limit = context_limit
+        self.max_output_tokens = max_output_tokens
         self.batch_limit = batch_limit
         self.transcript = Transcript(system_prompt=system_prompt)
         self.projector = ContextProjector(self.transcript, runtime_facts)
@@ -814,6 +816,23 @@ class LLMActor:
                             )
                         continue
                     if self._paused.error_kind in {"budget", "context"}:
+                        self._between_user_calls = 0
+                        self._paused = None
+                        self._held.extend(batch)
+                        continue
+                    if (
+                        self._paused.error_kind == "response_invalid"
+                        and "user.message" in kinds
+                    ):
+                        # The provider answered with something unusable (empty
+                        # content, no tool calls). Retrying the frozen snapshot
+                        # is right for an operator-triggered retry, but not when
+                        # the user has said something new: the held batch never
+                        # gets projected, so every retry re-sends the old
+                        # request and the conversation stops making progress
+                        # while appearing to work. A new user message is new
+                        # information — drop the pause and let the held batch
+                        # become a fresh activation that includes it.
                         self._between_user_calls = 0
                         self._paused = None
                         self._held.extend(batch)
@@ -1240,6 +1259,7 @@ class LLMActor:
             tools=self.tools,
             activation_id=activation.id,
             model=self.model,
+            max_output_tokens=self.max_output_tokens,
         )
         request_chars = (
             activation.context_metrics.get("request_transcript_chars")

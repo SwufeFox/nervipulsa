@@ -98,6 +98,8 @@ class OpenAICompatibleBackend:
         model = self.model or request.model
 
         body: dict[str, Any] = {"model": model, "messages": request.messages}
+        if request.max_output_tokens is not None:
+            body["max_tokens"] = request.max_output_tokens
         if request.tools:
             body["tools"] = request.tools
             body["tool_choice"] = "auto"

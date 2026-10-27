@@ -49,6 +49,7 @@ class ModelRequest:
     activation_id: str
     model: str
     purpose: str = "activation"
+    max_output_tokens: int | None = None
 
 
 @dataclass

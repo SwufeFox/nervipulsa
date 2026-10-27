@@ -247,3 +247,23 @@ def test_openai_compatible_endpoint_allows_missing_api_key() -> None:
     )
     with pytest.raises(ProviderError, match="unsupported protocol adapter"):
         asyncio.run(backend.complete(_request()))
+
+
+def test_output_token_cap_is_optional_and_serialized_when_set() -> None:
+    from dataclasses import replace
+
+    response = {"model": "test", "choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    with _provider_server(200, response) as (base_url, requests):
+        backend = OpenAICompatibleBackend(
+            provider="magpie", base_url=base_url, api_key="magpie", model="test"
+        )
+        asyncio.run(backend.complete(_request()))
+        asyncio.run(backend.complete(replace(_request(), max_output_tokens=4096)))
+
+    assert requests[0][1] == {
+        "model": "test",
+        "messages": _request().messages,
+        "tools": _request().tools,
+        "tool_choice": "auto",
+    }
+    assert requests[1][1]["max_tokens"] == 4096

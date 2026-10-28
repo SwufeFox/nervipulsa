@@ -66,11 +66,26 @@ def _event_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         if len(raw.encode("utf-8")) > MAX_EVENT_BYTES:
             raise ValueError("event payload exceeds the size limit")
         result = json.loads(raw)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise ValueError("payload must be finite JSON data within the event size limit") from exc
     if not isinstance(result, dict):
         raise ValueError("payload must be a JSON object")
     return result
+
+
+def _valid_observation(value: Any, depth: int = 0) -> bool:
+    """Accept JSON values with string object keys and bounded nesting."""
+    if depth > 64:
+        return False
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_valid_observation(item, depth + 1) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _valid_observation(item, depth + 1) for key, item in value.items())
+    return False
 
 
 def _valid_payload(event_type: str, data: Mapping[str, Any]) -> bool:
@@ -82,6 +97,8 @@ def _valid_payload(event_type: str, data: Mapping[str, Any]) -> bool:
         value = data.get(key)
         return isinstance(value, int) and not isinstance(value, bool)
 
+    if event_type == "runtime.observation":
+        return True
     if event_type == "user.message":
         return text("text", nonempty=True) and len(data["text"].encode("utf-8")) <= 128 * 1024
     if event_type == "assistant.message":
@@ -468,7 +485,7 @@ class Bus:
         if self.state is RuntimeState.CLOSED:
             return self._reject(None, "unavailable", Delivery(False, reason="runtime_closing"))
         if self.state is RuntimeState.DRAINING:
-            if event_type in {"user.message", "python.requested", "agent.retry"}:
+            if event_type in {"user.message", "runtime.observation", "python.requested", "agent.retry"}:
                 return self._reject(None, "unavailable", Delivery(False, reason="runtime_closing"))
         elif self.state is not RuntimeState.RUNNING:
             return self._reject(None, "unavailable", Delivery(False, reason="receiver_unavailable"))
@@ -476,6 +493,8 @@ class Bus:
         receiver = self._routes.get(event_type)
         if receiver is None:
             return self._reject(None, "unavailable", Delivery(False, reason="unknown_route"))
+        if event_type == "runtime.observation" and not _valid_observation(payload):
+            return self._reject(None, receiver.name, Delivery(False, reason="invalid_payload"))
         try:
             snapshot = _event_payload(payload)
         except ValueError:

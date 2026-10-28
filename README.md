@@ -370,6 +370,37 @@ This package stays labeled v0.4-dev. Three claims are kept separate:
   `TEST_RESULTS.md`. They do not verify the current adapter; no live provider
   was called after migration.
 
+## Structured observations and response persistence
+
+`Runtime.submit_observation(mapping)` admits a JSON object as a `runtime.observation`
+event on the ordinary LLM mailbox. Values must be JSON data with string object
+keys, finite numbers, and at most 64 levels of nesting; the encoded payload is
+limited to 1 MiB. Admission snapshots the object and returns a `Delivery`;
+`invalid_payload`, `capacity_exceeded`, and runtime lifecycle refusals are possible.
+Admission alone does not mean the model saw the event. When processed, it is
+projected into a user-role message containing a `runtime_event` JSON envelope
+with its event ID, type, source and payload. Inspect activation input metrics and
+actual request attempts to distinguish projection from a provider request; a
+context or activation-budget pause can prevent presentation.
+
+Observations follow normal batching and do not reset the between-user activation
+budget. A new observation can recover an empty/invalid-response pause, but does
+not automatically recover a budget, context, unknown-response, or persistence
+failure pause. While paused, observation admission also counts events held by the
+actor against the ordinary mailbox limit. Existing non-observation producers
+retain their prior admission behavior.
+
+Applications may pass `response_commit_hook=async_callable` to `Runtime`. After
+validating a response, the actor awaits `async_callable(activation, response)`
+before recording or emitting the assistant response or invoking any tool. Invalid
+responses do not invoke the hook; an explicit application `no_action` tool is a
+normal valid tool call. Hook exceptions pause the activation as
+`response_commit_failed`, emit an `agent.error`, and execute no tools. Explicit
+`retry()` calls the hook again with the same activation and response, without a
+new model request. Hooks should be idempotent because an exception may follow a
+successful external write, and process interruption does not guarantee replay or
+exactly-once effects. The hook must not mutate the response or activation.
+
 Known boundaries: `python_exec` runs with the current user's permissions and is
 not a sandbox; event admission is process-local, and the runtime does not provide
 general task/transcript recovery, rollback of file writes, or exactly-once external

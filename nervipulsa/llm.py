@@ -15,11 +15,17 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from .events import Emitter, Event, Lane, Mailbox, RuntimeState
 from .ports import ModelBackend, ModelRequest, ModelResponse, ProviderFailure, ToolCall, ToolCatalog, ToolExecutionContext
 from .events import SYSTEM_PROMPT
+
+# Event types that mean "someone new spoke to the agent". Both are explicit
+# external input: they wake a paused actor and reset the between-input
+# activation budget. Internal tool results and handler feedback are not here,
+# so an agent cannot bootstrap an unbounded loop from its own side effects.
+_EXTERNAL_INPUT = frozenset({"user.message", "runtime.observation"})
 
 # Room left for a summary before the view is treated as near the budget.
 SUMMARY_RESERVE = 900
@@ -118,7 +124,7 @@ class Transcript:
             return {"projected": False, "duplicate": False, "added_chars": 0}
         if event.type == "user.message":
             message = {"role": "user", "content": str(event.payload["text"])}
-        elif event.type in {"python.finished", "python.environment_discovered", "agent.feedback", "python.environment_changed", "agent.handler_fired"}:
+        elif event.type in {"runtime.observation", "python.finished", "python.environment_discovered", "agent.feedback", "python.environment_changed", "agent.handler_fired"}:
             envelope = {
                 "kind": "runtime_event",
                 "source": event.source,
@@ -731,7 +737,9 @@ class LLMActor:
         runtime_facts: Callable[[], dict[str, Any]] | None = None,
         tool_catalog: ToolCatalog | None = None,
         system_prompt: str = SYSTEM_PROMPT,
+        response_commit_hook: Callable[[Activation, ModelResponse], Awaitable[None]] | None = None,
     ) -> None:
+        self._response_commit_hook = response_commit_hook
         self._bus_state = bus_state
         self._bus_seq = bus_seq
         self.inbox = inbox
@@ -802,7 +810,7 @@ class LLMActor:
                     remaining = [event for event in batch if event.type != "agent.retry"]
                     if self._paused.error_kind == "context" and "agent.retry" in kinds:
                         self._held.extend(remaining)
-                        if "user.message" in kinds:
+                        if _EXTERNAL_INPUT & kinds:
                             self._between_user_calls = 0
                             self._paused = None
                         else:
@@ -822,7 +830,7 @@ class LLMActor:
                         continue
                     if (
                         self._paused.error_kind == "response_invalid"
-                        and "user.message" in kinds
+                        and bool({"user.message", "runtime.observation"} & kinds)
                     ):
                         # The provider answered with something unusable (empty
                         # content, no tool calls). Retrying the frozen snapshot
@@ -830,10 +838,11 @@ class LLMActor:
                         # the user has said something new: the held batch never
                         # gets projected, so every retry re-sends the old
                         # request and the conversation stops making progress
-                        # while appearing to work. A new user message is new
+                        # while appearing to work. New external input is new
                         # information — drop the pause and let the held batch
                         # become a fresh activation that includes it.
-                        self._between_user_calls = 0
+                        if _EXTERNAL_INPUT & kinds:
+                            self._between_user_calls = 0
                         self._paused = None
                         self._held.extend(remaining)
                         continue
@@ -951,11 +960,12 @@ class LLMActor:
             return False
         if "agent.retry" in kinds:
             return True
-        if self._paused.error_kind in {"response_unknown", "commit_interrupted"}:
+        if self._paused.error_kind in {"response_unknown", "commit_interrupted", "response_commit_failed"}:
             return False
-        if self._paused.error_kind == "budget":
-            return "user.message" in kinds
-        return "user.message" in kinds
+        # A structured observation is equally "something new was said" for the
+        # purpose of clearing a pause. An observer-driven bot may never submit
+        # user.message, so requiring it here would strand the actor forever.
+        return bool(_EXTERNAL_INPUT & kinds)
 
     async def _activate(self, batch: list[Event]) -> None:
         self.busy = True
@@ -1103,15 +1113,21 @@ class LLMActor:
             activation.context_metrics["request_transcript_chars"] = view_chars
             activation.transcript_version = self.transcript.version
             self._journal_activation(activation)
-            has_user = any(event.type == "user.message" for event in batch)
-            if not has_user and self._between_user_calls >= self.max_activations:
+            # A batch carrying new external input is a fresh conversational
+            # turn, so it resets the between-input activation budget. Without
+            # this an observer-driven caller (structured observations instead
+            # of user.message) would pause permanently after max_activations
+            # and could never be woken by later input. Internal events such as
+            # tool results and handler feedback still consume the budget.
+            has_external_input = bool(_EXTERNAL_INPUT & {event.type for event in batch})
+            if not has_external_input and self._between_user_calls >= self.max_activations:
                 await self._pause(
                     activation,
                     "budget",
-                    f"activation budget of {self.max_activations} reached between user messages",
+                    f"activation budget of {self.max_activations} reached between external inputs",
                 )
                 return
-            if has_user:
+            if has_external_input:
                 self._between_user_calls = 0
             activation.snapshot = self.projector.snapshot()
             self._between_user_calls += 1
@@ -1236,6 +1252,10 @@ class LLMActor:
     async def _retry(self, activation: Activation) -> None:
         self.busy = True
         try:
+            if activation.error_kind == "response_commit_failed" and activation.response is not None:
+                activation.status = "running"
+                await self._commit_response(activation, activation.response)
+                return
             if activation.error_kind == "commit_interrupted" and activation.response is not None:
                 activation.status = "running"
                 await self._deliver_tools(activation, activation.response)
@@ -1338,6 +1358,15 @@ class LLMActor:
             self._reject_all(activation, response, problems)
             return
         activation.response = response
+        await self._commit_response(activation, response)
+
+    async def _commit_response(self, activation: Activation, response: ModelResponse) -> None:
+        if self._response_commit_hook is not None:
+            try:
+                await self._response_commit_hook(activation, response)
+            except Exception as exc:
+                await self._pause(activation, "response_commit_failed", f"response commit hook failed: {exc}")
+                return
         if not activation.response_recorded:
             self.transcript.add_assistant(response)
             activation.response_recorded = True

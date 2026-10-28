@@ -796,11 +796,11 @@ class LLMActor:
                         self._held.extend(batch)
                         continue
                     kinds = {event.type for event in batch}
+                    for event in batch:
+                        if event.type == "agent.retry":
+                            self.inbox.mark_consumed(event)
+                    remaining = [event for event in batch if event.type != "agent.retry"]
                     if self._paused.error_kind == "context" and "agent.retry" in kinds:
-                        remaining = [event for event in batch if event.type != "agent.retry"]
-                        for event in batch:
-                            if event.type == "agent.retry":
-                                self.inbox.mark_consumed(event)
                         self._held.extend(remaining)
                         if "user.message" in kinds:
                             self._between_user_calls = 0
@@ -818,7 +818,7 @@ class LLMActor:
                     if self._paused.error_kind in {"budget", "context"}:
                         self._between_user_calls = 0
                         self._paused = None
-                        self._held.extend(batch)
+                        self._held.extend(remaining)
                         continue
                     if (
                         self._paused.error_kind == "response_invalid"
@@ -835,9 +835,9 @@ class LLMActor:
                         # become a fresh activation that includes it.
                         self._between_user_calls = 0
                         self._paused = None
-                        self._held.extend(batch)
+                        self._held.extend(remaining)
                         continue
-                    self._held.extend(batch)
+                    self._held.extend(remaining)
                     await self._retry(self._paused)
                     continue
                 if self._held:
@@ -1499,6 +1499,9 @@ class LLMActor:
 
     def _finish(self, activation: Activation, status: str) -> None:
         activation.status = status
+        if status == "committed":
+            activation.error_kind = None
+            activation.error_message = None
         activation.ended_at = time.time()
         if activation.context_metrics:
             after_commit = self.transcript.serialized_length()

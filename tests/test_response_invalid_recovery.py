@@ -178,18 +178,7 @@ def test_a_new_message_creates_a_new_activation_not_a_retry(workspace: Path) -> 
 
 
 def test_an_operator_retry_still_retries_the_frozen_snapshot(workspace: Path) -> None:
-    """An explicit retry keeps the original request; only new input resets it.
-
-    This is the behaviour the fix must not break: after an empty reply the
-    request that failed is still recoverable without re-deriving it, and a retry
-    with no new user message must not invent a new snapshot.
-
-    A separate, pre-existing defect is visible here and is asserted rather than
-    hidden: `agent.retry` completes the paused activation *and* records a second
-    activation for the same attempt (two rows for one retried request, the first
-    keeping `error_kind="response_invalid"` although it finished). It does not
-    lose or duplicate model output, so it is noted, not repaired, in this change.
-    """
+    """An explicit retry keeps the original request without creating another activation."""
     state = {"n": 0}
 
     def responder(request):
@@ -209,7 +198,7 @@ def test_an_operator_retry_still_retries_the_frozen_snapshot(workspace: Path) ->
             assert runtime.actor.paused is not None
 
             runtime.retry()
-            await _settle(runtime, expect=2)
+            assert await runtime.wait_until_idle(timeout=10)
 
             # The retried request is the same prompt, by design.
             prompts = _prompts(backend)
@@ -218,9 +207,125 @@ def test_an_operator_retry_still_retries_the_frozen_snapshot(workspace: Path) ->
             # Exactly one answer was produced and delivered.
             assert _texts(runtime) == ["recovered"]
             assert runtime.actor.paused is None
-            assert len(runtime.actor.activations) == 2, [
-                (a.id, a.status, a.error_kind) for a in runtime.actor.activations
-            ]
+            assert len(runtime.actor.activations) == 1
+            activation = runtime.actor.activations[0]
+            assert activation.status == "committed"
+            assert activation.error_kind is None
+            assert activation.error_message is None
+            row = runtime.inspect_durable()["activations"][0]
+            assert row["status"] == "committed"
+            assert row["error_json"] is None
+        finally:
+            await runtime.shutdown()
+
+    _run(body())
+
+
+def test_retry_preserves_other_input_in_same_or_held_batch(workspace: Path) -> None:
+    from nervipulsa.ports import ProviderFailure
+
+    async def scenario(held_first: bool) -> None:
+        calls = 0
+
+        def respond(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ProviderFailure("response_unknown", "uncertain")
+            return ModelResponse(content=f"answer {calls}")
+
+        backend = ScriptedBackend(respond)
+        runtime = Runtime(_settings(workspace / str(held_first)), backend, workspace / str(held_first),
+                          tool_catalog=_NoTools(), python_host=False)
+        await runtime.start()
+        try:
+            runtime.submit_text("original")
+            await _settle(runtime)
+            paused = runtime.actor.paused
+            assert paused is not None and paused.error_kind == "response_unknown"
+            runtime.submit_text("later input")
+            if held_first:
+                for _ in range(200):
+                    if runtime.actor.held:
+                        break
+                    await asyncio.sleep(0.01)
+                assert runtime.actor.held
+            retry = runtime.retry()
+            assert await runtime.wait_until_idle(timeout=10)
+            assert len(backend.requests) == 3
+            assert backend.requests[0].messages == backend.requests[1].messages
+            assert any("later input" in str(m.get("content")) for m in backend.requests[2].messages)
+            assert len(runtime.actor.activations) == 2
+            assert paused.status == "committed" and paused.error_kind is None
+            assert retry.accepted and retry.event_id is not None
+            assert all(retry.event_id not in a.input_event_ids for a in runtime.actor.activations)
+            row = next(row for row in runtime.inspect_durable()["activations"] if row["activation_id"] == paused.id)
+            assert row["status"] == "committed" and row["error_json"] is None
+        finally:
+            await runtime.shutdown()
+
+    _run(scenario(False))
+    _run(scenario(True))
+
+
+def test_retry_with_fresh_input_after_invalid_response(workspace: Path) -> None:
+    calls = 0
+
+    def respond(request):
+        nonlocal calls
+        calls += 1
+        return ModelResponse(content=None if calls == 1 else "fresh answer")
+
+    async def body() -> None:
+        backend = ScriptedBackend(respond)
+        runtime = Runtime(_settings(workspace), backend, workspace, tool_catalog=_NoTools(), python_host=False)
+        await runtime.start()
+        try:
+            runtime.submit_text("old input")
+            await _settle(runtime)
+            original = runtime.actor.paused
+            runtime.retry()
+            runtime.submit_text("fresh input")
+            assert await runtime.wait_until_idle(timeout=10)
+            assert len(runtime.actor.activations) == 2
+            assert original.status == "paused" and original.error_kind == "response_invalid"
+            assert len(backend.requests) == 2
+            assert any("fresh input" in str(m.get("content")) for m in backend.requests[-1].messages)
+        finally:
+            await runtime.shutdown()
+
+    _run(body())
+
+
+def test_final_commit_failure_remains_retryable(workspace: Path, monkeypatch) -> None:
+    async def body() -> None:
+        backend = ScriptedBackend(lambda request: ModelResponse(content="answer"))
+        runtime = Runtime(_settings(workspace), backend, workspace, tool_catalog=_NoTools(), python_host=False)
+        await runtime.start()
+        commit = runtime.actor._durable_commit_activation
+        failed = False
+
+        def fail_final_once(activation):
+            nonlocal failed
+            if activation.status == "committed" and not failed:
+                failed = True
+                raise OSError("injected final commit failure")
+            return commit(activation)
+
+        monkeypatch.setattr(runtime.actor, "_durable_commit_activation", fail_final_once)
+        try:
+            runtime.submit_text("input")
+            await _settle(runtime)
+            paused = runtime.actor.paused
+            assert paused is not None and paused.error_kind == "commit_interrupted"
+            assert "injected final commit failure" in paused.error_message
+            runtime.retry()
+            assert await runtime.wait_until_idle(timeout=10)
+            assert len(backend.requests) == 1
+            assert len(runtime.actor.activations) == 1
+            assert paused.status == "committed" and paused.error_kind is None and paused.error_message is None
+            row = runtime.inspect_durable()["activations"][0]
+            assert row["status"] == "committed" and row["error_json"] is None
         finally:
             await runtime.shutdown()
 

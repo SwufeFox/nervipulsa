@@ -755,6 +755,58 @@ class Journal:
         finally:
             connection.close()
 
+    def latest_transcript_snapshot(self, session_id: str) -> dict[str, Any] | None:
+        """Return the newest committed transcript for a session, or None.
+
+        This is the *only* durable row that may be fed back into live state,
+        and only into the model view. It deliberately does not return tool
+        receipts, mailbox frames or worker namespace: those stay inspection-only
+        (see `durable_inspect`), because replaying them would re-run effects.
+
+        The snapshot is a whole-transcript image, not a delta, so restoring is
+        a replacement rather than a merge. Its event-id list is what makes the
+        restore safe: the transcript's `seen` set is rebuilt from it, so a
+        redelivered observation projects as a duplicate instead of being
+        appended twice.
+        """
+        if not session_id.strip():
+            raise ValueError("session_id must be non-empty")
+        if not self.path.exists():
+            return None
+        connection = sqlite3.connect(self.path, timeout=5)
+        connection.row_factory = sqlite3.Row
+        try:
+            row = connection.execute(
+                "SELECT session_id,activation_id,transcript_version,messages_json,"
+                "event_ids_json,event_types_json,committed_at "
+                "FROM durable_transcript_snapshots WHERE session_id=? "
+                "ORDER BY committed_at DESC, rowid DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return None
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        try:
+            messages = json.loads(row["messages_json"])
+            event_ids = json.loads(row["event_ids_json"])
+            event_types = json.loads(row["event_types_json"])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(messages, list) or not isinstance(event_ids, list):
+            return None
+        return {
+            "session_id": str(row["session_id"]),
+            "activation_id": str(row["activation_id"]),
+            "transcript_version": int(row["transcript_version"]),
+            "messages": messages,
+            "event_ids": event_ids,
+            "event_types": event_types if isinstance(event_types, list) else [],
+            "committed_at": float(row["committed_at"]),
+        }
+
     def durable_inspect(self, session_id: str, limit: int = 100) -> dict[str, Any]:
         """Read-only inspection of one session's durable memory commits.
 

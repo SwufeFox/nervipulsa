@@ -12,6 +12,9 @@ What must hold:
 """
 import asyncio
 import json
+import sqlite3
+
+import pytest
 
 from nervipulsa.config import Settings
 from nervipulsa.ports import ModelResponse
@@ -178,6 +181,58 @@ def test_no_snapshot_restores_nothing(tmp_path):
             await runtime.shutdown()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("column,value,error", [
+    ("messages_json", "{", json.JSONDecodeError),
+    ("event_ids_json", "{", json.JSONDecodeError),
+    ("event_types_json", "{", json.JSONDecodeError),
+    ("messages_json", "{}", ValueError),
+    ("event_ids_json", "{}", ValueError),
+    ("event_types_json", "{}", ValueError),
+    ("messages_json", '[]', ValueError),
+    ("messages_json", '[42]', ValueError),
+    ("event_ids_json", '[{}]', ValueError),
+    ("event_types_json", '[42]', ValueError),
+])
+def test_corrupt_snapshot_fails_restore(tmp_path, column, value, error):
+    async def run():
+        runtime = Runtime(Settings(), Backend(), tmp_path, python_host=False, session_id="s")
+        await runtime.start()
+        try:
+            runtime.journal.commit_activation_snapshot(
+                "s", "a", "completed", [], 1, {}, None,
+                [{"role": "user", "content": "hello"}], ["evt_1"], ["user.message"],
+            )
+            with sqlite3.connect(runtime.journal_path) as connection:
+                connection.execute(
+                    f"UPDATE durable_transcript_snapshots SET {column}=? WHERE session_id=?",
+                    (value, "s"),
+                )
+            with pytest.raises(error):
+                runtime.restore_transcript()
+            assert runtime.actor.transcript.messages == []
+            assert runtime.actor.transcript.seen == set()
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_sql_error_fails_restore_after_startup(tmp_path):
+    async def run():
+        runtime = Runtime(Settings(), Backend(), tmp_path, python_host=False, session_id="s")
+        await runtime.start()
+        try:
+            with sqlite3.connect(runtime.journal_path) as connection:
+                connection.execute("DROP TABLE durable_transcript_snapshots")
+            with pytest.raises(sqlite3.DatabaseError):
+                runtime.restore_transcript()
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(run())
+
 
 
 def test_default_session_id_is_still_random(tmp_path):

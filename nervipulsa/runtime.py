@@ -6,14 +6,14 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from .config import Settings
 from .events import SYSTEM_PROMPT, Bus, Delivery, Event, Mailbox, RuntimeState
 from .journal import Journal
-from .llm import LLMActor
+from .llm import Activation, LLMActor
 from .python_host import PythonHost
-from .ports import ModelBackend, ToolCatalog
+from .ports import ModelBackend, ModelResponse, ToolCatalog
 from .tools import DefaultToolCatalog
 
 
@@ -73,6 +73,7 @@ class Runtime:
         tool_catalog: ToolCatalog | None = None,
         system_prompt: str = SYSTEM_PROMPT,
         python_host: bool = True,
+        response_commit_hook: Callable[[Activation, ModelResponse], Awaitable[None]] | None = None,
     ) -> None:
         if not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string")
@@ -138,6 +139,7 @@ class Runtime:
             runtime_facts=self.host.runtime_facts,
             tool_catalog=self.tool_catalog,
             system_prompt=system_prompt,
+            response_commit_hook=response_commit_hook,
         )
         self.actor.note = self.echo
         self._tasks: list[asyncio.Task[None]] = []
@@ -146,6 +148,7 @@ class Runtime:
     def _register(self) -> None:
         routes = {
             "user.message": self.llm_box,
+            "runtime.observation": self.llm_box,
             "assistant.message": self.ui_box,
             "agent.error": self.ui_box,
             "agent.feedback": self.llm_box,
@@ -191,6 +194,21 @@ class Runtime:
 
     def submit_text(self, text: str) -> Delivery:
         return self.user_emitter.call("user.message", {"text": text})
+
+    def submit_observation(self, observation: Mapping[str, Any]) -> Delivery:
+        """Admit a detached JSON object; acceptance does not imply presentation."""
+        if not isinstance(observation, Mapping):
+            return Delivery(False, reason="invalid_payload")
+        # Paused actors temporarily hold drained events outside the mailbox.
+        # Include them in observation admission so a producer cannot grow that
+        # holding area indefinitely while the actor cannot make progress.
+        if len(self.actor.held) + self.llm_box.ordinary_size >= self.llm_box.ordinary_limit:
+            return Delivery(False, reason="capacity_exceeded")
+        try:
+            payload = dict(observation)
+        except (TypeError, ValueError):
+            return Delivery(False, reason="invalid_payload")
+        return self.user_emitter.call("runtime.observation", payload)
 
     def cancel(self, execution_id: str, reason: str = "cli") -> Delivery:
         return self.user_emitter.call(

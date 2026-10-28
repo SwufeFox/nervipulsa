@@ -225,6 +225,7 @@ class Journal:
                 """
             )
             self._migrate_session_primary_keys(connection)
+            _ensure_durable_memory_tables(connection)
             columns = {
                 str(row[1]) for row in connection.execute("PRAGMA table_info(activations)")
             }
@@ -764,10 +765,11 @@ class Journal:
         (see `durable_inspect`), because replaying them would re-run effects.
 
         The snapshot is a whole-transcript image, not a delta, so restoring is
-        a replacement rather than a merge. Its event-id list is what makes the
-        restore safe: the transcript's `seen` set is rebuilt from it, so a
-        redelivered observation projects as a duplicate instead of being
-        appended twice.
+        a replacement rather than a merge. Its remaining event ids identify
+        only events already in that view; a new submission gets a new id and
+        is not deduplicated by this snapshot. Database errors, malformed JSON
+        and invalid snapshot structures raise rather than being reported as a
+        missing snapshot.
         """
         if not session_id.strip():
             raise ValueError("session_id must be non-empty")
@@ -783,27 +785,28 @@ class Journal:
                 "ORDER BY committed_at DESC, rowid DESC LIMIT 1",
                 (session_id,),
             ).fetchone()
-        except sqlite3.DatabaseError:
-            return None
         finally:
             connection.close()
         if row is None:
             return None
-        try:
-            messages = json.loads(row["messages_json"])
-            event_ids = json.loads(row["event_ids_json"])
-            event_types = json.loads(row["event_types_json"])
-        except (TypeError, ValueError):
-            return None
-        if not isinstance(messages, list) or not isinstance(event_ids, list):
-            return None
+        messages = json.loads(row["messages_json"])
+        event_ids = json.loads(row["event_ids_json"])
+        event_types = json.loads(row["event_types_json"])
+        if not all(isinstance(value, list) for value in (messages, event_ids, event_types)):
+            raise ValueError("invalid transcript snapshot: messages, event_ids and event_types must be lists")
+        if len(messages) != len(event_ids) or len(messages) != len(event_types):
+            raise ValueError("invalid transcript snapshot: message and event lists must have equal lengths")
+        if any(not isinstance(message, dict) or message.get("role") not in ("user", "assistant", "tool") for message in messages):
+            raise ValueError("invalid transcript snapshot: invalid message")
+        if any(value is not None and not isinstance(value, str) for value in (*event_ids, *event_types)):
+            raise ValueError("invalid transcript snapshot: event ids and types must be strings or null")
         return {
             "session_id": str(row["session_id"]),
             "activation_id": str(row["activation_id"]),
             "transcript_version": int(row["transcript_version"]),
             "messages": messages,
             "event_ids": event_ids,
-            "event_types": event_types if isinstance(event_types, list) else [],
+            "event_types": event_types,
             "committed_at": float(row["committed_at"]),
         }
 

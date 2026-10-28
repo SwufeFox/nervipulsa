@@ -1410,6 +1410,17 @@ class LLMActor:
             await self._pause(activation, "response_invalid", "backend returned a non-response")
             return
         finish_attempt("response_received", response=response)
+        # A backend can return a well-typed ModelResponse with wrongly-typed
+        # fields. `_validate` reads `response.content`, so a non-string there
+        # used to raise AttributeError inside the actor's own task: the task
+        # died, `status()` said "stopped", no pause reason was recorded, and the
+        # application could only report a timeout. One malformed response must
+        # stop *this activation* with a visible reason, not the whole actor.
+        malformed = self._malformed(response)
+        if malformed:
+            finish_attempt("response_invalid", error=malformed)
+            await self._pause(activation, "response_invalid", malformed)
+            return
         problems = self._validate(response)
         if problems:
             if problems == ["empty"]:
@@ -1438,6 +1449,24 @@ class LLMActor:
         await self._deliver_tools(activation, response)
         if activation.status == "running":
             self._finish(activation, "committed")
+
+    @staticmethod
+    def _malformed(response: ModelResponse) -> str | None:
+        """Describe the first field with a type that cannot be used, if any."""
+        content = response.content
+        if content is not None and not isinstance(content, str):
+            return f"response content must be a string, got {type(content).__name__}"
+        if not isinstance(response.tool_calls, list):
+            return "response tool_calls must be a list"
+        for call in response.tool_calls:
+            if not isinstance(getattr(call, "id", None), str):
+                return "tool call id must be a string"
+            if not isinstance(getattr(call, "name", None), str):
+                return "tool call name must be a string"
+            arguments = getattr(call, "arguments", None)
+            if arguments is not None and not isinstance(arguments, dict):
+                return "tool call arguments must be an object"
+        return None
 
     def _validate(self, response: ModelResponse) -> list[str]:
         if not response.tool_calls and not (response.content and response.content.strip()):

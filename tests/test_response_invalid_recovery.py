@@ -330,3 +330,38 @@ def test_final_commit_failure_remains_retryable(workspace: Path, monkeypatch) ->
             await runtime.shutdown()
 
     _run(body())
+
+def test_a_malformed_response_pauses_instead_of_killing_the_actor(workspace: Path) -> None:
+    """A wrong field type must stop this activation, not the whole runtime.
+
+    Found while integrating: a backend returned ModelResponse(content=<object>).
+    `_validate` then raised AttributeError inside the actor task. The task died,
+    `status()` reported actor "stopped", no pause reason was recorded, and the
+    application could only report a timeout - one bad response silently ended
+    every future turn.
+    """
+    class Payload:
+        pass
+
+    def responder(request):
+        return ModelResponse(content=Payload(), model="scripted")
+
+    async def body() -> None:
+        backend = ScriptedBackend(responder)
+        runtime = Runtime(_settings(workspace), backend, workspace,
+                          tool_catalog=_NoTools(), python_host=False)
+        await runtime.start()
+        try:
+            assert runtime.submit_text("hello").accepted
+            await _settle(runtime)
+            paused = runtime.actor.paused
+            assert paused is not None, "a malformed response must pause, not crash"
+            assert paused.error_kind == "response_invalid"
+            assert "must be a string" in (paused.error_message or "")
+            # The actor is still alive: a second message is picked up even
+            # though this one stayed invalid.
+            assert runtime.status()["actor"] != "stopped"
+        finally:
+            await runtime.shutdown()
+
+    _run(body())

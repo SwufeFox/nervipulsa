@@ -83,9 +83,23 @@ def _wait_json(path: Path, proc: subprocess.Popen[str], timeout: float = 25) -> 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            # Existence is not completeness: `write_text` creates the file
+            # before the bytes land, so a fast reader can see an empty or
+            # half-written file and fail to parse it. Retry instead of
+            # treating that as a crashed child.
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
         if proc.poll() is not None:
-            raise AssertionError(f"child exited {proc.returncode}: {proc.stderr.read()}")
+            # Only a genuinely finished child is an error; it may also have
+            # exited after a successful write, so try one last read.
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                raise AssertionError(
+                    f"child exited {proc.returncode}: {proc.stderr.read()}"
+                ) from None
         time.sleep(.02)
     raise AssertionError(f"timed out waiting for child sentinel {path.name}")
 

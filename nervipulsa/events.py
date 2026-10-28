@@ -423,6 +423,20 @@ class Bus:
         self._observers: list[Callable[[Event], None]] = []
         self._delivery_sinks: list[Callable[[Event | None, str, Delivery], None]] = []
 
+    def reserve_seq_floor(self, used: int) -> None:
+        """Make sure future event ids cannot collide with ids already seen.
+
+        Event ids are `evt_<seq>`, numbered per process. A restored transcript
+        already contains ids from a previous process, so a fresh Bus would
+        start at evt_00000001 again and every new observation would look like
+        a duplicate of a restored one. Raising the floor keeps ids unique
+        across restarts without changing the id format.
+        """
+        if isinstance(used, bool) or not isinstance(used, int):
+            raise TypeError("used must be an int")
+        if used > self._seq:
+            self._seq = used
+
     @property
     def seq(self) -> int:
         return self._seq

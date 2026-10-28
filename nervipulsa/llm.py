@@ -145,6 +145,65 @@ class Transcript:
     def snapshot(self) -> list[dict[str, Any]]:
         return [self._system_message(), *self.messages]
 
+    def restore(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        event_ids: list[str | None] | None = None,
+        event_types: list[str | None] | None = None,
+    ) -> dict[str, Any]:
+        """Replace the model view with a previously committed snapshot.
+
+        Two safety rules:
+
+        * The system prompt is *not* taken from the snapshot. It is owned by
+          the running Runtime, so restoring an old transcript cannot silently
+          revert a changed persona or a tightened safety rule.
+        * Event ids are restored into `seen`, so an observation that the
+          application redelivers after a crash projects as a duplicate instead
+          of being appended a second time. That is what makes restore safe
+          while the app's own consumption cursor is still catching up.
+
+        Returns a small report; callers should log it rather than trust it
+        silently, because a restore that drops malformed rows is worth knowing
+        about.
+        """
+        if not isinstance(messages, list):
+            raise TypeError("messages must be a list")
+        restored: list[dict[str, Any]] = []
+        dropped = 0
+        for message in messages:
+            if not isinstance(message, dict):
+                dropped += 1
+                continue
+            role = message.get("role")
+            if role not in {"user", "assistant", "tool"}:
+                # A system entry in a snapshot would compete with the live
+                # prompt, so it is dropped rather than merged.
+                dropped += 1
+                continue
+            restored.append(dict(message))
+
+        ids = list(event_ids or [])
+        types = list(event_types or [])
+        if types and len(types) < len(restored):
+            types = types + [None] * (len(restored) - len(types))
+        if ids and len(ids) < len(restored):
+            ids = ids + [None] * (len(restored) - len(ids))
+
+        self.messages = restored
+        self.event_ids = ids[: len(restored)]
+        self.event_types = types[: len(restored)]
+        self.seen = {event_id for event_id in self.event_ids if event_id}
+        self.version = len(restored)
+        self._rebuild_sizes()
+        return {
+            "restored_messages": len(restored),
+            "restored_event_ids": len(self.seen),
+            "dropped_messages": dropped,
+            "chars": self.serialized_length(),
+        }
+
     def add_assistant(self, response: ModelResponse) -> None:
         message: dict[str, Any] = {"role": "assistant", "content": response.content or ""}
         if response.tool_calls:

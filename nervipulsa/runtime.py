@@ -74,11 +74,16 @@ class Runtime:
         system_prompt: str = SYSTEM_PROMPT,
         python_host: bool = True,
         response_commit_hook: Callable[[Activation, ModelResponse], Awaitable[None]] | None = None,
+        session_id: str | None = None,
     ) -> None:
         if not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string")
         if not isinstance(python_host, bool):
             raise TypeError("python_host must be a bool")
+        if session_id is not None and (
+            not isinstance(session_id, str) or not session_id.strip()
+        ):
+            raise TypeError("session_id must be a non-empty string when given")
         self.python_enabled = python_host
         self.settings = settings
         self.backend = backend
@@ -88,7 +93,11 @@ class Runtime:
         self.journal_path = journal_path or (self.workspace / ".nervipulsa" / "journal.sqlite")
         self.output_dir = self.workspace / ".nervipulsa" / "outputs"
         self.journal = Journal(self.journal_path)
-        self.bus = Bus()
+        # A stable session id is what lets `restore_transcript` find this
+        # scope's last snapshot after a restart. Default stays random, so
+        # existing callers keep their isolation and cannot accidentally
+        # resume someone else's conversation.
+        self.bus = Bus(session_id=session_id)
         self.trace: list[Event] = []
         self.listeners: list[Callable[[Event], None]] = []
         self.llm_box = Mailbox(
@@ -191,6 +200,53 @@ class Runtime:
             asyncio.create_task(self._ui_loop(), name="ui"),
             asyncio.create_task(self._lifecycle(), name="lifecycle"),
         ]
+
+    def restore_transcript(self, *, session_id: str | None = None) -> dict[str, Any]:
+        """Reload this session's last committed model view, if one exists.
+
+        Call after `start()` and before submitting new input. What is restored
+        is only the transcript: no mailbox frames, no activation ledger, no
+        Python namespace, no pending tool effects. Those stay inspection-only,
+        because replaying them would re-run side effects.
+
+        The session id defaults to this Runtime's own bus session, so a caller
+        that keeps one journal per scope does not have to track it. Pass an
+        explicit id when several runtimes share a journal file.
+
+        Restoring is idempotent and additive-safe: the snapshot's event ids are
+        loaded into `seen`, so anything the application redelivers afterwards
+        (its own cursor may not have advanced yet) is projected as a duplicate
+        rather than appended twice.
+        """
+        target = self.bus.session_id if session_id is None else session_id
+        snapshot = self.journal.latest_transcript_snapshot(target)
+        if snapshot is None:
+            return {"restored": False, "reason": "no_snapshot", "session_id": target}
+        report = self.actor.transcript.restore(
+            snapshot["messages"],
+            event_ids=snapshot["event_ids"],
+            event_types=snapshot["event_types"],
+        )
+        # Event ids are numbered per process (`evt_00000001`, ...). Without
+        # moving the floor past the restored ids, the next event this process
+        # creates would reuse one and project as a duplicate of history.
+        highest = 0
+        for event_id in snapshot["event_ids"]:
+            if isinstance(event_id, str) and event_id.startswith("evt_"):
+                try:
+                    highest = max(highest, int(event_id[4:]))
+                except ValueError:
+                    continue
+        if highest:
+            self.bus.reserve_seq_floor(highest)
+        return {
+            "restored": True,
+            "session_id": target,
+            "from_activation": snapshot["activation_id"],
+            "committed_at": snapshot["committed_at"],
+            "seq_floor": highest,
+            **report,
+        }
 
     def submit_text(self, text: str) -> Delivery:
         return self.user_emitter.call("user.message", {"text": text})

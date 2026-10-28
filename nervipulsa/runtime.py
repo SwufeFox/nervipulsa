@@ -213,10 +213,10 @@ class Runtime:
         that keeps one journal per scope does not have to track it. Pass an
         explicit id when several runtimes share a journal file.
 
-        Restoring is idempotent and additive-safe: the snapshot's event ids are
-        loaded into `seen`, so anything the application redelivers afterwards
-        (its own cursor may not have advanced yet) is projected as a duplicate
-        rather than appended twice.
+        Restoring replaces the model view. The snapshot's remaining event ids
+        are loaded into `seen`, but submitting an application observation again
+        creates a new event id, so this does not guarantee deduplication of
+        source observations or recovery of unfinished work.
         """
         target = self.bus.session_id if session_id is None else session_id
         snapshot = self.journal.latest_transcript_snapshot(target)

@@ -159,10 +159,11 @@ class Transcript:
         * The system prompt is *not* taken from the snapshot. It is owned by
           the running Runtime, so restoring an old transcript cannot silently
           revert a changed persona or a tightened safety rule.
-        * Event ids are restored into `seen`, so an observation that the
-          application redelivers after a crash projects as a duplicate instead
-          of being appended a second time. That is what makes restore safe
-          while the app's own consumption cursor is still catching up.
+        * Event ids still present in the snapshot are restored into `seen`.
+          This only deduplicates those same internal event ids. It does not
+          deduplicate a newly submitted copy of an external observation: that
+          copy receives a fresh event id, and compaction may remove old ids
+          from the saved view. Callers need a separate durable input protocol.
 
         Returns a small report; callers should log it rather than trust it
         silently, because a restore that drops malformed rows is worth knowing

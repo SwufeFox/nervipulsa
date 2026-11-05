@@ -46,6 +46,8 @@ flowchart TD
 
 输入到输出的关联是公开接口，不要求宿主扫描 ledger：`Runtime.activation_for_event(event_id)` 常数时间返回消费该输入的 activation；`await Runtime.wait_for_activation(input_event_id=..., timeout=...)` 在该 activation 不再 `running` 时返回，`None` 表示超时、尚无消费，或该输入被停在只能由显式 retry 解除的 pause 之后。每次 settle 递增 `Activation.settle_version`；retry 之后传入 `after_version` 等待下一次结果。同一次 settle 还会以 `agent.activation_finished` 进入 trace 与 journal，payload 为 `{activation_id, input_event_ids, status, error_kind, ended_at, settle_version}`。retry 复用同一 activation 对象，因此 `input_event_ids` 在重试前后保持稳定。
 
+内存中只保留最近 `ACTIVATION_SNAPSHOT_RETENTION`（32）个已提交 activation 的请求视图（`snapshot`）与逐事件投影记录（`context_metrics["input_events"]`）。`snapshot` 是实际发给模型的完整消息列表，随对话增长，是最主要的常驻开销；更早的视图由 journal 中每次提交的 transcript 快照承担，不常驻内存。paused activation 不裁剪：retry 必须重放当时的精确视图，而不是用已经变化的 transcript 重建。
+
 ## 3. 模块职责与状态归属
 
 | 模块 | 负责 | 状态归属与边界 |

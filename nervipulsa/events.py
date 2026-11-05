@@ -168,6 +168,23 @@ def _valid_payload(event_type: str, data: Mapping[str, Any]) -> bool:
         )
     if event_type == "agent.feedback":
         return text("activation_id", nonempty=True) and isinstance(data.get("rejections"), list)
+    if event_type == "agent.activation_finished":
+        identifiers = data.get("input_event_ids")
+        ended = data.get("ended_at")
+        kind = data.get("error_kind")
+        version = data.get("settle_version")
+        return (
+            text("activation_id", nonempty=True)
+            and isinstance(identifiers, list)
+            and all(isinstance(item, str) and bool(item) for item in identifiers)
+            and data.get("status") in {"committed", "paused", "failed"}
+            and (kind is None or (isinstance(kind, str) and bool(kind)))
+            and isinstance(version, int) and not isinstance(version, bool) and version > 0
+            and (
+                ended is None
+                or (isinstance(ended, (int, float)) and not isinstance(ended, bool))
+            )
+        )
     if event_type == "agent.error":
         return text("message", nonempty=True) and text("kind", nonempty=True)
     if event_type == "agent.retry":

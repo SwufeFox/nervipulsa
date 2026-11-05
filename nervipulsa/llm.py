@@ -14,6 +14,7 @@ import asyncio
 import json
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -33,6 +34,12 @@ _EXTERNAL_INPUT = frozenset({"user.message", "runtime.observation"})
 _NON_RESUMABLE_PAUSE = frozenset(
     {"response_unknown", "commit_interrupted", "response_commit_failed"}
 )
+
+# How many settled request views stay reachable in memory. Each one is the exact
+# message list a model request carried, so it is the largest per-activation
+# object; the journal keeps a durable transcript snapshot per activation, which
+# is where an older view belongs once it is no longer the recent past.
+ACTIVATION_SNAPSHOT_RETENTION = 32
 
 # Room left for a summary before the view is treated as near the budget.
 SUMMARY_RESERVE = 900
@@ -844,6 +851,10 @@ class LLMActor:
         # Set whenever an activation leaves the `running` state, so a host can
         # await that transition instead of polling the ledger.
         self._settled = asyncio.Event()
+        # Committed activations whose exact request view is still in memory, in
+        # settle order. Bounded so a long-lived runtime keeps the recent past
+        # rather than every view it ever sent.
+        self._recent_snapshots: deque[Activation] = deque()
         self._paused: Activation | None = None
         self._held: list[Event] = []
         self._stop = False
@@ -1757,6 +1768,29 @@ class LLMActor:
             },
             lane=Lane.DIAGNOSTIC,
         )
+        self._retain_recent_diagnostics(activation)
+
+    def _retain_recent_diagnostics(self, activation: Activation) -> None:
+        """Keep the recent per-activation diagnostics, not every one ever made.
+
+        `snapshot` is the message list a request actually carried and
+        `input_events` is its per-event projection record: together the bulk of
+        what an activation holds, and both grow with the conversation. Only the
+        recent past stays in memory; each activation also has a durable row in
+        the journal, so an older view is inspectable from disk rather than
+        resident forever.
+
+        A paused activation is never pruned: a retry replays that exact snapshot
+        instead of rebuilding it from a transcript that has moved on.
+        """
+        if activation.status != "committed":
+            return
+        self._recent_snapshots.append(activation)
+        while len(self._recent_snapshots) > ACTIVATION_SNAPSHOT_RETENTION:
+            retired = self._recent_snapshots.popleft()
+            if retired.status == "committed":
+                retired.snapshot = None
+                retired.context_metrics.pop("input_events", None)
 
     def _finish(self, activation: Activation, status: str) -> None:
         activation.status = status

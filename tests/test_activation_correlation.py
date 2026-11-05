@@ -147,6 +147,48 @@ def test_settle_event_carries_the_correlation(tmp_path):
     asyncio.run(run())
 
 
+def test_only_recent_request_views_stay_in_memory(tmp_path):
+    async def run():
+        runtime = await _runtime(
+            tmp_path, *[ModelResponse(content=f"a{turn}") for turn in range(40)]
+        )
+        try:
+            for turn in range(40):
+                delivery = runtime.submit_text(f"m{turn}")
+                settled = await runtime.wait_for_activation(
+                    input_event_id=delivery.event_id, timeout=5
+                )
+                assert settled is not None and settled.status == "committed"
+
+            activations = runtime.actor.activations
+            kept = [activation for activation in activations if activation.snapshot is not None]
+            assert len(kept) == 32, "the exact request views are not bounded"
+            assert activations[0].snapshot is None
+            assert activations[-1].snapshot is not None
+            # Correlation outlives the view: the id stays the answer.
+            assert activations[0].id
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_paused_activation_keeps_its_request_view_for_retry(tmp_path):
+    async def run():
+        runtime = await _runtime(tmp_path, ProviderFailure("timeout", "stalled"))
+        try:
+            delivery = runtime.submit_text("hello")
+            paused = await runtime.wait_for_activation(
+                input_event_id=delivery.event_id, timeout=5
+            )
+            assert paused is not None and paused.status == "paused"
+            assert paused.snapshot is not None, "a retry must replay the exact view"
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(run())
+
+
 def test_wait_requires_exactly_one_selector(tmp_path):
     async def run():
         runtime = await _runtime(tmp_path, ModelResponse(content="one"))

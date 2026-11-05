@@ -160,6 +160,7 @@ class Runtime:
             "runtime.observation": self.llm_box,
             "assistant.message": self.ui_box,
             "agent.error": self.ui_box,
+            "agent.activation_finished": self.ui_box,
             "agent.feedback": self.llm_box,
             "agent.handler_fired": self.llm_box,
             "agent.retry": self.llm_box,
@@ -265,6 +266,37 @@ class Runtime:
         except (TypeError, ValueError):
             return Delivery(False, reason="invalid_payload")
         return self.user_emitter.call("runtime.observation", payload)
+
+    async def wait_for_activation(
+        self,
+        *,
+        input_event_id: str | None = None,
+        activation_id: str | None = None,
+        timeout: float | None = None,
+        after_version: int | None = None,
+    ) -> Activation | None:
+        """Await the activation for one input until it stops running.
+
+        This is the supported input→output correlation: pass the `event_id` a
+        submission returned and get back the activation that consumed it, once
+        it has committed, paused, or failed. It waits on the actor's own state
+        transition, so a host needs no polling interval and no knowledge of the
+        activation ledger's layout.
+
+        `None` means the timeout elapsed first, or nothing has consumed that
+        input yet - for example while the actor is paused and has not been
+        resumed. The actor's paused pointer says why.
+        """
+        return await self.actor.wait_for_activation(
+            input_event_id=input_event_id,
+            activation_id=activation_id,
+            timeout=timeout,
+            after_version=after_version,
+        )
+
+    def activation_for_event(self, event_id: str) -> Activation | None:
+        """The activation that consumed this input event, if any."""
+        return self.actor.activation_for_event(event_id)
 
     def cancel(self, execution_id: str, reason: str = "cli") -> Delivery:
         return self.user_emitter.call(

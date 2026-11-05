@@ -27,6 +27,13 @@ from .events import SYSTEM_PROMPT
 # so an agent cannot bootstrap an unbounded loop from its own side effects.
 _EXTERNAL_INPUT = frozenset({"user.message", "runtime.observation"})
 
+# Pause kinds that no ordinary input can clear: only an explicit retry moves the
+# actor forward. The run loop parks input while one of these is current, so a
+# host waiting for that input must be told, not left waiting for a timeout.
+_NON_RESUMABLE_PAUSE = frozenset(
+    {"response_unknown", "commit_interrupted", "response_commit_failed"}
+)
+
 # Room left for a summary before the view is treated as near the budget.
 SUMMARY_RESERVE = 900
 SUMMARY_INSTRUCTION = (
@@ -55,6 +62,9 @@ class Activation:
     error_message: str | None = None
     started_at: float = 0.0
     ended_at: float | None = None
+    # Incremented on every settle, so a host that retries a paused activation
+    # can wait for the next settle instead of observing the one it just saw.
+    settle_version: int = 0
     context_metrics: dict[str, Any] = field(default_factory=dict)
 
 
@@ -826,6 +836,14 @@ class LLMActor:
         self.tool_catalog = tool_catalog or DefaultToolCatalog(workspace)
         self.tools = self.tool_catalog.schemas(workspace=workspace)
         self.activations: list[Activation] = []
+        # Input→output correlation. `activations` stays the append-only ledger,
+        # but a host that asks "which activation consumed this event?" should
+        # not rescan it while it grows: the answer is an index, not a search.
+        self._activation_by_event: dict[str, Activation] = {}
+        self._activation_by_id: dict[str, Activation] = {}
+        # Set whenever an activation leaves the `running` state, so a host can
+        # await that transition instead of polling the ledger.
+        self._settled = asyncio.Event()
         self._paused: Activation | None = None
         self._held: list[Event] = []
         self._stop = False
@@ -843,6 +861,87 @@ class LLMActor:
     @property
     def held(self) -> list[Event]:
         return self._held
+
+    def activation_for_event(self, event_id: str) -> Activation | None:
+        """The activation that consumed this input event, if any.
+
+        Constant time: the ledger stays append-only for inspection, but the
+        input→output answer is an index. An activation keeps its input event ids
+        across a retry, so the answer stays stable when a paused activation runs
+        again.
+        """
+        return self._activation_by_event.get(event_id)
+
+    def activation_by_id(self, activation_id: str) -> Activation | None:
+        return self._activation_by_id.get(activation_id)
+
+    async def wait_for_activation(
+        self,
+        *,
+        input_event_id: str | None = None,
+        activation_id: str | None = None,
+        timeout: float | None = None,
+        after_version: int | None = None,
+    ) -> Activation | None:
+        """Await the activation for one input until it stops running.
+
+        `None` means the caller would learn nothing by waiting longer: the
+        timeout elapsed, no activation consumed that input, or the actor is
+        paused in a way that only an explicit retry can clear. This waits on the
+        actor's own state transition instead of polling, and the flag is cleared
+        and re-checked before each wait so a settle that lands between the check
+        and the wait is not lost. There is one waiter per runtime scope; two
+        concurrent waiters on the same event are not supported.
+
+        `after_version` skips settles the caller has already seen: after
+        retrying a paused activation, pass its `settle_version` to wait for the
+        retry's outcome instead of returning the same pause again.
+        """
+        if (input_event_id is None) == (activation_id is None):
+            raise TypeError("pass exactly one of input_event_id or activation_id")
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+
+        def state() -> tuple[bool, Activation | None]:
+            """(parked, settled activation): parked means waiting cannot help."""
+            found = (
+                self._activation_by_event.get(input_event_id)
+                if input_event_id is not None
+                else self._activation_by_id.get(activation_id)
+            )
+            if found is not None and found.status != "running":
+                if after_version is not None and found.settle_version <= after_version:
+                    return False, None
+                return False, found
+            paused = self._paused
+            if paused is not None and paused.status == "paused":
+                # A settled pause with our input already parked beside it cannot
+                # consume that input: an in-flight retry is `running`, not
+                # `paused`, so this only matches a pause that has finished.
+                if paused.error_kind in _NON_RESUMABLE_PAUSE or any(
+                    event.id == input_event_id for event in self._held
+                ):
+                    return True, None
+            return False, None
+
+        while True:
+            parked, found = state()
+            if found is not None:
+                return found
+            if parked:
+                return None
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return None
+            self._settled.clear()
+            parked, found = state()
+            if found is not None:
+                return found
+            if parked:
+                return None
+            try:
+                await asyncio.wait_for(self._settled.wait(), remaining)
+            except asyncio.TimeoutError:
+                return None
 
     def request_stop(self) -> None:
         self._stop = True
@@ -862,6 +961,9 @@ class LLMActor:
                         break
                     if not self._resume_allowed(batch):
                         self._held.extend(batch)
+                        # Parking input is a state change a waiter must see:
+                        # without this wake it would sleep until its timeout.
+                        self._settled.set()
                         continue
                     kinds = {event.type for event in batch}
                     for event in batch:
@@ -1020,7 +1122,7 @@ class LLMActor:
             return False
         if "agent.retry" in kinds:
             return True
-        if self._paused.error_kind in {"response_unknown", "commit_interrupted", "response_commit_failed"}:
+        if self._paused.error_kind in _NON_RESUMABLE_PAUSE:
             return False
         # A structured observation is equally "something new was said" for the
         # purpose of clearing a pause. An observer-driven bot may never submit
@@ -1042,6 +1144,11 @@ class LLMActor:
                 started_at=time.time(),
             )
             self.activations.append(activation)
+            self._activation_by_id[activation.id] = activation
+            for event_id in activation.input_event_ids:
+                # Latest consumer wins: a retried activation keeps the ids, and
+                # nothing else can claim an event this one already projected.
+                self._activation_by_event[event_id] = activation
             version_before = self.transcript.version
             before_chars = self.transcript.serialized_length()
             event_metrics: list[dict[str, Any]] = []
@@ -1085,6 +1192,7 @@ class LLMActor:
                 lane=Lane.DIAGNOSTIC
                 )
                 self._journal_activation(activation)
+                self._settle(activation)
                 return
             accounting_mismatch = record_after - before_chars != input_added_chars
             if (
@@ -1392,6 +1500,7 @@ class LLMActor:
                 activation.status = "failed"
                 activation.error_kind = "shutdown"
                 self._journal_activation(activation)
+                self._settle(activation)
                 return
             raise
         except ProviderFailure as exc:
@@ -1542,6 +1651,7 @@ class LLMActor:
                         },
                     lane=Lane.DIAGNOSTIC
                     )
+                    self._settle(activation)
                     return
                 self._journal_tool(
                     activation,
@@ -1560,6 +1670,7 @@ class LLMActor:
                 activation.error_kind = "commit_interrupted"
                 activation.error_message = f"commit interrupted: {exc}"
                 self._pause_inplace(activation)
+                self._settle(activation)
                 return
         if rejections and not activation.feedback_sent:
             self._emit_feedback(activation, rejections)
@@ -1605,15 +1716,47 @@ class LLMActor:
             lane=Lane.DIAGNOSTIC
             )
         self._journal_activation(activation)
+        self._settle(activation)
 
     def _pause_inplace(self, activation: Activation) -> None:
         activation.status = "paused"
+        # The status change is the fact a waiting host cares about, so the local
+        # wake-up belongs here rather than in the caller that persists it: a
+        # host must never be left waiting because a persistence step was the
+        # last thing in a branch.
+        self._settled.set()
         self._paused = activation
         kind = activation.error_kind or "paused"
         message = activation.error_message or kind
         if kind == "response_unknown":
             message = f"{message}. Choose /retry, abandon, or check the provider; this request will not be repeated automatically."
         self._ui.call("agent.error", {"kind": kind, "message": message, "activation_id": activation.id}, lane=Lane.DIAGNOSTIC)
+
+    def _settle(self, activation: Activation) -> None:
+        """Publish that one activation is no longer running.
+
+        Two audiences, one fact: `wait_for_activation` is woken by the flag
+        (already set by the state transition), and a host that prefers to listen
+        gets `agent.activation_finished` in the trace and journal. The event is
+        emitted after `_journal_activation`, so its position in the trace
+        follows the persisted row rather than racing it.
+        """
+        if activation.ended_at is None:
+            activation.ended_at = time.time()
+        activation.settle_version += 1
+        self._settled.set()
+        self._emitter.call(
+            "agent.activation_finished",
+            {
+                "activation_id": activation.id,
+                "input_event_ids": list(activation.input_event_ids),
+                "status": activation.status,
+                "error_kind": activation.error_kind,
+                "ended_at": activation.ended_at,
+                "settle_version": activation.settle_version,
+            },
+            lane=Lane.DIAGNOSTIC,
+        )
 
     def _finish(self, activation: Activation, status: str) -> None:
         activation.status = status
@@ -1647,8 +1790,10 @@ class LLMActor:
             lane=Lane.DIAGNOSTIC
             )
             self._journal_activation(activation)
+            self._settle(activation)
             return
         self._journal_activation(activation)
+        self._settle(activation)
 
     def _durable_commit_activation(self, activation: Activation) -> None:
         """Sync durable commit of one activation plus transcript snapshot.

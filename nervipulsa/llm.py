@@ -40,6 +40,8 @@ _NON_RESUMABLE_PAUSE = frozenset(
 # object; the journal keeps a durable transcript snapshot per activation, which
 # is where an older view belongs once it is no longer the recent past.
 ACTIVATION_SNAPSHOT_RETENTION = 32
+ACTIVATION_LEDGER_RETENTION = 256
+_ACTIVATION_LEDGER_PRUNE_BATCH = 64
 
 # Room left for a summary before the view is treated as near the budget.
 SUMMARY_RESERVE = 900
@@ -839,13 +841,15 @@ class LLMActor:
         self.compacting = False
         self.note: Callable[[str], None] | None = None
         self._last_request_chars: int | None = None
+        self._last_provider_usage: dict[str, Any] | None = None
         from .tools import DefaultToolCatalog
         self.tool_catalog = tool_catalog or DefaultToolCatalog(workspace)
         self.tools = self.tool_catalog.schemas(workspace=workspace)
         self.activations: list[Activation] = []
-        # Input→output correlation. `activations` stays the append-only ledger,
-        # but a host that asks "which activation consumed this event?" should
-        # not rescan it while it grows: the answer is an index, not a search.
+        self._activation_count = 0
+        self._activation_history_floor_seq = 0
+        # Retain a bounded diagnostic window. Correlation indexes share the
+        # same lifetime, while activation_count remains cumulative.
         self._activation_by_event: dict[str, Activation] = {}
         self._activation_by_id: dict[str, Activation] = {}
         # Set whenever an activation leaves the `running` state, so a host can
@@ -866,6 +870,11 @@ class LLMActor:
         self._stopped: asyncio.Event | None = None
 
     @property
+    def activation_count(self) -> int:
+        """Total activations created in this runtime, including evicted rows."""
+        return self._activation_count
+
+    @property
     def paused(self) -> Activation | None:
         return self._paused
 
@@ -874,17 +883,25 @@ class LLMActor:
         return self._held
 
     def activation_for_event(self, event_id: str) -> Activation | None:
-        """The activation that consumed this input event, if any.
+        """Return the recent activation that consumed this input, if retained.
 
-        Constant time: the ledger stays append-only for inspection, but the
-        input→output answer is an index. An activation keeps its input event ids
-        across a retry, so the answer stays stable when a paused activation runs
-        again.
+        The lookup is constant time and shares the bounded activation-history
+        window. Older correlation data remains in journal records.
         """
         return self._activation_by_event.get(event_id)
 
     def activation_by_id(self, activation_id: str) -> Activation | None:
+        """Return a retained activation; evicted ids are no longer resident."""
         return self._activation_by_id.get(activation_id)
+
+    @staticmethod
+    def _event_id_sequence(event_id: str) -> int | None:
+        if not event_id.startswith("evt_"):
+            return None
+        try:
+            return int(event_id[4:])
+        except ValueError:
+            return None
 
     async def wait_for_activation(
         self,
@@ -907,6 +924,8 @@ class LLMActor:
         `after_version` skips settles the caller has already seen: after
         retrying a paused activation, pass its `settle_version` to wait for the
         retry's outcome instead of returning the same pause again.
+        Evicted activation ids and input ids older than the retained history
+        return `None` immediately.
         """
         if (input_event_id is None) == (activation_id is None):
             raise TypeError("pass exactly one of input_event_id or activation_id")
@@ -919,6 +938,15 @@ class LLMActor:
                 if input_event_id is not None
                 else self._activation_by_id.get(activation_id)
             )
+            if found is None:
+                if activation_id is not None:
+                    return True, None
+                event_seq = self._event_id_sequence(input_event_id or "")
+                if (
+                    event_seq is not None
+                    and event_seq <= self._activation_history_floor_seq
+                ):
+                    return True, None
             if found is not None and found.status != "running":
                 if after_version is not None and found.settle_version <= after_version:
                     return False, None
@@ -1155,11 +1183,13 @@ class LLMActor:
                 started_at=time.time(),
             )
             self.activations.append(activation)
+            self._activation_count += 1
             self._activation_by_id[activation.id] = activation
             for event_id in activation.input_event_ids:
                 # Latest consumer wins: a retried activation keeps the ids, and
                 # nothing else can claim an event this one already projected.
                 self._activation_by_event[event_id] = activation
+            self._prune_activation_history()
             version_before = self.transcript.version
             before_chars = self.transcript.serialized_length()
             event_metrics: list[dict[str, Any]] = []
@@ -1499,6 +1529,8 @@ class LLMActor:
                 attempt["usage"] = response.usage
                 activation.context_metrics["provider_usage"] = response.usage
                 activation.context_metrics["provider_model"] = response.model or self.model
+                if isinstance(response.usage, dict):
+                    self._last_provider_usage = response.usage
             if error:
                 attempt["error"] = error
 
@@ -1792,6 +1824,43 @@ class LLMActor:
                 retired.snapshot = None
                 retired.context_metrics.pop("input_events", None)
 
+    def _prune_activation_history(self) -> None:
+        excess = len(self.activations) - ACTIVATION_LEDGER_RETENTION
+        if excess <= 0:
+            return
+        retire_count = max(_ACTIVATION_LEDGER_PRUNE_BATCH, excess)
+        retired: list[Activation] = []
+        for activation in self.activations:
+            if activation is self._paused or activation.status == "running":
+                continue
+            retired.append(activation)
+            if len(retired) == retire_count:
+                break
+        if not retired:
+            return
+
+        retired_ids = {activation.id for activation in retired}
+        self.activations[:] = [
+            activation
+            for activation in self.activations
+            if activation.id not in retired_ids
+        ]
+        for activation in retired:
+            self._activation_history_floor_seq = max(
+                self._activation_history_floor_seq,
+                activation.input_high_water_seq,
+            )
+            if self._activation_by_id.get(activation.id) is activation:
+                self._activation_by_id.pop(activation.id, None)
+            for event_id in activation.input_event_ids:
+                if self._activation_by_event.get(event_id) is activation:
+                    self._activation_by_event.pop(event_id, None)
+            # A retired pause is no longer retryable; a committed view also
+            # lives durably in the journal.
+            activation.snapshot = None
+            activation.context_metrics.pop("input_events", None)
+
+
     def _finish(self, activation: Activation, status: str) -> None:
         activation.status = status
         if status == "committed":
@@ -1900,11 +1969,7 @@ class LLMActor:
         )
 
     def _latest_provider_usage(self) -> dict[str, Any] | None:
-        for activation in reversed(self.activations):
-            usage = activation.context_metrics.get("provider_usage")
-            if isinstance(usage, dict):
-                return usage
-        return None
+        return self._last_provider_usage
 
 
     def _journal_tool(

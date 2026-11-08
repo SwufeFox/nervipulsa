@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -15,6 +16,9 @@ from .llm import Activation, LLMActor
 from .python_host import PythonHost
 from .ports import ModelBackend, ModelResponse, ToolCatalog
 from .tools import DefaultToolCatalog
+
+TRACE_EVENT_RETENTION = 1024
+_TRACE_EVENT_PRUNE_BATCH = 256
 
 
 class NullPythonHost:
@@ -99,6 +103,8 @@ class Runtime:
         # resume someone else's conversation.
         self.bus = Bus(session_id=session_id)
         self.trace: list[Event] = []
+        self._event_counts: Counter[str] = Counter()
+        self._event_total = 0
         self.listeners: list[Callable[[Event], None]] = []
         self.llm_box = Mailbox(
             "llm",
@@ -184,6 +190,12 @@ class Runtime:
 
     def add_listener(self, listener: Callable[[Event], None]) -> None:
         self.listeners.append(listener)
+
+    def event_count(self, event_type: str | None = None) -> int:
+        """Return cumulative observed events, independent of the trace window."""
+        if event_type is None:
+            return self._event_total
+        return self._event_counts[event_type]
 
     async def start(self) -> None:
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -489,7 +501,11 @@ class Runtime:
         self.journal.close(timeout=5)
 
     def _observe(self, event: Event) -> None:
+        self._event_total += 1
+        self._event_counts[event.type] += 1
         self.trace.append(event)
+        if len(self.trace) > TRACE_EVENT_RETENTION:
+            del self.trace[:_TRACE_EVENT_PRUNE_BATCH]
         self.journal.observe_event(event)
         if event.type == "python.requested":
             self.echo(f"python {event.id}")

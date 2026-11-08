@@ -178,7 +178,7 @@ async def _until_finished(runtime: Runtime, index: int) -> None:
     deadline = _t.monotonic() + 20
     target = index + 1
     while _t.monotonic() < deadline:
-        if sum(e.type == "python.finished" for e in runtime.trace) >= target and not runtime.actor.busy:
+        if runtime.event_count("python.finished") >= target and not runtime.actor.busy:
             # let the follow-up text activation land, then leave it settled
             await asyncio.sleep(0.05)
             if not runtime.actor.busy and runtime.llm_box.size == 0:

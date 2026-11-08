@@ -11,7 +11,16 @@ from pathlib import Path
 from nervipulsa.cli import handle_line
 from nervipulsa.config import Settings
 from nervipulsa.events import Delivery, Event, Lane, Mailbox
-from nervipulsa.llm import ContextProjector, LLMActor, Transcript
+from nervipulsa.llm import (
+    REQUEST_ATTEMPT_ERROR_MAX_CHARS,
+    REQUEST_ATTEMPT_RETENTION,
+    TRANSCRIPT_ARCHIVE_MAX_CHARS,
+    TRANSCRIPT_ARCHIVE_MAX_MESSAGES,
+    TRANSCRIPT_SEEN_EVENT_RETENTION,
+    ContextProjector,
+    LLMActor,
+    Transcript,
+)
 from nervipulsa.providers import (
     ModelResponse,
     ProviderError,
@@ -840,6 +849,54 @@ def test_compaction_removes_only_complete_tool_interactions() -> None:
 
 
 
+def test_context_compaction_reuses_summaries_for_plain_turns(workspace: Path) -> None:
+    inputs = [f"message {index}: " + "x" * 2500 for index in range(8)]
+
+    def respond(request):
+        if request.purpose == "context_summary":
+            return text_response("Earlier exchanges summarized for context.")
+        return text_response("Acknowledged.")
+
+    async def body() -> None:
+        backend = ScriptedBackend(respond)
+        runtime = _runtime(workspace, backend, context_limit=6000)
+        try:
+            await runtime.start()
+            for text in inputs:
+                delivery = runtime.submit_text(text)
+                activation = await runtime.wait_for_activation(
+                    input_event_id=delivery.event_id,
+                    timeout=5,
+                )
+                assert activation is not None
+                assert activation.status == "committed", activation.error_message
+
+            summaries = [item for item in backend.requests if item.purpose == "context_summary"]
+            task_requests = [item for item in backend.requests if item.purpose != "context_summary"]
+            assert summaries
+            assert any(inputs[-1] in text for text in _user_texts(task_requests[-1]))
+            assert all(
+                all(inputs[-1] not in text for text in _user_texts(item))
+                for item in summaries
+            )
+
+            transcript = runtime.actor.transcript
+            raw_inputs = [
+                str(message.get("content"))
+                for message in transcript.messages
+                if message.get("role") == "user"
+                and str(message.get("content", "")).startswith("message ")
+            ]
+            assert raw_inputs[0] == inputs[0]
+            assert raw_inputs[-1] == inputs[-1]
+            assert "context.summary" in transcript.event_types
+            assert runtime.actor.projector.view_length() <= runtime.actor.context_limit
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(body())
+
+
 def test_context_compaction_does_not_replay_completed_executions(workspace: Path) -> None:
     issued: list[str] = []
 
@@ -934,6 +991,36 @@ def test_transcript_projection_accounts_for_duplicate_events() -> None:
     assert duplicate == {"projected": False, "duplicate": True, "added_chars": 0}
     assert transcript.version == version
     assert len(transcript.messages) == 1
+
+
+def test_transcript_bounds_nonprojected_event_deduplication() -> None:
+    transcript = Transcript()
+    events = [
+        Event(
+            session_id="test-session",
+            id=f"retry-{index}",
+            seq=index + 1,
+            type="agent.retry",
+            source="test",
+            target="llm",
+            reply_to=None,
+            payload={},
+            accepted_at=float(index),
+        )
+        for index in range(TRANSCRIPT_SEEN_EVENT_RETENTION + 32)
+    ]
+
+    for event in events:
+        assert transcript.project(event)["duplicate"] is False
+
+    assert len(transcript.seen) == TRANSCRIPT_SEEN_EVENT_RETENTION
+    assert events[0].id not in transcript.seen
+    assert events[-1].id in transcript.seen
+    assert transcript.project(events[-1]) == {
+        "projected": False,
+        "duplicate": True,
+        "added_chars": 0,
+    }
 
 
 def test_incremental_length_matches_a_full_serialization() -> None:
@@ -1143,6 +1230,57 @@ def test_projector_does_not_hide_a_duplicate_append_or_a_tiny_budget() -> None:
     assert refused["status"] == "kept_original"
     assert kept.messages == [{"role": "user", "content": "keep me"}]
     assert kept.archive == []
+
+
+def test_transcript_archive_keeps_a_bounded_recent_message_window() -> None:
+    transcript = Transcript()
+    for turn in range(100):
+        transcript._append(
+            {"role": "user", "content": f"turn {turn} message 0 " + "x" * 500}
+        )
+        transcript._append(
+            {"role": "user", "content": f"turn {turn} message 1 " + "x" * 500}
+        )
+        remove_indices = list(range(len(transcript.messages) - 1))
+        result = transcript.apply_model_summary(
+            {"remove_indices": remove_indices, "insert_at": 0}, "summary"
+        )
+        assert result["status"] == "applied"
+
+    assert len(transcript.archive) == TRANSCRIPT_ARCHIVE_MAX_MESSAGES
+    assert transcript.archive_dropped > 0
+    assert "turn 99 message 0" in transcript.archive[-1]["content"]
+    assert transcript.archive_chars == sum(
+        len(json.dumps(message, ensure_ascii=False)) for message in transcript.archive
+    )
+
+
+def test_transcript_archive_enforces_character_limit_and_skips_oversized_messages() -> None:
+    transcript = Transcript()
+    for index in range(3):
+        transcript._append(
+            {"role": "user", "content": f"large-{index}: " + "x" * 150_000}
+        )
+    result = transcript.apply_model_summary(
+        {"remove_indices": [0, 1, 2], "insert_at": 0}, "summary"
+    )
+    assert result["status"] == "applied"
+    assert transcript.archive_chars <= TRANSCRIPT_ARCHIVE_MAX_CHARS
+    assert len(transcript.archive) == 1
+    assert transcript.archive[0]["content"].startswith("large-2:")
+    assert transcript.archive_dropped == 2
+
+    oversized = Transcript()
+    oversized._append(
+        {"role": "user", "content": "x" * (TRANSCRIPT_ARCHIVE_MAX_CHARS + 1)}
+    )
+    result = oversized.apply_model_summary(
+        {"remove_indices": [0], "insert_at": 0}, "summary"
+    )
+    assert result["status"] == "applied"
+    assert oversized.archive == []
+    assert oversized.archive_chars == 0
+    assert oversized.archive_dropped == 1
 
 
 def test_cross_file_edit_survives_compression_and_a_new_requirement(workspace: Path) -> None:

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from .config import Settings
-from .events import SYSTEM_PROMPT, Bus, Delivery, Event, Mailbox, RuntimeState
+from .events import SYSTEM_PROMPT, Bus, Delivery, Event, Lane, Mailbox, RuntimeState
 from .journal import Journal
 from .llm import Activation, LLMActor
 from .python_host import PythonHost
@@ -261,7 +261,15 @@ class Runtime:
             **report,
         }
 
+    def _input_capacity_exceeded(self) -> bool:
+        return (
+            len(self.actor.held) + self.llm_box.ordinary_size
+            >= self.llm_box.ordinary_limit
+        )
+
     def submit_text(self, text: str) -> Delivery:
+        if self._input_capacity_exceeded():
+            return Delivery(False, reason="capacity_exceeded")
         return self.user_emitter.call("user.message", {"text": text})
 
     def submit_observation(self, observation: Mapping[str, Any]) -> Delivery:
@@ -269,9 +277,8 @@ class Runtime:
         if not isinstance(observation, Mapping):
             return Delivery(False, reason="invalid_payload")
         # Paused actors temporarily hold drained events outside the mailbox.
-        # Include them in observation admission so a producer cannot grow that
-        # holding area indefinitely while the actor cannot make progress.
-        if len(self.actor.held) + self.llm_box.ordinary_size >= self.llm_box.ordinary_limit:
+        # Count those events for both text and observation admission.
+        if self._input_capacity_exceeded():
             return Delivery(False, reason="capacity_exceeded")
         try:
             payload = dict(observation)
@@ -323,7 +330,7 @@ class Runtime:
         return self.cancel(str(active["execution_id"]), reason)
 
     def retry(self) -> Delivery:
-        return self.user_emitter.call("agent.retry", {})
+        return self.user_emitter.call("agent.retry", {}, lane=Lane.RETRY)
 
     def status(self) -> dict[str, Any]:
         paused = self.actor.paused

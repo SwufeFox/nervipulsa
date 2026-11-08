@@ -27,6 +27,7 @@ class RuntimeState(StrEnum):
 
 class Lane(StrEnum):
     ORDINARY = "ordinary"
+    RETRY = "retry"
     RESERVED_RESULT = "reserved_result"
     FEEDBACK = "feedback"
     HANDLER_RESULT = "handler_result"
@@ -232,9 +233,11 @@ class Mailbox:
         feedback_limit: int = 1,
         handler_result_limit: int = 16,
         diagnostic_limit: int = 16,
+        retry_limit: int = 1,
     ) -> None:
         self.name = name
         self.ordinary_limit = ordinary_limit
+        self.retry_limit = retry_limit
         self.result_limit = result_limit
         self.feedback_limit = feedback_limit
         self.handler_result_limit = handler_result_limit
@@ -242,6 +245,7 @@ class Mailbox:
         self._items: deque[_Queued] = deque()
         self._ordinary_size = 0
         self._diagnostic_size = 0
+        self._retry_size = 0
         self.diagnostic_dropped = 0
         self._wake = asyncio.Event()
         self._reservations: set[str] = set()
@@ -261,6 +265,10 @@ class Mailbox:
     @property
     def ordinary_size(self) -> int:
         return self._ordinary_size
+
+    @property
+    def retry_size(self) -> int:
+        return self._retry_size
 
     @property
     def diagnostic_size(self) -> int:
@@ -307,6 +315,8 @@ class Mailbox:
             return "receiver_unavailable"
         if lane is Lane.ORDINARY and self.ordinary_size >= self.ordinary_limit:
             return "capacity_exceeded"
+        if lane is Lane.RETRY and self.retry_size >= self.retry_limit:
+            return "capacity_exceeded"
         if lane is Lane.DIAGNOSTIC and self._diagnostic_size >= self.diagnostic_limit:
             return "diagnostic_capacity_exceeded"
         if lane is Lane.RESERVED_RESULT:
@@ -334,6 +344,8 @@ class Mailbox:
         self._reservations.discard(execution_id)
 
     def offer(self, event: Event, lane: Lane, *, key: str | None = None) -> Delivery:
+        if (event.type == "agent.retry") != (lane is Lane.RETRY):
+            return Delivery(False, event.id, "invalid_payload")
         reason = self.can_offer(lane, key=key)
         if reason:
             return Delivery(False, event.id, reason)
@@ -368,6 +380,8 @@ class Mailbox:
             self._ordinary_size += 1
         elif lane is Lane.DIAGNOSTIC:
             self._diagnostic_size += 1
+        elif lane is Lane.RETRY:
+            self._retry_size += 1
         self._wake.set()
         return Delivery(True, event.id)
 
@@ -394,6 +408,8 @@ class Mailbox:
                 self._ordinary_size -= 1
             elif item.lane is Lane.DIAGNOSTIC:
                 self._diagnostic_size -= 1
+            elif item.lane is Lane.RETRY:
+                self._retry_size -= 1
             result.append(item.event)
         result.sort(key=lambda event: event.seq)
         if not self._items:
@@ -421,6 +437,7 @@ class Mailbox:
         self._items.clear()
         self._ordinary_size = 0
         self._diagnostic_size = 0
+        self._retry_size = 0
         self._reservations.clear()
         self._handler_slots.clear()
         self._handler_events.clear()
@@ -536,6 +553,8 @@ class Bus:
             return self._reject(None, receiver.name, Delivery(False, reason="receiver_unavailable"))
 
         # Check admission before allocating a sequence or reserving downstream capacity.
+        if (event_type == "agent.retry") != (lane is Lane.RETRY):
+            return self._reject(None, receiver.name, Delivery(False, reason="invalid_payload"))
         reason = receiver.can_offer(lane, key=lane_key)
         if reason:
             if reason == "diagnostic_capacity_exceeded":

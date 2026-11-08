@@ -244,7 +244,19 @@ def handle_line(runtime: Runtime, line: str) -> bool:
                 runtime.echo(
                     f"  context {compaction.get('status')} ({compaction.get('reason') or 'unchanged'})"
                 )
-            for attempt in context.get("attempts", []):
+            attempts = context.get("attempts", [])
+            attempt_count = context.get("attempt_count")
+            attempts_evicted = context.get("attempts_evicted", 0)
+            if (
+                isinstance(attempt_count, int)
+                and not isinstance(attempt_count, bool)
+                and attempt_count > len(attempts)
+            ):
+                runtime.echo(
+                    f"  request history total={attempt_count} retained={len(attempts)} "
+                    f"older-details-evicted={attempts_evicted}"
+                )
+            for attempt in attempts:
                 if isinstance(attempt, dict):
                     runtime.echo(
                         f"  request {attempt.get('number')} {attempt.get('status')} "

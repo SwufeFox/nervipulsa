@@ -50,6 +50,31 @@ def test_created_running_and_unknown_route() -> None:
 
 
 
+def test_retry_lane_remains_available_when_ordinary_lane_is_full() -> None:
+    async def body() -> None:
+        bus = Bus()
+        box = Mailbox("llm", ordinary_limit=1)
+        bus.register("user.message", box)
+        bus.register("agent.retry", box)
+        bus.start()
+
+        assert bus.call("cli", "user.message", {"text": "queued"}).accepted
+        retry = bus.call("cli", "agent.retry", {}, lane=Lane.RETRY)
+        assert retry.accepted
+        assert box.retry_size == 1
+        assert bus.call("cli", "agent.retry", {}, lane=Lane.RETRY).reason == "capacity_exceeded"
+        assert bus.call("cli", "agent.retry", {}).reason == "invalid_payload"
+        assert bus.seq == 2
+
+        batch = await box.take_batch(10)
+        assert [event.type for event in batch] == ["user.message", "agent.retry"]
+        assert box.ordinary_size == 0
+        assert box.retry_size == 0
+        bus.close()
+
+    asyncio.run(body())
+
+
 def test_handler_global_ceiling_admission_release_and_retry() -> None:
     async def body() -> None:
         bus = Bus()

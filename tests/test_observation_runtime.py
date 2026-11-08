@@ -91,10 +91,55 @@ def test_observation_capacity_while_paused(tmp_path):
             await until(lambda: len(runtime.actor.held) == 1)
             assert runtime.submit_observation({"held": 2}).accepted
             await until(lambda: len(runtime.actor.held) == 2)
+            assert runtime.submit_text("overflow").reason == "capacity_exceeded"
             assert runtime.submit_observation({"held": 3}).reason == "capacity_exceeded"
             assert len(backend.requests) == 1
         finally:
             await runtime.shutdown()
+    asyncio.run(run())
+
+
+def test_retry_has_reserved_capacity_when_paused_inputs_are_full(tmp_path):
+    async def run():
+        attempts = []
+
+        async def hook(activation, response):
+            attempts.append(activation.id)
+            if len(attempts) == 1:
+                raise RuntimeError("temporary storage failure")
+
+        backend = Backend(
+            ModelResponse(content="initial"),
+            ModelResponse(content="held input handled"),
+        )
+        runtime = Runtime(
+            Settings(ordinary_limit=1),
+            backend,
+            tmp_path,
+            python_host=False,
+            response_commit_hook=hook,
+        )
+        await runtime.start()
+        try:
+            assert runtime.submit_observation({"initial": 1}).accepted
+            await until(lambda: runtime.actor.paused is not None)
+            assert runtime.submit_observation({"held": 1}).accepted
+            await until(lambda: len(runtime.actor.held) == 1)
+            assert runtime.submit_text("overflow").reason == "capacity_exceeded"
+
+            retry = runtime.retry()
+            assert retry.accepted
+            assert await runtime.wait_until_idle()
+
+            assert runtime.actor.paused is None
+            assert runtime.actor.held == []
+            assert len(attempts) == 3
+            assert len(backend.requests) == 2
+            assert runtime.actor.activations[-1].status == "committed"
+            assert runtime.llm_box.retry_size == 0
+        finally:
+            await runtime.shutdown()
+
     asyncio.run(run())
 
 

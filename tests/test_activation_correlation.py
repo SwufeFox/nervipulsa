@@ -5,12 +5,18 @@ when that activation stopped running. That answer used to be a scan of
 `actor.activations`; these tests pin the supported replacement.
 """
 import asyncio
+from nervipulsa.cli import handle_line
 
 from nervipulsa.config import Settings
 from nervipulsa.events import Event
-from nervipulsa.llm import ACTIVATION_LEDGER_RETENTION
+from nervipulsa.llm import (
+    ACTIVATION_LEDGER_RETENTION,
+    REQUEST_ATTEMPT_ERROR_MAX_CHARS,
+    REQUEST_ATTEMPT_RETENTION,
+)
 from nervipulsa.ports import ModelResponse, ProviderFailure
 from nervipulsa.runtime import Runtime, TRACE_EVENT_RETENTION
+
 
 class Backend:
     def __init__(self, *responses):
@@ -116,6 +122,55 @@ def test_retry_keeps_the_same_correlation(tmp_path):
             assert committed.status == "committed"
             assert committed.settle_version > paused_version
             assert runtime.activation_for_event(delivery.event_id) is committed
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+
+def test_paused_retry_attempt_details_are_bounded_with_a_lifetime_count(tmp_path):
+    async def run():
+        failures = [
+            ProviderFailure("timeout", "x" * (REQUEST_ATTEMPT_ERROR_MAX_CHARS + 50))
+            for _ in range(REQUEST_ATTEMPT_RETENTION + 8)
+        ]
+        runtime = await _runtime(tmp_path, *failures)
+        try:
+            delivery = runtime.submit_text("hello")
+            activation = await runtime.wait_for_activation(
+                input_event_id=delivery.event_id, timeout=5
+            )
+            assert activation is not None and activation.status == "paused"
+
+            for _ in range(len(failures) - 1):
+                previous_version = activation.settle_version
+                assert runtime.retry().accepted
+                settled = await runtime.wait_for_activation(
+                    activation_id=activation.id,
+                    after_version=previous_version,
+                    timeout=5,
+                )
+                assert settled is activation and settled.status == "paused"
+
+            metrics = activation.context_metrics
+            assert metrics["attempt_count"] == len(failures)
+            assert metrics["attempts_evicted"] == len(failures) - REQUEST_ATTEMPT_RETENTION
+            assert len(metrics["attempts"]) == REQUEST_ATTEMPT_RETENTION
+            assert [item["number"] for item in metrics["attempts"]] == list(
+                range(len(failures) - REQUEST_ATTEMPT_RETENTION + 1, len(failures) + 1)
+            )
+            assert len(metrics["attempts"][0]["error"]) == REQUEST_ATTEMPT_ERROR_MAX_CHARS
+            assert metrics["attempts"][0]["error_truncated"] is True
+
+            lines = []
+            runtime.echo = lines.append
+            handle_line(runtime, "/logs")
+            assert any(
+                f"request history total={len(failures)} retained={REQUEST_ATTEMPT_RETENTION} "
+                f"older-details-evicted={len(failures) - REQUEST_ATTEMPT_RETENTION}" in line
+                for line in lines
+            )
         finally:
             await runtime.shutdown()
 

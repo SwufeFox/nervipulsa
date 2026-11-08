@@ -34,8 +34,8 @@ flowchart TD
 ## 2. 从用户请求到执行终态
 
 1. CLI 加载 `Settings`，解析 workspace，经 `application.create_runtime()` 选择 backend、tool catalog 并创建 Runtime。注册路由后，`Runtime.start()` 启动 Journal 并等待初始化 flush，再启动 Bus、host 和 actor/UI/lifecycle 任务。worker 启动有独立的 ready 等待，Bus 启动不等于解释器已经 ready。
-2. `Runtime.submit_text()` 同步调用 emitter。`Bus.call()` 检查运行状态、路由、有限 JSON 快照、事件大小和邮箱容量，再赋会话内 seq/id 并投递。返回 `Delivery` 是进程内接受回执，不是磁盘提交或业务完成确认。观察器在接受后被同步调用，Journal 观察记录仅入有界线程队列。
-3. `LLMActor.run()` 按 seq 取批，`_activate()` 将输入投影到 Transcript，消费邮箱预留，建立 Activation。`ContextProjector` 在请求时加入 host 的实时 epoch/未完成执行事实。上下文限制按序列化 JSON 字符估计，非 tokenizer token；必要时先请求模型摘要，摘要成功且可安全应用才替换历史片段。超限或预算耗尽会暂停。
+2. `Runtime.submit_text()` 同步调用 emitter。`Bus.call()` 检查运行状态、路由、有限 JSON 快照、事件大小和邮箱容量，再赋会话内 seq/id 并投递。返回 `Delivery` 是进程内接受回执，不是磁盘提交或业务完成确认。`submit_text()` 与 `submit_observation()` 将 actor 持有的 paused 输入和 ordinary mailbox 队列合并计入输入容量；`Runtime.retry()` 使用独立的单项 `Lane.RETRY`，普通输入占满时仍可提交 retry。观察器在接受后被同步调用，Journal 观察记录仅入有界线程队列。
+3. `LLMActor.run()` 按 seq 取批，`_activate()` 将输入投影到 Transcript，消费邮箱预留，建立 Activation。`ContextProjector` 在请求时加入 host 的实时 epoch/未完成执行事实。上下文限制按序列化 JSON 字符估计，非 tokenizer token；必要时先请求模型摘要，摘要成功且可安全应用才替换历史片段。完整的普通轮次和已有摘要都可以参与压缩；超限或预算耗尽会暂停。
 4. actor 经 `ModelBackend.complete(ModelRequest)` 请求模型；默认 provider 是 OpenAI-compatible Chat Completions HTTP 适配器。actor 校验整个响应的工具调用，再记录 assistant 内容并按顺序调用 catalog 中的工具。原生 tool 消息记录的是工具回执。无工具的 assistant 文本可结束本次 activation，但不意味着此前提交的 Python 都完成。
 5. `PythonExecTool.invoke()` 提交 `python.requested`，同时在 actor 邮箱预留一个执行终态槽和最多 16 个 handler 槽。拒绝时不执行；接受时以请求事件 id 作为 execution_id，立即返回 accepted 回执。activation 的 `committed` 表示响应及回执处理完成，不表示 Python 已完成。内置 `python_environment` 则在宿主线程中做静态发现后发送独立结果事件，不经过 worker/effect 协议。
 6. host 接收请求建 Execution，串行从 `_pending` 调度。在发送 execute 帧之前，先同步提交 `intent`，再提交 `dispatching`；任一失败都不发送。worker 的 started 帧到达后才记录真实执行计时并发 `python.started`，执行超时从这里计算，另有启动等待期限。
@@ -46,7 +46,9 @@ flowchart TD
 
 输入到输出的关联是公开接口，不要求宿主扫描 ledger：`Runtime.activation_for_event(event_id)` 常数时间返回消费该输入的 activation；`await Runtime.wait_for_activation(input_event_id=..., timeout=...)` 在该 activation 不再 `running` 时返回，`None` 表示超时、尚无消费，或该输入被停在只能由显式 retry 解除的 pause 之后。每次 settle 递增 `Activation.settle_version`；retry 之后传入 `after_version` 等待下一次结果。同一次 settle 还会以 `agent.activation_finished` 进入 trace 与 journal，payload 为 `{activation_id, input_event_ids, status, error_kind, ended_at, settle_version}`。retry 复用同一 activation 对象，因此 `input_event_ids` 在重试前后保持稳定。
 
-内存中只保留最近 `ACTIVATION_SNAPSHOT_RETENTION`（32）个已提交 activation 的请求视图（`snapshot`）与逐事件投影记录（`context_metrics["input_events"]`）。`snapshot` 是实际发给模型的完整消息列表，随对话增长，是最主要的常驻开销；更早的视图由 journal 中每次提交的 transcript 快照承担，不常驻内存。paused activation 不裁剪：retry 必须重放当时的精确视图，而不是用已经变化的 transcript 重建。
+内存中的模型 view 由 `context_limit` 约束：压缩会保留首条和当前输入作为原文锚点，并折叠较早的完整普通轮次、已完成工具交互和旧摘要；无法安全压缩的超限输入会暂停。`Transcript.archive` 只保留最近 256 条、合计最多 256 Ki 字符的历史消息，较早条目计入 `archive_dropped`。`Transcript.seen` 保留 active view 的 event IDs 与最近 4,096 个已处理 ID；更旧且不再 active 的 ID 会过期。每次 activation 的 durable transcript snapshot 仍保存在 SQLite Journal 中，不驻留在这些进程内窗口里。
+
+`ACTIVATION_SNAPSHOT_RETENTION`（32）个最近已提交 activation 保留完整请求视图与 `context_metrics["input_events"]`。当前 paused activation 保留精确请求视图以供 retry；请求 attempt 总数保存在 `attempt_count`，只保留最近 32 条详情，错误文本最长 1,024 字符，并报告 `attempts_evicted`。
 
 `actor.activations` 在内存中保留最近至多 `ACTIVATION_LEDGER_RETENTION`（256）个对象，`activation_count` 仍报告 Runtime 生命周期总数；按 event 和 activation id 的索引随对象一起过期，过期关联可从 journal 检查。当前 running/paused activation 不因窗口裁剪。`Runtime.trace` 保留最近至多 1,024 个事件，`Runtime.event_count(event_type=None)` 提供累计计数；journal writer 的丢弃/错误状态仍由 `journal.incomplete`、`journal.dropped` 暴露。
 
@@ -58,7 +60,7 @@ flowchart TD
 | `application.py` | 默认 provider/tool registry、构造入口 | 接受 registry 或 callable；保留 runtime_factory 签名兼容路径，不拥有执行状态 |
 | `ports.py` | ModelRequest/Response、ToolCall、backend/tool/catalog/context/sink/registry 协议 | 契约与传值类型；不做调度或持久化 |
 | `runtime.py` | 路由、组件生命周期、状态/日志接口、结果展示 | 拥有 Bus、邮箱、host、actor、Journal、trace/listeners；配置热更新只替换 provider 相关设置及 backend/model |
-| `events.py` | JSON 边界、校验、同步 admission、邮箱与预留 | Bus 拥有 session、seq、路由及 CREATED/RUNNING/DRAINING/CLOSED；Mailbox 拥有待取批事件、leased 记录和结果/handler/feedback 额度 |
+| `events.py` | JSON 边界、校验、同步 admission、邮箱与预留 | Bus 拥有 session、seq、路由及 CREATED/RUNNING/DRAINING/CLOSED；Mailbox 分别限制 ordinary 输入、单项 retry、结果、handler、feedback 与 diagnostic lane |
 | `llm.py` | 输入投影、上下文预算/摘要、单次模型请求、响应提交与暂停/重试 | actor 拥有 Activation、held 输入、已接受/拒绝调用状态及 Transcript；ContextProjector 构建模型视图，不拥有 worker namespace |
 | `providers.py` | HTTP 协议映射、错误分类与脱敏；ScriptedBackend | 实现 ModelBackend；不执行工具，不隐式恢复 Python |
 | `tools.py` | schema、参数验证、内置工具适配与 catalog | 接收窄 ToolContext，经 EventSink 发事件；扩展工具的失败/副作用语义由其实现负责 |
@@ -74,8 +76,7 @@ flowchart TD
 
 ## 4. 状态生命周期与失败语义
 
-- **Runtime**：CREATED → RUNNING → DRAINING → CLOSED。draining 拒绝新 user.message、python.requested、agent.retry，仍允许处理取消与结果。shutdown 停止 actor，关闭 host，再关闭 Bus、取消剩余 UI/lifecycle 任务并限时 flush/close Journal；它不等待模型完成所有业务意图。
-- **Activation**：输入投影后 running，响应/工具回执处理完成为 committed；provider 异常、未知响应、预算、上下文或提交中断会 paused。已知响应提交中断时，`/retry` 沿已有 response 和调用状态继续，跳过已 accepted/rejected 的调用；无响应时重试可能重新请求 provider。此保护只在当前进程内有效，工具副作用已发生但回执未记下的窗口仍存在。未知响应或 commit_interrupted 需要显式 retry，不因普通新输入自动重试。上下文超限单纯 retry 无法缩小记录。
+- **Runtime**：CREATED → RUNNING → DRAINING → CLOSED。draining 拒绝新 user.message、python.requested、agent.retry，仍允许处理取消与结果。普通 user.message / runtime.observation 受 `ordinary_limit` 限制，容量同时计算 actor 的 held 输入；`agent.retry` 有独立的一个 mailbox 槽。shutdown 停止 actor，关闭 host，再关闭 Bus、取消剩余 UI/lifecycle 任务并限时 flush/close Journal；它不等待模型完成所有业务意图。
 - **Execution**：host 的 record 从 queued → running → done，终态 payload 再区分 succeeded/failed/timeout/cancelled；调度已标 running 与 worker 实际 started 是不同时间点，`active_execution_facts()` 仅在后者后报告计时。
 - **Resume 状态机（v0.5 起，仅记录不自动推进）**：`committed/observed` 表示已落盘可检查；`observed-but-unconsumed`（T4：effect 已 observed 且 python.finished 进了旧 LLM mailbox，但新会话收不到）标记为“待继续（inspectable, not resumable）”，只能人工用 `/inspect` 查看后手动发新 user.message 继续，绝不由 Runtime 自动重放、回填 mailbox 或恢复 namespace；`commit_interrupted/response_unknown` 仍需显式 `/retry`，且只在原进程内有效。
 - **Worker epoch**：正常成功、普通 Python 异常都保留 namespace；执行超时、运行中取消或进程退出需要重建解释器。旧 epoch 排队代码会取消，避免在新 namespace 自动重放。空闲 worker 死亡可通过 environment_changed 通知 actor。排队取消无需销毁当前 namespace。
@@ -117,7 +118,7 @@ Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：�
 - **Transcript 与 ContextProjector、旧 compact 与模型摘要路径**：前者记录与后者视图语义不同，旧接口存在兼容调用；去掉其中之一前需要调用面和上下文保留规则的独立验收。
 - **Journal 两种写入、两次执行前 commit**：观测与执行放行的失败处理不同，合并为队列或一个事务会改动 durable effect 崩溃窗口。本轮只纠正说明，不改协议。
 - **Host 的线程/loop 分工与 handler 镜像**：阻塞 IPC、进程终止与 SQLite 放在线程，Bus 交付留在 loop；镜像承担关联校验，并非 namespace 的第二份权威状态。重写并发模型风险大于本轮收益。
-- **预留与 trace 的生命周期**：容量预留有终态交付意义，不能按普通队列简化。`Mailbox` 原先的 `_leased` 字典只写不读、且是会话内无界增长，已于 2026-10-21 删除（消费后不再持有事件）。`Runtime.trace`、执行记录和 Transcript archive 仍随会话增长；是否逐步释放、设上限或改变调试可见性，需要先定保留契约。
+- **内存保留窗口**：activation snapshot、activation ledger、trace、Transcript archive、seen event IDs 与 retry attempt 详情均有进程内上限；active model view 在可压缩时受 `context_limit` 限制。持久 Journal 的 transcript snapshots 会继续随 activation 累积，这是磁盘保留策略，不是驻留内存增长；超大且不可压缩的输入仍会暂停。
 - **错误展示路径**：`agent.error → ui_box` 路由已于 2026-10-21 注册；同日再增加有界诊断预留：`ui_box` 为 `ordinary_limit=256 + diagnostic_limit=16`，`agent.error` 全量改走 `Lane.DIAGNOSTIC`，普通队列满时诊断仍可接纳（单一 FIFO 消费顺序不变）。诊断预留也满时返回显式 `diagnostic_capacity_exceeded`、记 `diagnostic_dropped` 计数并向 stderr 直报一行，不伪装成功、不丢旧消息、不扩容。接纳保证不等于显示保证：UI 任务停滞时诊断只是在队列里等，不会被自动显示。
 - **fingerprint（已删除 2026-10-21）**：`workspace_fingerprint.py` 及整条 wiring（Settings/Runtime/host/CLI/`/logs`/docs）已移除。文件状态历史不是本运行时的职责；差异排查交给版本控制或外部工具。
 

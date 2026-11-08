@@ -42,6 +42,13 @@ _NON_RESUMABLE_PAUSE = frozenset(
 ACTIVATION_SNAPSHOT_RETENTION = 32
 ACTIVATION_LEDGER_RETENTION = 256
 _ACTIVATION_LEDGER_PRUNE_BATCH = 64
+# Process-local historical diagnostics stay bounded; durable snapshots remain
+# in the journal.
+TRANSCRIPT_ARCHIVE_MAX_MESSAGES = 256
+TRANSCRIPT_ARCHIVE_MAX_CHARS = 256 * 1024
+TRANSCRIPT_SEEN_EVENT_RETENTION = 4096
+REQUEST_ATTEMPT_RETENTION = 32
+REQUEST_ATTEMPT_ERROR_MAX_CHARS = 1024
 
 # Room left for a summary before the view is treated as near the budget.
 SUMMARY_RESERVE = 900
@@ -101,8 +108,12 @@ class Transcript:
         self.event_ids: list[str | None] = []
         self.event_types: list[str | None] = []
         self.seen: set[str] = set()
+        self._seen_order: deque[str] = deque()
         self.version = 0
         self.archive: list[dict[str, Any]] = []
+        self.archive_chars = 0
+        self.archive_dropped = 0
+        self._archive_sizes: list[int] = []
         self._base_chars = len(json.dumps([self._system_message()], ensure_ascii=False))
         self._sizes: list[int] = []
         self._size_sum = 0
@@ -138,7 +149,7 @@ class Transcript:
     def project(self, event: Event) -> dict[str, Any]:
         if event.id in self.seen:
             return {"projected": False, "duplicate": True, "added_chars": 0}
-        self.seen.add(event.id)
+        self._remember_seen(event.id)
         if event.type == "agent.retry":
             return {"projected": False, "duplicate": False, "added_chars": 0}
         if event.type == "user.message":
@@ -161,6 +172,20 @@ class Transcript:
         added_chars = self._append(message, event.id, event.type)
         return {"projected": True, "duplicate": False, "added_chars": added_chars}
 
+    def _remember_seen(self, event_id: str) -> None:
+        self.seen.add(event_id)
+        self._seen_order.append(event_id)
+        if len(self._seen_order) > TRANSCRIPT_SEEN_EVENT_RETENTION:
+            expired = self._seen_order.popleft()
+            if expired not in self.event_ids:
+                self.seen.discard(expired)
+
+    def _prune_seen(self) -> None:
+        active_ids = {event_id for event_id in self.event_ids if event_id}
+        while len(self._seen_order) > TRANSCRIPT_SEEN_EVENT_RETENTION:
+            self._seen_order.popleft()
+        self.seen = active_ids | set(self._seen_order)
+
     def snapshot(self) -> list[dict[str, Any]]:
         return [self._system_message(), *self.messages]
 
@@ -179,10 +204,11 @@ class Transcript:
           the running Runtime, so restoring an old transcript cannot silently
           revert a changed persona or a tightened safety rule.
         * Event ids still present in the snapshot are restored into `seen`.
-          This only deduplicates those same internal event ids. It does not
-          deduplicate a newly submitted copy of an external observation: that
-          copy receives a fresh event id, and compaction may remove old ids
-          from the saved view. Callers need a separate durable input protocol.
+          Recent ids for non-projected events are also restored up to the
+          in-memory retention limit. This only deduplicates the same internal
+          event ids; it does not deduplicate a newly submitted copy of an
+          external observation, which receives a fresh event id. Callers need
+          a separate durable input protocol.
 
         Returns a small report; callers should log it rather than trust it
         silently, because a restore that drops malformed rows is worth knowing
@@ -214,7 +240,8 @@ class Transcript:
         self.messages = restored
         self.event_ids = ids[: len(restored)]
         self.event_types = types[: len(restored)]
-        self.seen = {event_id for event_id in self.event_ids if event_id}
+        self._seen_order = deque(event_id for event_id in self.event_ids if event_id)
+        self._prune_seen()
         self.version = len(restored)
         self._rebuild_sizes()
         return {
@@ -321,7 +348,7 @@ class Transcript:
                     messages.append(summaries[index])
                     sizes.append(self._size_of(summaries[index]))
                     event_ids.append(None)
-                    event_types.append(None)
+                    event_types.append("context.summary")
                 elif index in removed_indices:
                     continue
                 else:
@@ -339,15 +366,19 @@ class Transcript:
             result["chars_after"] = self.serialized_length()
 
         if result["chars_after"] > limit:
-            for indices, summary in reversed(self._plain_turns(current_event_ids)):
+            removed_before = 0
+            for indices, summary in self._plain_turns(current_event_ids):
                 if result["chars_after"] <= limit:
                     break
-                self._replace_indices(indices, indices[0], summary)
+                adjusted = [index - removed_before for index in indices]
+                self._replace_indices(adjusted, adjusted[0], summary)
+                removed_before += len(indices) - 1
                 result["plain_turns"] += 1
                 result["chars_after"] = self.serialized_length()
 
         if result["completed_tool_interactions"] or result["plain_turns"]:
             self.version += 1
+            self._prune_seen()
         result["chars_recovered"] = before - result["chars_after"]
         return result
 
@@ -367,14 +398,7 @@ class Transcript:
             return plan
 
         groups = self._tool_interactions()
-        protected = {
-            index
-            for index, event_id in enumerate(self.event_ids)
-            if event_id is not None and event_id in current_event_ids
-        }
-        for index, event_type in enumerate(self.event_types):
-            if event_type == "user.message":
-                protected.add(index)
+        protected = self._protected_indices(current_event_ids)
         complete = [group for group in groups if not group["pending"]]
         failures = [
             group
@@ -420,14 +444,12 @@ class Transcript:
             for indices, _summary in self._plain_turns(current_event_ids):
                 if estimated <= limit:
                     break
-                removable = [
-                    index
-                    for index in indices
-                    if self.event_types[index] != "user.message" and index not in protected
-                ]
+                removable = [index for index in indices if index not in protected]
                 removed_chars = sum(self._sizes[index] for index in removable)
                 if removed_chars <= 0:
                     continue
+                if not selected and plan["plain_turns"] == 0:
+                    estimated += SUMMARY_RESERVE
                 remove.update(removable)
                 estimated -= removed_chars
                 plan["plain_turns"] += 1
@@ -466,7 +488,8 @@ class Transcript:
         removed_chars = sum(self._sizes[index] for index in indices)
         if len(json.dumps(summary, ensure_ascii=False)) >= removed_chars:
             return kept
-        self.archive.extend(self.messages[index] for index in sorted(indices))
+        for index in sorted(indices):
+            self._archive_message(self.messages[index], self._sizes[index])
         messages: list[dict[str, Any]] = []
         sizes: list[int] = []
         event_ids: list[str | None] = []
@@ -476,7 +499,7 @@ class Transcript:
                 messages.append(summary)
                 sizes.append(self._size_of(summary))
                 event_ids.append(None)
-                event_types.append(None)
+                event_types.append("context.summary")
             if index in indices:
                 continue
             messages.append(message)
@@ -489,6 +512,7 @@ class Transcript:
         self.event_ids = event_ids
         self.event_types = event_types
         self._signature = (len(messages), len(event_ids))
+        self._prune_seen()
         self.version += 1
         after = self.serialized_length()
         return {
@@ -501,6 +525,21 @@ class Transcript:
             "plain_turns": plan.get("plain_turns", 0),
             "pending_tool_interactions_kept": plan.get("pending_tool_interactions_kept", 0),
         }
+
+    def _archive_message(self, message: dict[str, Any], size_chars: int) -> None:
+        if size_chars > TRANSCRIPT_ARCHIVE_MAX_CHARS:
+            self.archive_dropped += 1
+            return
+        while self.archive and (
+            len(self.archive) >= TRANSCRIPT_ARCHIVE_MAX_MESSAGES
+            or self.archive_chars + size_chars > TRANSCRIPT_ARCHIVE_MAX_CHARS
+        ):
+            self.archive.pop(0)
+            self.archive_chars -= self._archive_sizes.pop(0)
+            self.archive_dropped += 1
+        self.archive.append(message)
+        self._archive_sizes.append(size_chars)
+        self.archive_chars += size_chars
 
     def _append(
         self,
@@ -622,9 +661,9 @@ class Transcript:
             if event_type == "user.message"
         ]
         if user_indices:
+            # Keep the session's initial request and newest input as raw anchors.
             protected.add(user_indices[0])
             protected.add(user_indices[-1])
-        protected.update(range(max(0, len(self.messages) - 8), len(self.messages)))
         return protected
 
     def _plain_turns(self, current_event_ids: set[str]) -> list[tuple[list[int], dict[str, Any]]]:
@@ -632,7 +671,7 @@ class Transcript:
         starts = [
             index
             for index, event_type in enumerate(self.event_types)
-            if event_type == "user.message"
+            if event_type in {"user.message", "context.summary"}
         ]
         turns: list[tuple[list[int], dict[str, Any]]] = []
         for position, start in enumerate(starts):
@@ -643,7 +682,7 @@ class Transcript:
             if any(
                 self.messages[index].get("role") not in {"user", "assistant"}
                 or self.messages[index].get("tool_calls")
-                or self.event_types[index] not in {None, "user.message"}
+                or self.event_types[index] not in {None, "user.message", "context.summary"}
                 or self._runtime_event(index) is not None
                 for index in indices
             ):
@@ -709,7 +748,7 @@ class Transcript:
         summary_size = self._size_of(summary)
         self.messages.insert(insert_at, summary)
         self.event_ids.insert(insert_at, None)
-        self.event_types.insert(insert_at, None)
+        self.event_types.insert(insert_at, "context.summary")
         self._sizes.insert(insert_at, summary_size)
         self._size_sum += summary_size
         self._signature = (len(self.messages), len(self.event_ids))
@@ -1272,6 +1311,8 @@ class LLMActor:
                 "tool_schema_chars": len(json.dumps(self.tools, ensure_ascii=False)),
                 "input_events": event_metrics,
                 "attempts": [],
+                "attempt_count": 0,
+                "attempts_evicted": 0,
                 "compaction": compaction,
             }
             activation.transcript_version = self.transcript.version
@@ -1501,8 +1542,13 @@ class LLMActor:
         if not isinstance(tools_chars, int) or isinstance(tools_chars, bool):
             tools_chars = len(json.dumps(request.tools, ensure_ascii=False))
         attempts = activation.context_metrics.setdefault("attempts", [])
+        attempt_count = activation.context_metrics.get("attempt_count")
+        if not isinstance(attempt_count, int) or isinstance(attempt_count, bool):
+            attempt_count = len(attempts)
+        attempt_count += 1
+        activation.context_metrics["attempt_count"] = attempt_count
         attempt: dict[str, Any] = {
-            "number": len(attempts) + 1,
+            "number": attempt_count,
             "transcript_chars": request_chars,
             "tool_schema_chars": tools_chars,
             "configured_limit_chars": self.context_limit,
@@ -1510,6 +1556,13 @@ class LLMActor:
             "status": "running",
         }
         attempts.append(attempt)
+        if len(attempts) > REQUEST_ATTEMPT_RETENTION:
+            evicted = len(attempts) - REQUEST_ATTEMPT_RETENTION
+            del attempts[:evicted]
+            attempts_evicted = activation.context_metrics.get("attempts_evicted", 0)
+            if not isinstance(attempts_evicted, int) or isinstance(attempts_evicted, bool):
+                attempts_evicted = 0
+            activation.context_metrics["attempts_evicted"] = attempts_evicted + evicted
         activation.context_metrics["request_transcript_chars"] = request_chars
         activation.context_metrics["tool_schema_chars"] = tools_chars
         self._last_request_chars = request_chars
@@ -1532,7 +1585,9 @@ class LLMActor:
                 if isinstance(response.usage, dict):
                     self._last_provider_usage = response.usage
             if error:
-                attempt["error"] = error
+                attempt["error"] = error[:REQUEST_ATTEMPT_ERROR_MAX_CHARS]
+                if len(error) > REQUEST_ATTEMPT_ERROR_MAX_CHARS:
+                    attempt["error_truncated"] = True
 
         self._inflight = asyncio.create_task(self.backend.complete(request))
         try:

@@ -48,6 +48,8 @@ flowchart TD
 
 内存中只保留最近 `ACTIVATION_SNAPSHOT_RETENTION`（32）个已提交 activation 的请求视图（`snapshot`）与逐事件投影记录（`context_metrics["input_events"]`）。`snapshot` 是实际发给模型的完整消息列表，随对话增长，是最主要的常驻开销；更早的视图由 journal 中每次提交的 transcript 快照承担，不常驻内存。paused activation 不裁剪：retry 必须重放当时的精确视图，而不是用已经变化的 transcript 重建。
 
+`actor.activations` 在内存中保留最近至多 `ACTIVATION_LEDGER_RETENTION`（256）个对象，`activation_count` 仍报告 Runtime 生命周期总数；按 event 和 activation id 的索引随对象一起过期，过期关联可从 journal 检查。当前 running/paused activation 不因窗口裁剪。`Runtime.trace` 保留最近至多 1,024 个事件，`Runtime.event_count(event_type=None)` 提供累计计数；journal writer 的丢弃/错误状态仍由 `journal.incomplete`、`journal.dropped` 暴露。
+
 ## 3. 模块职责与状态归属
 
 | 模块 | 负责 | 状态归属与边界 |

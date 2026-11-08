@@ -7,9 +7,10 @@ when that activation stopped running. That answer used to be a scan of
 import asyncio
 
 from nervipulsa.config import Settings
+from nervipulsa.events import Event
+from nervipulsa.llm import ACTIVATION_LEDGER_RETENTION
 from nervipulsa.ports import ModelResponse, ProviderFailure
-from nervipulsa.runtime import Runtime
-
+from nervipulsa.runtime import Runtime, TRACE_EVENT_RETENTION
 
 class Backend:
     def __init__(self, *responses):
@@ -187,6 +188,75 @@ def test_paused_activation_keeps_its_request_view_for_retry(tmp_path):
             await runtime.shutdown()
 
     asyncio.run(run())
+
+
+def test_activation_ledger_and_indexes_expire_together(tmp_path):
+    async def run():
+        count = ACTIVATION_LEDGER_RETENTION + 10
+        runtime = await _runtime(
+            tmp_path, *[ModelResponse(content=f"a{turn}") for turn in range(count)]
+        )
+        try:
+            first_event_id = None
+            first_activation = None
+            latest_event_id = None
+            latest_activation = None
+            for turn in range(count):
+                delivery = runtime.submit_text(f"m{turn}")
+                settled = await runtime.wait_for_activation(
+                    input_event_id=delivery.event_id, timeout=5
+                )
+                assert settled is not None and settled.status == "committed"
+                if turn == 0:
+                    first_event_id = delivery.event_id
+                    first_activation = settled
+                latest_event_id = delivery.event_id
+                latest_activation = settled
+
+            actor = runtime.actor
+            assert actor.activation_count == count
+            assert len(actor.activations) <= ACTIVATION_LEDGER_RETENTION
+            assert first_activation is not None and first_event_id is not None
+            assert actor.activation_by_id(first_activation.id) is None
+            assert actor.activation_for_event(first_event_id) is None
+            assert latest_activation is not None and latest_event_id is not None
+            assert actor.activation_by_id(latest_activation.id) is latest_activation
+            assert actor.activation_for_event(latest_event_id) is latest_activation
+            assert await runtime.wait_for_activation(
+                input_event_id=first_event_id
+            ) is None
+            assert await runtime.wait_for_activation(
+                activation_id=first_activation.id
+            ) is None
+        finally:
+            await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_trace_window_keeps_cumulative_event_counts(tmp_path):
+    runtime = Runtime(Settings(), Backend(), tmp_path, python_host=False)
+    for sequence in range(1, TRACE_EVENT_RETENTION + 2):
+        runtime._observe(
+            Event(
+                session_id=runtime.bus.session_id,
+                id=f"evt_{sequence:08d}",
+                seq=sequence,
+                type="test.event",
+                source="test",
+                target="runtime",
+                reply_to=None,
+                payload={"sequence": sequence},
+                accepted_at=float(sequence),
+            )
+        )
+
+    assert len(runtime.trace) <= TRACE_EVENT_RETENTION
+    assert runtime.trace[0].seq == 257
+    assert runtime.trace[-1].seq == TRACE_EVENT_RETENTION + 1
+    assert runtime.event_count() == TRACE_EVENT_RETENTION + 1
+    assert runtime.event_count("test.event") == TRACE_EVENT_RETENTION + 1
+    assert runtime.event_count("missing.event") == 0
 
 
 def test_wait_requires_exactly_one_selector(tmp_path):

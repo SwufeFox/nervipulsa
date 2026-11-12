@@ -73,6 +73,66 @@ def test_non_tty_reads_lines_off_event_loop_and_waits_for_idle(tmp_path: Path, m
     assert _completions("/config set ") == {"provider", "base-url", "model", "api-key"}
 
 
+def test_inspect_is_discoverable_from_help_and_completion() -> None:
+    output: list[str] = []
+    runtime = SimpleNamespace(echo=output.append)
+
+    assert handle_line(runtime, "/help") is False
+    assert any(line.startswith("/inspect") for line in output)
+    assert _completions("/ins") == {"pect"}
+
+
+def test_startup_hints_report_missing_model_and_key(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    settings = Settings(
+        provider="openai",
+        model="",
+        api_key="",
+        base_url="https://api.openai.com/v1",
+    )
+
+    hints = cli._startup_hints(settings)
+
+    assert any("/config set model" in hint for hint in hints)
+    assert any("OPENAI_API_KEY" in hint for hint in hints)
+
+
+def test_startup_hints_accept_provider_env_key(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
+    settings = Settings(
+        provider="openai",
+        model="gpt-4o",
+        api_key="",
+        base_url="https://api.openai.com/v1",
+    )
+
+    assert cli._startup_hints(settings) == []
+
+
+def test_startup_hints_allow_local_endpoint_without_key() -> None:
+    settings = Settings(
+        provider="ollama",
+        model="llama3",
+        api_key="",
+        base_url="http://localhost:11434/v1",
+    )
+
+    assert cli._startup_hints(settings) == []
+
+
+def test_startup_hints_reject_base_url_without_scheme() -> None:
+    settings = Settings(
+        provider="ollama",
+        model="llama3",
+        api_key="",
+        base_url="localhost:11434/v1",
+    )
+
+    hints = cli._startup_hints(settings)
+
+    assert any("http://" in hint and "https://" in hint for hint in hints)
+
+
 def test_uninstall_command_completes_at_root() -> None:
     assert _completions("/un") == {"install"}
 

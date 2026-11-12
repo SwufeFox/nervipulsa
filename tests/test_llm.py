@@ -1530,6 +1530,7 @@ def test_provider_pause_error_reaches_the_ui_mailbox_and_is_rendered(workspace: 
             delivered = errors[0]
             assert delivered.target == runtime.ui_box.name
             assert delivered.payload["kind"] == "response_unknown"
+            assert "/retry" in delivered.payload["message"]
             await _until(lambda: any("socket dropped" in line for line in lines))
             assert any(
                 line.startswith("error  ") and "socket dropped" in line

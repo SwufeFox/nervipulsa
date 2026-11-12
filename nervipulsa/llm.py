@@ -35,6 +35,20 @@ _NON_RESUMABLE_PAUSE = frozenset(
     {"response_unknown", "commit_interrupted", "response_commit_failed"}
 )
 
+# Recovery advice rendered next to the agent.error receipt. Keep each hint
+# actionable and consistent with the retry paths in `_retry` and the run loop.
+_PAUSE_HINTS = {
+    "response_unknown": (
+        "Choose /retry, abandon, or check the provider; this request will not be "
+        "repeated automatically."
+    ),
+    "response_invalid": "Send a new message or run /retry to request the frozen input again.",
+    "budget": "Send a new message to start a fresh activation budget.",
+    "context": "Submit a new or shorter message; /retry cannot reduce an oversized transcript.",
+    "commit_interrupted": "Inspect with /inspect, then run /retry to continue or abandon.",
+    "response_commit_failed": "Run /retry to run the commit hook again; keep the hook idempotent.",
+}
+
 # How many settled request views stay reachable in memory. Each one is the exact
 # message list a model request carried, so it is the largest per-activation
 # object; the journal keeps a durable transcript snapshot per activation, which
@@ -1826,8 +1840,12 @@ class LLMActor:
         self._paused = activation
         kind = activation.error_kind or "paused"
         message = activation.error_message or kind
-        if kind == "response_unknown":
-            message = f"{message}. Choose /retry, abandon, or check the provider; this request will not be repeated automatically."
+        hint = _PAUSE_HINTS.get(kind)
+        if hint:
+            base = message.rstrip()
+            if base and base[-1] not in ".!?":
+                base += "."
+            message = f"{base} {hint}" if base else hint
         self._ui.call("agent.error", {"kind": kind, "message": message, "activation_id": activation.id}, lane=Lane.DIAGNOSTIC)
 
     def _settle(self, activation: Activation) -> None:

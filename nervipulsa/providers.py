@@ -81,6 +81,14 @@ class ScriptedBackend:
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
+PROVIDER_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+REQUIRED_KEY_PROVIDERS = frozenset(PROVIDER_KEY_ENV)
+
+
 class OpenAICompatibleBackend:
     """Adapter for the OpenAI Chat Completions HTTP protocol."""
 
@@ -104,14 +112,9 @@ class OpenAICompatibleBackend:
             body["tools"] = request.tools
             body["tool_choice"] = "auto"
         headers = {"Content-Type": "application/json"}
-        key_env = {
-            "openai": "OPENAI_API_KEY",
-            "deepseek": "DEEPSEEK_API_KEY",
-            "openrouter": "OPENROUTER_API_KEY",
-        }.get(self.provider)
+        key_env = PROVIDER_KEY_ENV.get(self.provider)
         key = self.api_key or (os.environ.get(key_env, "") if key_env else "")
-        required_key_providers = {"openai", "deepseek", "openrouter"}
-        if self.provider in required_key_providers and not key:
+        if self.provider in REQUIRED_KEY_PROVIDERS and not key:
             raise ProviderError(
                 "request_not_sent",
                 f"missing API key for {self.provider}; configure it in /config or set {key_env}",

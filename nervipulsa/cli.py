@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import shlex
 import shutil
@@ -19,6 +20,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from .config import PROVIDER_DEFAULTS, Settings, config_path, load_settings, save_settings
 from .application import create_backend, create_runtime
+from .providers import PROVIDER_KEY_ENV, REQUIRED_KEY_PROVIDERS
 from .runtime import Runtime
 
 
@@ -37,6 +39,7 @@ _TOP_LEVEL_COMMANDS = (
     "/cancel",
     "/retry",
     "/logs",
+    "/inspect",
     "/effects",
     "/output",
     "/exit",
@@ -160,6 +163,7 @@ def handle_line(runtime: Runtime, line: str) -> bool:
         commands = (
             ("/status", "model, Python execution, and context budget"),
             ("/logs", "event ids, delivery, and context changes"),
+            ("/inspect [session_id]", "read-only durable session inspection"),
             ("/effects", "unresolved effects; record operator assessments and history"),
             ("/output <id> [stdout|stderr|both]", "full saved output"),
             ("/cancel [id]", "stop the running execution, or the specified queued or running code"),
@@ -616,6 +620,31 @@ def _delete_saved_data(workspace: Path) -> None:
     settings_file.with_suffix(".json.tmp").unlink(missing_ok=True)
 
 
+def _effective_api_key(settings: Settings) -> str | None:
+    """The key the adapter will actually use, including provider env fallbacks."""
+    if settings.api_key:
+        return settings.api_key
+    env_name = PROVIDER_KEY_ENV.get(settings.provider)
+    return os.environ.get(env_name) if env_name else None
+
+
+def _startup_hints(settings: Settings) -> list[str]:
+    """Actionable preflight problems; empty means the configuration is usable."""
+    hints: list[str] = []
+    if not settings.model:
+        hints.append("model not selected; run /config set model")
+    if not settings.base_url:
+        hints.append("base URL not set; run /config set base-url")
+    elif not settings.base_url.lower().startswith(("http://", "https://")):
+        hints.append(
+            "base URL must start with http:// or https://; run /config set base-url"
+        )
+    if settings.provider in REQUIRED_KEY_PROVIDERS and not _effective_api_key(settings):
+        env_name = PROVIDER_KEY_ENV[settings.provider]
+        hints.append(f"API key missing; run /config set api-key or set {env_name}")
+    return hints
+
+
 async def run_cli(settings: Settings, workspace: Path) -> int:
     def echo(text: str) -> None:
         print(text, flush=True)
@@ -623,9 +652,14 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
     runtime = create_runtime(settings, workspace, echo=echo, runtime_factory=Runtime)
     await runtime.start()
     echo(f"nervipulsa  {settings.provider}  {settings.model or '(no model)'}  {workspace}")
+    echo(
+        f"  profile {settings.active_profile or settings.provider}  "
+        f"endpoint {settings.base_url or '(unset)'}  "
+        f"key {'set' if _effective_api_key(settings) else 'missing'}"
+    )
     echo("Enter sends. /help lists commands.")
-    if not settings.api_key:
-        echo("No API key saved. /config can store one; NERVIPULSA_API_KEY or OPENAI_API_KEY can also provide it.")
+    for hint in _startup_hints(settings):
+        echo(f"  next  {hint}")
     buffer = LineBuffer()
     uninstall_requested = False
     noninteractive_incomplete = False

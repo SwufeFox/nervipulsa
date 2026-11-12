@@ -1,8 +1,6 @@
 # 当前实现架构
 
-本文是当前工作区实现的架构入门与模块导航，随代码更新。使用方式见 [README](../README.md)，文档分工见 [文档索引](README.md)。研究日志记录当时的观察与实验，论文组织研究论证；二者不替代本文对当前代码的说明。初稿基于源码审阅；2026-10-18 scheduler 回退修复及 events + python_host 聚焦组的验证过程见[研究日志](runtime_harness_architecture_research.md)。本轮未运行 CLI 或真实 provider。
-
-scheduler 保留 HEAD 的异常边界：执行及 `_apply_result` 均在同一个 try 内，异常沿既有 `worker_exit` 失败路径处理，并清理 current/executing、取消旧 namespace 队列及重启 worker。此次恢复不新增异步观测失败到 effect 状态的映射；Journal 异步 execution 观测与同步 durable effect commit 仍是不同契约。该边界也不保证第二次结果处理再次抛错时仍可恢复。
+本文是当前工作区实现的架构入门与模块导航，随代码更新。使用方式见 [README](../README.md)，文档分工见 [文档索引](README.md)。研究日志记录当时的观察与实验，论文组织研究论证；二者不替代本文对当前代码的说明。初稿基于源码审阅；过程性验证记录见[研究日志](runtime_harness_architecture_research.md)与 §7，各轮测试只覆盖当时执行的范围，不能外推为当前全量验收。
 
 ## 1. 控制链与依赖
 
@@ -78,6 +76,7 @@ flowchart TD
 
 - **Runtime**：CREATED → RUNNING → DRAINING → CLOSED。draining 拒绝新 user.message、python.requested、agent.retry，仍允许处理取消与结果。普通 user.message / runtime.observation 受 `ordinary_limit` 限制，容量同时计算 actor 的 held 输入；`agent.retry` 有独立的一个 mailbox 槽。shutdown 停止 actor，关闭 host，再关闭 Bus、取消剩余 UI/lifecycle 任务并限时 flush/close Journal；它不等待模型完成所有业务意图。
 - **Execution**：host 的 record 从 queued → running → done，终态 payload 再区分 succeeded/failed/timeout/cancelled；调度已标 running 与 worker 实际 started 是不同时间点，`active_execution_facts()` 仅在后者后报告计时。
+- **Scheduler 异常边界**：执行及 `_apply_result` 在同一个 try 内，异常沿既有 `worker_exit` 失败路径处理，并清理 current/executing、取消旧 namespace 队列及重启 worker。该边界不新增异步观测失败到 effect 状态的映射；Journal 异步 execution 观测与同步 durable effect commit 仍是不同契约。它也不保证第二次结果处理再次抛错时仍可恢复。
 - **Resume 状态机（v0.5 起，仅记录不自动推进）**：`committed/observed` 表示已落盘可检查；`observed-but-unconsumed`（T4：effect 已 observed 且 python.finished 进了旧 LLM mailbox，但新会话收不到）标记为“待继续（inspectable, not resumable）”，只能人工用 `/inspect` 查看后手动发新 user.message 继续，绝不由 Runtime 自动重放、回填 mailbox 或恢复 namespace；`commit_interrupted/response_unknown` 仍需显式 `/retry`，且只在原进程内有效。
 - **Worker epoch**：正常成功、普通 Python 异常都保留 namespace；执行超时、运行中取消或进程退出需要重建解释器。旧 epoch 排队代码会取消，避免在新 namespace 自动重放。空闲 worker 死亡可通过 environment_changed 通知 actor。排队取消无需销毁当前 namespace。
 - **Handler**：worker 的 on_finished/off_finished 管理注册；每次执行结束固定最多 16 个回调的快照。host 的 epoch/request/id 检查及邮箱预留防止跨执行串接；终态携带 expected count、missing ids 与 complete/incomplete/unknown，不能把缺帧当成成功完成。终态槽在 actor 消费结果后释放，取批本身不释放该额度。
@@ -108,20 +107,22 @@ Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：�
 
 文件状态历史不在本运行时内：`--fingerprint-workspace` 已于 2026-10-21 删除（每次执行扫两遍全树、未经运行时验证；历史见 git）。文件差异排查用版本控制或外部工具，不在执行路径里做全树哈希。
 
-## 7. 本轮整理与保留的决策
+## 7. 整理决策与验证范围
 
-本轮整理合并同一边界内重复的出队记账与 handler 快照校验；随后恢复 scheduler 与 HEAD 一致的执行及结果处理异常边界。不新增层，不改变事件/schema/工具回执、SQLite schema 或重试协议。README 保留使用与扩展示例，本文集中解释实现，研究日志与论文保留原日期和证据范围。
+整理过程中合并了同一边界内重复的出队记账与 handler 快照校验；随后恢复 scheduler 与 HEAD 一致的执行及结果处理异常边界。不新增层，不改变事件/schema/工具回执、SQLite schema 或重试协议。README 保留使用与扩展示例，本文集中解释实现，研究日志与论文保留原日期和证据范围。
 
 以下复杂点保留，需后续单独决策：
 
 - **application 与 Runtime、registry 与 catalog**：分别承担适配器选择、会话装配和工具实例查找；直接合并会破坏现有注入、callable 和 runtime_factory 兼容契约。`providers` 的旧 schema 导出同理保留。
 - **Transcript 与 ContextProjector、旧 compact 与模型摘要路径**：前者记录与后者视图语义不同，旧接口存在兼容调用；去掉其中之一前需要调用面和上下文保留规则的独立验收。
-- **Journal 两种写入、两次执行前 commit**：观测与执行放行的失败处理不同，合并为队列或一个事务会改动 durable effect 崩溃窗口。本轮只纠正说明，不改协议。
-- **Host 的线程/loop 分工与 handler 镜像**：阻塞 IPC、进程终止与 SQLite 放在线程，Bus 交付留在 loop；镜像承担关联校验，并非 namespace 的第二份权威状态。重写并发模型风险大于本轮收益。
+- **Journal 两种写入、两次执行前 commit**：观测与执行放行的失败处理不同，合并为队列或一个事务会改动 durable effect 崩溃窗口。该轮只纠正说明，不改协议。
+- **Host 的线程/loop 分工与 handler 镜像**：阻塞 IPC、进程终止与 SQLite 放在线程，Bus 交付留在 loop；镜像承担关联校验，并非 namespace 的第二份权威状态。重写并发模型风险大于该轮收益。
 - **内存保留窗口**：activation snapshot、activation ledger、trace、Transcript archive、seen event IDs 与 retry attempt 详情均有进程内上限；active model view 在可压缩时受 `context_limit` 限制。持久 Journal 的 transcript snapshots 会继续随 activation 累积，这是磁盘保留策略，不是驻留内存增长；超大且不可压缩的输入仍会暂停。
 - **错误展示路径**：`agent.error → ui_box` 路由已于 2026-10-21 注册；同日再增加有界诊断预留：`ui_box` 为 `ordinary_limit=256 + diagnostic_limit=16`，`agent.error` 全量改走 `Lane.DIAGNOSTIC`，普通队列满时诊断仍可接纳（单一 FIFO 消费顺序不变）。诊断预留也满时返回显式 `diagnostic_capacity_exceeded`、记 `diagnostic_dropped` 计数并向 stderr 直报一行，不伪装成功、不丢旧消息、不扩容。接纳保证不等于显示保证：UI 任务停滞时诊断只是在队列里等，不会被自动显示。
 - **fingerprint（已删除 2026-10-21）**：`workspace_fingerprint.py` 及整条 wiring（Settings/Runtime/host/CLI/`/logs`/docs）已移除。文件状态历史不是本运行时的职责；差异排查交给版本控制或外部工具。
 
-2026-10-21 durable memory 切片：Transcript/Activation/tool receipt 增加同步 durable 提交 （FULL + BEGIN IMMEDIATE，失败显式抛错转 commit_interrupted），重启后 `/inspect` 只读可查、绝不自动重放；新增 `tests/test_durable_memory.py` 5 项（commit 失败显式报错、落盘往返、重启可读且新会话空转、无重放、失败转暂停），本地 `python -m pytest tests/test_durable_memory.py -q` 5 passed；证据分层：本地验证通过，hosted CI / 长跑 / 真实模型未验证。
+### 验证记录
 
-验证范围：初稿整理仅做静态检查；后续 scheduler 修复运行完整 `python -m pytest tests/test_events.py tests/test_python_host.py -vv`，Windows / Python 3.13.14 / pytest 9.1.1 下 30 passed（163.80s），包含真实 worker、取消/重启及 durable commit 故障替身。新增回归在内存恢复回退实现时失败，证明覆盖本次异常边界问题。本次未重现 startup flush 失败，未调整 timeout；一次通过不能排除间歇性 startup 问题。未运行全库测试、CLI/provider 或扫描竞态专项验证，以上测试不构成这些行为的验收。
+- 2026-10-21 durable memory 切片：Transcript/Activation/tool receipt 增加同步 durable 提交（FULL + BEGIN IMMEDIATE，失败显式抛错转 commit_interrupted），重启后 `/inspect` 只读可查、绝不自动重放；新增 `tests/test_durable_memory.py` 5 项（commit 失败显式报错、落盘往返、重启可读且新会话空转、无重放、失败转暂停），本地 `python -m pytest tests/test_durable_memory.py -q` 5 passed；证据分层：本地验证通过，hosted CI / 长跑 / 真实模型未验证。
+- 2026-11-12 文档整理：不改代码；合并 `feat/configurable-agent-profile` 后全量 `python -m pytest -q` 221 passed（Windows / Python 3.13.14 / pytest 9.1.1），覆盖新增的 activation correlation、transcript restore、structured observation、no-Python-host 及既有 worker/CLI/provider 测试。该结果仍是本机单次运行，不代表 hosted CI、长跑或真实模型验收。
+- 更早的验证范围：初稿整理仅做静态检查；后续 scheduler 修复运行完整的 `python -m pytest tests/test_events.py tests/test_python_host.py -vv`，Windows / Python 3.13.14 / pytest 9.1.1 下 30 passed（163.80s），包含真实 worker、取消/重启及 durable commit 故障替身。新增回归在内存恢复回退实现时失败，证明覆盖该异常边界问题。当时未重现 startup flush 失败，未调整 timeout；一次通过不能排除间歇性 startup 问题。未运行全库测试、CLI/provider 或扫描竞态专项验证，以上测试不构成这些行为的验收。

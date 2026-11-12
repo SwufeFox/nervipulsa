@@ -5,19 +5,205 @@ actions, and Python results travel as events. Model inference never waits for
 Python execution, so the CLI can accept another message while code is running.
 
 This checkout contains a v0.4 development implementation. The scripted runtime
-exercises the asynchronous event contract without credentials. Live model calls use the OpenAI Chat Completions HTTP protocol directly. Nervipulsa
-keeps its own tool execution, transcript, and retry state; no model SDK is required.
+exercises the asynchronous event contract without credentials. Live model calls
+use the OpenAI Chat Completions HTTP protocol directly. Nervipulsa keeps its own
+tool execution, transcript, and retry state; no model SDK is required.
 
-For the current implementation, start with [Architecture](docs/architecture.md):
-request-to-terminal flow, module and state ownership, persistence, and security
-boundaries. This README covers usage and extension wiring; the [documentation
-index](docs/README.md) separates current references from historical research.
+- [Current architecture](docs/architecture.md) — request-to-terminal flow,
+  module and state ownership, persistence, and security boundaries.
+- [Documentation index](docs/README.md) — current references, dated research,
+  and their evidence boundaries.
+- [Design contract](Nervipulsa_Design_v0.4.md) — intended v0.4 behavior and
+  invariants.
+- [Recorded results](TEST_RESULTS.md) — scripted benchmarks and historical
+  real-model runs.
 
-Python executions use a durable effect ledger. Before an execute frame is written to the worker IPC channel, the runtime commits an `intent` and then `dispatching` with SQLite `synchronous=FULL`; if either commit fails, it does not send the frame. A worker terminal is committed as `observed` before `python.finished` is published. If outcome persistence fails after dispatch, the terminal reports `unknown` and `/effects` lists the unresolved row for review. The protocol does not automatically replay Python or roll back side effects. Operators can append an out-of-band assessment with `/effects decide <session_id> <execution_id> <occurred|not_occurred|undetermined> --by "<operator>" --evidence "<what was checked>"` and inspect `/effects history`; these are self-reported attestations, do not change worker state, and never trigger a replay.
+## Quick start
 
-## Runtime extension points
+Python 3.11 or newer is required. From this directory:
 
-The composition boundary lives in `nervipulsa.application`: `create_backend(settings)` selects a provider registry and `create_runtime(settings, workspace, echo=...)` assembles a session. Implement `ModelBackend.complete(request)` for another provider transport and register it through a `ProviderRegistry.create(settings)` implementation. Tool adapters implement `Tool` (`name`, `schema`, `validate`, and async `invoke`) and receive a narrow `ToolContext`: workspace and timeout settings plus an `EventSink.call(...)` interface. Add adapters to `DefaultToolRegistry(tools)` or supply a custom `ToolRegistry.create(workspace)`; the catalog is the actor's only tool dispatch surface. Built-in adapters live in `nervipulsa.tools`; the actor validates calls, stores tool receipts, journals them, and safely resumes interrupted commits.
+    python -m pip install -e ".[dev]"
+
+The `dev` extra adds pytest. Then start the interactive CLI:
+
+    nervipulsa --dir .
+
+`python -m nervipulsa --dir .` runs the same entry point without installing.
+
+The first run can open `/config` to set a provider, base URL, model, and API
+key. Configuration is saved under the platform user configuration directory,
+outside the workspace. The key is hidden while entering and is never written to
+the event journal or passed to the Python worker. At startup, the CLI prints the
+active profile, endpoint, and key state, then a `next` line for each missing
+prerequisite such as an unset model or provider key.
+
+Run the no-credential end-to-end trace with:
+
+    python -m nervipulsa.demo --scripted
+
+The trace edits a file in a temporary workspace, accepts an inserted user
+message while Python is running, and feeds the terminal result into a later
+activation. This demonstrates the scripted protocol only; a real model/provider
+has not been validated by that command.
+
+## Providers and configuration
+
+### Built-in presets
+
+Built-in profiles are available for `magpie`, `openai`, `deepseek`,
+`openrouter`, `ollama`, and `lmstudio`:
+
+| Profile | Base URL | Credential behavior |
+| --- | --- | --- |
+| `magpie` | `http://127.0.0.1:3425/v1` | Uses the local gateway token `magpie` by default |
+| `openai` | `https://api.openai.com/v1` | Requires a key; falls back to `OPENAI_API_KEY` |
+| `deepseek` | `https://api.deepseek.com` | Requires a key; falls back to `DEEPSEEK_API_KEY` |
+| `openrouter` | `https://openrouter.ai/api/v1` | Requires a key; falls back to `OPENROUTER_API_KEY` |
+| `ollama` | `http://localhost:11434/v1` | Local endpoint; key is optional |
+| `lmstudio` | `http://localhost:1234/v1` | Local endpoint; key is optional |
+
+The default profile is `magpie`, for the official local Magpie gateway. Start
+Magpie first and add/sign in to at least one upstream provider there. Magpie
+does not define a universal model name, so choose one shown by its model catalog
+with `/config set model`; the model is sent unchanged. The first model request
+cannot succeed until a model is selected and Magpie is running.
+
+`provider` selects the OpenAI Chat Completions protocol adapter. The same
+adapter supports other compatible services: set `base_url` to the service's
+`/v1` root, `model` to its identifier, and provide the key it expects. You can
+also create a named custom profile by setting its provider name and a custom
+Base URL. Magpie sends `model`, `messages`, `tools`, and `tool_choice: "auto"`
+to `/chat/completions`; choose a model from Magpie's catalog and Nervipulsa
+passes its `provider/model` ID unchanged. API keys are sent as Bearer tokens.
+Native Anthropic Messages, OpenAI Responses, and Gemini transports are not
+implemented; Magpie can translate its upstream providers through this Chat
+Completions endpoint.
+
+Each profile stores its adapter, endpoint, model, and key separately. Switching
+providers without an explicit replacement Base URL selects that provider's
+saved endpoint or known default. Supply a new Base URL in the same configuration
+update to keep using a compatible gateway. Cloud presets require credentials;
+local or custom compatible endpoints may omit them if the server allows
+unauthenticated requests.
+
+### Precedence
+
+Configuration precedence is command line, `NERVIPULSA_*` environment variables,
+user configuration, then defaults. `--dir` fixes the workspace for the whole
+session. The API key can also be supplied as `NERVIPULSA_API_KEY`.
+
+Changing provider with `NERVIPULSA_PROVIDER` or `--provider` selects the matching
+profile and its endpoint. A base URL, model, or key specified at the same
+override level takes precedence. Provider settings are stored under the active
+profile.
+
+### Profiles and limits
+
+- `/config` opens full setup; `/config show` lists active settings with the API
+  key redacted.
+- `/config profiles` lists saved profiles and `/config use <name>` switches
+  profiles.
+- `/config set <provider|base-url|model|api-key>` securely prompts for one
+  value. Changes are saved and apply to the next model request.
+- `NERVIPULSA_CONTEXT_LIMIT` sets a serialized-transcript JSON-character limit,
+  not a tokenizer-token limit or an inferred model context window. Diagnostics
+  show this estimate separately from provider-reported usage; the estimate
+  excludes tool-schema and provider framing. If an activation still exceeds the
+  limit after compaction, Nervipulsa reports the estimate, configured limit,
+  newly added input size, recovered characters, and latest provider usage, then
+  pauses without sending that request.
+- `NERVIPULSA_MAX_OUTPUT_TOKENS` sets an optional `max_tokens` value on model
+  requests. When unset, the field is omitted and the provider default applies.
+
+When the projected context nears its budget, the LLM actor asks the same model
+to summarize older completed interactions. That summary replaces the prefix
+only after it succeeds; a failed summary keeps the original context. Events
+that arrive during the summary stay in the inbox and are read on a later turn.
+Current user requirements, pending tool calls, and the most recent completed
+fragment stay verbatim. Compaction does not re-execute code. Live worker epoch
+and unfinished executions are read from the runtime on each request, not from
+the summary. If the overrun comes from a duplicate history append or a budget
+below the fixed prompt, Nervipulsa reports that and does not compress it away.
+Original events stay in the journal.
+
+## CLI
+
+The interactive prompt supports in-session history (Up/Down), completion with
+Tab (including `/config` subcommands and fields), Enter to submit, Ctrl+J for
+multiline input, and safe async output while you are typing.
+
+- `/status` shows model, workspace, activation state, Python queue, and current
+  transcript size/remaining configured character budget.
+- `/cancel [execution_id]` cancels queued or running Python code.
+- `/retry` explicitly retries a paused model activation.
+- `/logs` shows recent events, context growth and limit, per-input
+  JSON-character additions, provider-reported usage, and Python output sizes.
+- `/inspect [session_id]` lists durable sessions or reads one session's
+  committed activations, transcript snapshots, and tool receipts. The output is
+  read-only; nothing is resumed or replayed.
+- `/effects` lists unresolved durable effects. `/effects history [limit]` shows
+  operator assessments, and `/effects decide <session_id> <execution_id>
+  <occurred|not_occurred|undetermined> --by "<operator>" --evidence
+  "<what was checked>"` appends one.
+- `/output <execution_id> [stdout|stderr|both]` retrieves complete output.
+- `/exit` drains and closes the runtime.
+- `/uninstall` asks for DELETE, then removes user config and the current
+  workspace's `.nervipulsa` data; project files and other workspaces are kept.
+
+Python submissions show the code, then the result: status, duration, output or
+the exception, and the context budget. Compression is mentioned only while it
+is happening. Event ids and delivery fields stay in `/logs`. Assistant text is
+shown only when the model actually wrote it. Each stream is limited to a 4 KiB
+preview in model history; larger streams are retained as full files under
+`.nervipulsa/outputs/` and remain available with `/output`. Paused activations
+print a recovery hint next to the error, for example `/retry`, `/inspect`, or a
+shorter new message.
+
+## Durable execution
+
+Python executions use a durable effect ledger. Before an execute frame is
+written to the worker IPC channel, the runtime commits an `intent` and then
+`dispatching` with SQLite `synchronous=FULL`; if either commit fails, it does
+not send the frame. A worker terminal is committed as `observed` before
+`python.finished` is published. If outcome persistence fails after dispatch,
+the terminal reports `unknown` and `/effects` lists the unresolved row for
+review.
+
+The protocol does not automatically replay Python or roll back side effects.
+Operator assessments recorded with `/effects decide` are self-reported
+attestations: they do not change worker state and never trigger a replay.
+Details and fault-injection evidence are in the
+[Durable Effect Protocol](docs/durable_effect_protocol.md).
+
+Activation, transcript snapshots, and tool acceptance receipts use separate
+synchronous commits (`FULL` + `BEGIN IMMEDIATE`). A failed commit raises
+explicitly and pauses as `commit_interrupted` rather than silently losing the
+record. After a restart, `/inspect` can read the previous session, but the
+runtime does not replay Python, refill the mailbox, or restore the worker
+namespace. Durable memory is inspectable, not automatically resumable.
+
+The journal's event observation path is asynchronous. Event acceptance does not
+mean those observations have been flushed to disk. A visible incomplete-journal
+marker is shown if its bounded observation queue fills or writing fails. Python
+dispatch additionally uses the synchronous durable effect commits above.
+
+## Embedding and extension
+
+### Composition
+
+The composition boundary lives in `nervipulsa.application`:
+`create_backend(settings)` selects a provider registry and
+`create_runtime(settings, workspace, echo=...)` assembles a session. Implement
+`ModelBackend.complete(request)` for another provider transport and register it
+through a `ProviderRegistry.create(settings)` implementation.
+
+Tool adapters implement `Tool` (`name`, `schema`, `validate`, and async
+`invoke`) and receive a narrow `ToolContext`: workspace and timeout settings
+plus an `EventSink.call(...)` interface. Add adapters to
+`DefaultToolRegistry(tools)` or supply a custom `ToolRegistry.create(workspace)`;
+the catalog is the actor's only tool dispatch surface. Built-in adapters live in
+`nervipulsa.tools`; the actor validates calls, stores tool receipts, journals
+them, and safely resumes interrupted commits.
 
 Minimal custom provider and tool registry wiring:
 
@@ -61,124 +247,76 @@ runtime = create_runtime(
 )
 ```
 
-For event driven work, a tool can emit a routed event through `context.event_sink`; the runtime validates and delivers it. The built-in adapters demonstrate the `python.requested` reservation and `python.environment_discovered` patterns. Existing `providers.tool_schema` and `providers.environment_tool_schema` exports remain compatibility aliases.
+For event-driven work, a tool can emit a routed event through
+`context.event_sink`; the runtime validates and delivers it. The built-in
+adapters demonstrate the `python.requested` reservation and
+`python.environment_discovered` patterns. Existing `providers.tool_schema` and
+`providers.environment_tool_schema` exports remain compatibility aliases.
 
-## Getting started
+### Host-owned behavior
 
-Python 3.11 or newer is required. From this directory:
+`Runtime` accepts application-level options that `create_runtime` does not
+forward. Construct it directly when you need them:
 
-    python -m pip install -e .
+- `system_prompt="..."` replaces the default system prompt. The transcript owns
+  the prompt; the host application decides its content.
+- `python_host=False` starts no worker, holds no Python queue, and does not
+  route `python.requested`. Pair it with a tool catalog that exposes no Python
+  tools; the default catalog still includes `python_exec`.
+- `response_commit_hook=async_callable` runs after response validation and
+  before recording or emitting the assistant response or invoking any tool.
+  Invalid responses do not invoke the hook; hook exceptions pause the activation
+  as `response_commit_failed`, emit an `agent.error`, and execute no tools.
+  An explicit retry (`/retry` or `Runtime.retry()`) calls the hook again with
+  the same activation and response, without a new model request. Hooks should
+  be idempotent because an exception may follow a successful external write,
+  and process interruption does not guarantee replay or exactly-once effects.
+  The hook must not mutate the response or activation.
+- `session_id="..."` gives the session a stable id so a later runtime can find
+  its last committed transcript.
 
-Then start the interactive CLI:
+After `start()` and before submitting new input,
+`restore_transcript(session_id=None)` reloads the last committed model view.
+It restores only the transcript: no mailbox frames, no activation ledger, no
+Python namespace, and no pending tool effects. Restoring
+replaces the model view and advances the event-id floor, but re-submitting an
+application observation creates a new id, so it does not guarantee
+deduplication of source observations or recovery of unfinished work.
 
-    nervipulsa --dir .
+### Structured observations
 
-`python -m nervipulsa --dir .` runs the same entry point without installing.
+`Runtime.submit_observation(mapping)` admits a JSON object as a
+`runtime.observation` event on the ordinary LLM mailbox. Values must be JSON
+data with string object keys, finite numbers, and at most 64 levels of nesting;
+the encoded payload is limited to 1 MiB. Admission snapshots the object and
+returns a `Delivery`; `invalid_payload`, `capacity_exceeded`, and runtime
+lifecycle refusals are possible. Admission alone does not mean the model saw the
+event. When processed, it is projected into a user-role message containing a
+`runtime_event` JSON envelope with its event ID, type, source and payload.
+Inspect activation input metrics and actual request attempts to distinguish
+projection from a provider request; a context or activation-budget pause can
+prevent presentation.
 
-The first run can open /config to set a provider, base URL, model, and API key.
-Configuration is saved under the platform user configuration directory,
-outside the workspace. The key is hidden while entering and is never written to
-the event journal or passed to the Python worker.
+Observations follow normal batching and do not reset the between-user
+activation budget. A new observation can recover an empty/invalid-response
+pause, but does not automatically recover a budget, context, unknown-response,
+or persistence failure pause. While paused, observation admission also counts
+events held by the actor against the ordinary mailbox limit. Existing
+non-observation producers retain their prior admission behavior.
 
-The default provider profile is `magpie`, for the official local Magpie gateway:
-`http://127.0.0.1:3425/v1` using the gateway token `magpie`. Start Magpie first
-and add/sign in to at least one upstream provider there. Magpie does not define a
-universal model name, so choose one shown by its model catalog with `/config set
-model`; the model is sent unchanged. The first model request cannot succeed until
-a model is selected and Magpie is running.
+### Input-to-output correlation
 
-`provider` selects the OpenAI Chat Completions protocol adapter. This also supports
-OpenAI-compatible services: set `base_url` to the service's `/v1` root, `model` to
-its model identifier, and provide the API key it expects. Other provider protocols
-such as native Anthropic or Gemini are not currently supported. API keys are sent
-as Bearer tokens. For Magpie, `/config profiles` lists saved profiles and `/config
-use <name>` switches profiles; `/config show` displays the active profile and
-redacts credentials. `/config set <provider|base-url|model|api-key>` updates the
-active profile, and changes apply to the next model request.
+`submit_text()` and `submit_observation()` return the accepted event id.
+`runtime.activation_for_event(event_id)` returns the activation that consumed
+that input, if any. `await runtime.wait_for_activation(input_event_id=...,
+timeout=...)` waits until that activation commits, pauses, or fails; `None`
+means the timeout elapsed or nothing has consumed the input yet. Pass
+`after_version` to wait past a retry of the same activation.
 
-Configuration precedence is command line, NERVIPULSA_* environment variables,
-user configuration, then defaults. `--dir` fixes the workspace for the whole
-session. The API key can also be supplied as NERVIPULSA_API_KEY. Provider profiles
-are saved separately in the user configuration file, so switching profiles
-restores each profile's adapter, endpoint, model, and key.
-
-Switching providers without an explicit replacement Base URL selects that
-provider's saved endpoint or known default. The OpenAI default is
-`https://api.openai.com/v1`; Magpie uses the local gateway endpoint above. Supply a
-new Base URL in the same configuration update to keep using a compatible gateway.
-
-The interactive prompt supports in-session history (Up/Down), completion with
-Tab (including /config subcommands and fields), Enter to submit, Ctrl+J for
-multiline input, and safe async output while you are typing.
-
-## Provider presets
-
-Built-in profiles are available for `magpie`, `openai`, `deepseek`, `openrouter`, `ollama`, and `lmstudio`:
-
-| Profile | Base URL | Credential behavior |
-| --- | --- | --- |
-| `magpie` | `http://127.0.0.1:3425/v1` | Uses the local gateway token `magpie` by default |
-| `openai` | `https://api.openai.com/v1` | Requires a key; falls back to `OPENAI_API_KEY` |
-| `deepseek` | `https://api.deepseek.com` | Requires a key; falls back to `DEEPSEEK_API_KEY` |
-| `openrouter` | `https://openrouter.ai/api/v1` | Requires a key; falls back to `OPENROUTER_API_KEY` |
-| `ollama` | `http://localhost:11434/v1` | Local endpoint; key is optional |
-| `lmstudio` | `http://localhost:1234/v1` | Local endpoint; key is optional |
-
-Each profile uses the OpenAI Chat Completions protocol. Magpie sends `model`, `messages`, `tools`, and `tool_choice: "auto"` to `/chat/completions`; choose a model from Magpie's model catalog and Nervipulsa passes its `provider/model` ID unchanged. You can also create a named custom profile by setting its provider name and a custom Base URL. Native Anthropic Messages, OpenAI Responses, and Gemini transports are not implemented in Nervipulsa; Magpie can translate its upstream providers through this Chat Completions endpoint. Cloud presets require credentials, while local/custom compatible endpoints may omit them if their server allows unauthenticated requests.
-
-Changing provider with `NERVIPULSA_PROVIDER` or `--provider` selects the matching
-profile and its endpoint. A base URL, model, or key specified at the same override
-level takes precedence. Provider settings are stored under the active profile.
-
-- /config opens full setup; /config show lists active settings with the API
-  key redacted.
-- /config set <provider|base-url|model|api-key> securely prompts for one value.
-- Configuration changes are saved and apply to the next model request.
-- /status shows model, workspace, activation state, Python queue, and current
-  transcript size/remaining configured character budget.
-- /cancel <execution_id> cancels queued or running Python code.
-- /retry explicitly retries a paused model activation.
-- /logs shows recent events, context growth and limit, per-input JSON-character
-  additions, provider-reported usage, and Python output sizes.
-- /output <execution_id> [stdout|stderr|both] retrieves complete output.
-- /exit drains and closes the runtime.
-- /uninstall asks for DELETE, then removes user config and the current
-  workspace's .nervipulsa data; project files and other workspaces are kept.
-
-`NERVIPULSA_CONTEXT_LIMIT` sets a serialized-transcript JSON-character limit,
-not a tokenizer-token limit or an inferred model context window. Diagnostics
-show this estimate separately from provider-reported usage; the estimate
-excludes tool-schema and provider framing. If an activation still exceeds the
-limit after compaction, Nervipulsa reports the estimate, configured limit,
-newly added input size, recovered characters, and latest provider usage, then
-pauses without sending that request.
-
-When the projected context nears its budget, the LLM actor asks the same model
-to summarize older completed interactions. That summary replaces the prefix
-only after it succeeds; a failed summary keeps the original context. Events
-that arrive during the summary stay in the inbox and are read on a later turn.
-Current user requirements, pending tool calls, and the most recent completed
-fragment stay verbatim. Compaction does not re-execute code. Live worker epoch
-and unfinished executions are read from the runtime on each request, not from
-the summary. If the overrun comes from a duplicate history append or a budget
-below the fixed prompt, Nervipulsa reports that and does not compress it away.
-Original events stay in the journal.
-
-Python submissions show the code, then the result: status, duration, output or
-the exception, and the context budget. Compression is mentioned only while it
-is happening. Event ids and delivery fields stay in `/logs`. Assistant text is
-shown only when the model actually wrote it. Each stream is limited to a 4 KiB
-preview in model history; larger streams are retained as full files under
-`.nervipulsa/outputs/` and remain available with `/output`.
-
-Run the no-credential end-to-end trace with:
-
-    python -m nervipulsa.demo --scripted
-
-The trace edits a file in a temporary workspace, accepts an inserted user
-message while Python is running, and feeds the terminal result into a later
-activation. This demonstrates the scripted protocol only; a real model/provider
-has not been validated by that command.
+Each settle increments `Activation.settle_version` and emits
+`agent.activation_finished` into the trace and journal with the activation id,
+input event ids, status, error kind, end time, and settle version. Retry reuses
+the same activation object, so `input_event_ids` stays stable across retries.
 
 ## Tests
 
@@ -194,6 +332,9 @@ Coverage spans the event kernel, real worker, actor, CLI, and provider boundary:
 - scripted actor: batch projection, one native receipt per tool call,
   activation-ledger recovery, context accounting and provider-usage journaling,
   atomic history compaction, and no replay of completed executions;
+- durable behavior: activation/transcript/tool-receipt commits, corrupt
+  snapshots, transcript restore limits, and explicit commit-interruption
+  pauses;
 - CLI: bounded code previews, status/duration/exception summaries, full output
   retrieval, context logs, provider switching, and journal migration;
 - provider boundary: OpenAI-compatible HTTP requests against a local stub,
@@ -236,10 +377,10 @@ credentials and spend tokens, so they stay out of `pytest`:
 Each run keeps its workspace, event trace, and token usage under `.scratch/`.
 Two runs against `deepseek-flash` passed all three experiments using the
 previous raw HTTP adapter; they are historical evidence, not validation of the
-current HTTP adapter. See `TEST_RESULTS.md` for per-run metrics and the
-timeout corrected in experiment 3. Provider tests use a local HTTP stub; they
-make no live provider requests. After automated tests, configure the actual
-provider, base URL, model, and key in the Magpie CLI for a separate live user test.
+current HTTP adapter. See `TEST_RESULTS.md` for per-run metrics and the timeout
+corrected in experiment 3. Provider tests use a local HTTP stub; they make no
+live provider requests. After automated tests, configure the actual provider,
+base URL, model, and key in the Magpie CLI for a separate live user test.
 
 ## Files
 
@@ -256,30 +397,29 @@ provider, base URL, model, and key in the Magpie CLI for a separate live user te
 | `nervipulsa/python_worker.py` | IPC frames, persistent namespace, output |
 | `nervipulsa/framing.py` | Length-prefixed JSON control frames |
 | `nervipulsa/process_tree.py` | Filtered environment, spawn and tree cleanup |
+| `nervipulsa/appcontainer.py` | Experimental Windows AppContainer worker isolation |
 | `nervipulsa/journal.py` | Asynchronous observations and synchronous durable effect commits |
 | `nervipulsa/config.py` | Precedence, persistence, redaction |
 | `nervipulsa/cli.py` | Input, display, commands |
-| `nervipulsa/runtime.py` | Session wiring and event routing |
+| `nervipulsa/runtime.py` | Session wiring, event routing, durable inspection |
+| `nervipulsa/demo.py` | Credential-free scripted end-to-end trace |
 | `examples/real_model_experiments.py` | Runnable driver for the three live checks |
 | `examples/REAL_MODEL.md` | What each live check means and how to read it |
 | `benchmarks/bench_runtime.py` | Credential-free mechanism benchmarks |
-| `docs/research_worker_handler_bridge.md` | v0.5 research: programmable worker event handlers |
+| `docs/README.md` | Documentation index and evidence boundaries |
 | `TEST_RESULTS.md` | Recorded scripted and real-model results |
 
 ## Execution boundary
 
-python_exec runs arbitrary code with the current user's operating-system
-permissions. --dir selects the default working directory; it is not a sandbox.
+`python_exec` runs arbitrary code with the current user's operating-system
+permissions. `--dir` selects the default working directory; it is not a sandbox.
 Use this only with trusted local workspaces. The worker keeps Python variables
 and imports between calls. Timeout and running cancellation terminate the
 worker and reset that namespace. File and external side effects are not rolled
 back.
 
-The journal's event observation path is asynchronous. Event acceptance does not
-mean those observations have been flushed to disk. A visible incomplete-journal
-marker is shown if its bounded observation queue fills or writing fails. Python
-dispatch additionally uses synchronous durable effect commits in the same SQLite
-file, as described in [Architecture](docs/architecture.md#5-持久性边界).
+Python dispatch uses synchronous durable effect commits in the same SQLite file,
+as described in [Architecture](docs/architecture.md#5-持久性边界).
 
 ### Experimental Windows AppContainer worker
 
@@ -308,19 +448,22 @@ access and works as-is, while a python.org or `hostedtoolcache` installation
 grants read access only to SYSTEM, Administrators, and the interactive user, so
 it needs an explicit `ALL APPLICATION PACKAGES` read grant on the interpreter
 tree. Without that grant the worker exits before running Python; the host
-reports the exit code and interpreter path instead of an empty startup error. It does not provide resource limits or a complete defense
-against all Windows brokered resources. The link scan happens before ACL changes,
-so a separate process that can mutate the selected trees concurrently could race
-that scan; use this prototype with a workspace that is not being changed by an
-untrusted process. Filesystem APIs that canonicalize paths through protected
-parent directories can fail inside the container; the built-in Hashline library
+reports the exit code and interpreter path instead of an empty startup error.
+
+It does not provide resource limits or a complete defense against all Windows
+brokered resources. The link scan happens before ACL changes, so a separate
+process that can mutate the selected trees concurrently could race that scan;
+use this prototype with a workspace that is not being changed by an untrusted
+process. Filesystem APIs that canonicalize paths through protected parent
+directories can fail inside the container; the built-in Hashline library
 instead uses workspace-rooted lexical checks and rejects reparse points. The
 default remains the existing unsandboxed worker unless the opt-in variable is set.
 
 ## Hashline Edit for workspace files
 
-The persistent Python worker includes `nervipulsa.hashline_edit`, the first project
-specific Python library. It follows the snapshot tag and `PUT` syntax used by
+The persistent Python worker includes `nervipulsa.hashline_edit`, the first
+project specific Python library. It follows the snapshot tag and `PUT` syntax
+used by
 [OMP Hashline Edit](https://github.com/can1357/oh-my-pi/blob/main/docs/tools/edit.md).
 The independent Python implementation references OMP's
 [format helpers](https://github.com/can1357/oh-my-pi/blob/main/crates/pi-edit/src/modes/hashline/format.rs),
@@ -342,18 +485,13 @@ PUT 2.=2:
 
 Tags are four uppercase hex digits from the low 16 bits of xxHash32 over the
 normalized whole-file snapshot. Every edit uses the latest view tag and original
-line numbers. Supported operations are range replacement (`PUT N.=M:`), insertion
-before/after a line (`PUT <N:` / `PUT >N:`), and end insertion (`PUT >$:`). Each
-replacement row starts with `+`. Files are limited to 4 MiB; snapshots are bounded
-and stale content is rejected. The implementation is independently written in
-Python and supports only this PUT subset: no syntax-tree block edits, CUT, MV, REM,
-stale-tag recovery, or seen-line enforcement. This helper is not a Python sandbox.
-
-## Documentation
-
-Start with [Architecture](docs/architecture.md) for the current implementation.
-See the [documentation index](docs/README.md) for the append-only research log,
-paper draft, failure reports, user experience review, and their evidence boundaries.
+line numbers. Supported operations are range replacement (`PUT N.=M:`),
+insertion before/after a line (`PUT <N:` / `PUT >N:`), and end insertion
+(`PUT >$:`). Each replacement row starts with `+`. Files are limited to 4 MiB;
+snapshots are bounded and stale content is rejected. The implementation is
+independently written in Python and supports only this PUT subset: no syntax-tree
+block edits, CUT, MV, REM, stale-tag recovery, or seen-line enforcement. This
+helper is not a Python sandbox.
 
 ## Development status
 
@@ -365,48 +503,17 @@ This package stays labeled v0.4-dev. Three claims are kept separate:
   `python -m nervipulsa.demo --scripted` exit non-zero on any assertion
   failure, so a green run means the scripted protocol and the real process
   tests passed on this machine.
-- **Historical real-model runs (previous adapter).** Two `deepseek-flash` runs passed
-  all three experiments using the previous raw HTTP adapter; metrics are in
-  `TEST_RESULTS.md`. They do not verify the current adapter; no live provider
+- **Historical real-model runs (previous adapter).** Two `deepseek-flash` runs
+  passed all three experiments using the previous raw HTTP adapter; metrics are
+  in `TEST_RESULTS.md`. They do not verify the current adapter; no live provider
   was called after migration.
-
-## Structured observations and response persistence
-
-`Runtime.submit_observation(mapping)` admits a JSON object as a `runtime.observation`
-event on the ordinary LLM mailbox. Values must be JSON data with string object
-keys, finite numbers, and at most 64 levels of nesting; the encoded payload is
-limited to 1 MiB. Admission snapshots the object and returns a `Delivery`;
-`invalid_payload`, `capacity_exceeded`, and runtime lifecycle refusals are possible.
-Admission alone does not mean the model saw the event. When processed, it is
-projected into a user-role message containing a `runtime_event` JSON envelope
-with its event ID, type, source and payload. Inspect activation input metrics and
-actual request attempts to distinguish projection from a provider request; a
-context or activation-budget pause can prevent presentation.
-
-Observations follow normal batching and do not reset the between-user activation
-budget. A new observation can recover an empty/invalid-response pause, but does
-not automatically recover a budget, context, unknown-response, or persistence
-failure pause. While paused, observation admission also counts events held by the
-actor against the ordinary mailbox limit. Existing non-observation producers
-retain their prior admission behavior.
-
-Applications may pass `response_commit_hook=async_callable` to `Runtime`. After
-validating a response, the actor awaits `async_callable(activation, response)`
-before recording or emitting the assistant response or invoking any tool. Invalid
-responses do not invoke the hook; an explicit application `no_action` tool is a
-normal valid tool call. Hook exceptions pause the activation as
-`response_commit_failed`, emit an `agent.error`, and execute no tools. Explicit
-`retry()` calls the hook again with the same activation and response, without a
-new model request. Hooks should be idempotent because an exception may follow a
-successful external write, and process interruption does not guarantee replay or
-exactly-once effects. The hook must not mutate the response or activation.
 
 Known boundaries: `python_exec` runs with the current user's permissions and is
 not a sandbox; event admission is process-local, and the runtime does not provide
-general task/transcript recovery, rollback of file writes, or exactly-once external
-effects. The durable effect ledger records intent and unresolved outcomes for
-manual review; it does not replay executions. The two 2026-10-13 process-kill probes
-in [`docs/failure_semantics.md`](docs/failure_semantics.md) predate that ledger and
-cover only their explicitly flushed baseline windows. See
+general task/transcript recovery, rollback of file writes, or exactly-once
+external effects. The durable effect ledger records intent and unresolved
+outcomes for manual review; it does not replay executions. The two 2026-10-13
+process-kill probes in [`docs/failure_semantics.md`](docs/failure_semantics.md)
+predate that ledger and cover only their explicitly flushed baseline windows. See
 [`docs/durable_effect_protocol.md`](docs/durable_effect_protocol.md) for its current
 contract and fault-injection evidence.

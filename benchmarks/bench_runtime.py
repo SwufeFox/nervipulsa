@@ -1,4 +1,4 @@
-"""Micro + end-to-end benchmarks for the v0.4 runtime.
+"""Micro + end-to-end benchmarks for the runtime.
 
 These measure mechanism, not model quality:
 

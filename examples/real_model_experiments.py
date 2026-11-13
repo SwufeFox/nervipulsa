@@ -1,4 +1,4 @@
-"""Real-model experiments from Nervipulsa_Design_v0.4.md section 13.3.
+"""Real-model experiments from Nervipulsa_Design.md section 13.3.
 
 Run one experiment or all three against a live OpenAI-compatible endpoint:
 

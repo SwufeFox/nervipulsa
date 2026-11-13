@@ -18,7 +18,7 @@ architecture reference and the tests in this tree.
 | --- | --- | --- |
 | [Current implementation architecture](architecture.md) | Authoritative onboarding map of the control chain, module/state ownership, durable memory and effect boundaries, activation correlation, bounded diagnostics, failure semantics, and deferred decisions. | Maintained against this checkout; source review plus the local test suite. It does not claim live-provider, long-run, or hostile-workspace validation. |
 | [Durable Effect Protocol](durable_effect_protocol.md) | Current ledger states, synchronous commit boundaries, `/effects` operator assessments, SQLite failure injection, and process-termination results. | Tracks worker observation and operator attestations separately; no automatic replay, rollback, or exactly-once guarantee. |
-| [Design contract](../Nervipulsa_Design_v0.4.md) | Intended v0.4 behavior, including the invariants and required coverage in section 13. | Design intent and acceptance criteria, not implementation evidence. |
+| [Design contract](../Nervipulsa_Design.md) | Intended behavior, including the invariants and required coverage in section 13. | Design intent and acceptance criteria, not implementation evidence. |
 | [Recorded results](../TEST_RESULTS.md) | Historical benchmark and real-model measurements with their dates and adapter context. | Attached to the recorded revision and environment; earlier adapter runs do not validate the current adapter. |
 
 ## Research and historical records

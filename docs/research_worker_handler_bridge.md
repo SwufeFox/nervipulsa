@@ -1,7 +1,7 @@
 # Nervipulsa 研究备忘录：worker 侧 `call/handle` 桥接接口
 
-状态：研究草案（v0.4 基线上的 v0.5 方向探索）· 本文只做设计与风险评估，不改内核。
-关联：`Nervipulsa_Design_v0.4.md` §14「未来最值得单独验证的扩展」。
+状态：研究草案 · 本文只做设计与风险评估，不改内核。
+关联：`Nervipulsa_Design.md` §14「未来最值得单独验证的扩展」。
 
 ## 0. 一句话主张
 
@@ -253,7 +253,7 @@ handler 触发投递到 **LLM inbox**，不直接产生 `python.finished`——h
 
 ## 7. 对既有文档的影响（若 S2 以后落地）
 
-- `Nervipulsa_Design_v0.4.md` §14 的"本版不实现：运行时注册或热插拔事件 handler"
-  行需改为"v0.5 候选，见研究备忘录"。
+- `Nervipulsa_Design.md` §14 的"本版不实现：运行时注册或热插拔事件 handler"
+  行需改为"候选扩展，见研究备忘录"。
 - README 的工具描述与 Execution boundary 需说明 handler 与 `python_exec` 同权。
 - `TEST_RESULTS.md` 需新增 handler 注册/触发/epoch 切换的记录。

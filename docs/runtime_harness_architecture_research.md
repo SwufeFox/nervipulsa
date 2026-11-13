@@ -893,7 +893,7 @@ DACL 差异与该解释一致：Store 树含 `S-1-19-512-4096:(OI)(CI)(RX,...)` 
 
 以上全部为本机 Windows 结果，不等于 hosted CI 通过；本轮未提交、未推送，`.github/workflows/tests.yml` 的 Ubuntu/Windows 3.11 矩阵在本轮改动上尚无任何运行记录。修 2 只**消除了无界增长的结构**（不再有只写不读的强引用容器），**没有**实测长跑会话的内存曲线改善，也没有测量 RSS、对象数或 GC 压力；因此不能把本条读作「长跑内存问题已解决」。同理，修 1 证明的是 `agent.error` 能到达 `ui` mailbox 并被 `_render` 写成一行 echo，不代表终端 UI 的措辞、限流或 `/logs` 表现已验收。
 
-## 2026-10-21 v0.5 durable memory 切片（Transcript / Activation / Tool Receipt 可检查、不可自动继续）
+## 2026-10-21 durable memory 切片（Transcript / Activation / Tool Receipt 可检查、不可自动继续）
 
 ### 做了什么
 - `nervipulsa/journal.py`：新增 `durable_transcript_snapshots` / `durable_activation_commits` / `durable_tool_receipts`

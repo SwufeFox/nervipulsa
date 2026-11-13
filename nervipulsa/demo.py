@@ -1,4 +1,4 @@
-"""No-credential trace of the v0.4 asynchronous contract.
+"""No-credential trace of the asynchronous contract.
 
 Passing this command shows the scripted protocol only. It does not validate a
 real model or provider.

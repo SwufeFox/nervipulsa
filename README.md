@@ -1,10 +1,10 @@
-# Nervipulsa v0.4-dev
+# Nervipulsa
 
 Nervipulsa is a local, event-driven coding-agent runtime. User messages, model
 actions, and Python results travel as events. Model inference never waits for
 Python execution, so the CLI can accept another message while code is running.
 
-This checkout contains a v0.4 development implementation. The scripted runtime
+This checkout contains a development implementation. The scripted runtime
 exercises the asynchronous event contract without credentials. Live model calls
 use the OpenAI Chat Completions HTTP protocol directly. Nervipulsa keeps its own
 tool execution, transcript, and retry state; no model SDK is required.
@@ -13,7 +13,7 @@ tool execution, transcript, and retry state; no model SDK is required.
   module and state ownership, persistence, and security boundaries.
 - [Documentation index](docs/README.md) — current references, dated research,
   and their evidence boundaries.
-- [Design contract](Nervipulsa_Design_v0.4.md) — intended v0.4 behavior and
+- [Design contract](Nervipulsa_Design.md) — intended behavior and
   invariants.
 - [Recorded results](TEST_RESULTS.md) — scripted benchmarks and historical
   real-model runs.
@@ -495,7 +495,7 @@ records the comparison, including shared-journal failures and capacity limits.
 
 ## Real-model checks
 
-The three experiments in `Nervipulsa_Design_v0.4.md` section 13.3 need
+The three experiments in `Nervipulsa_Design.md` section 13.3 need
 credentials and spend tokens, so they stay out of `pytest`:
 
     NV_BASE_URL=... NV_API_KEY=... NV_MODEL=... \
@@ -654,9 +654,9 @@ helper is not a Python sandbox.
 
 ## Development status
 
-This package stays labeled v0.4-dev. Three claims are kept separate:
+This is a development runtime. Three claims are kept separate:
 
-- **Design promise.** The contract in `Nervipulsa_Design_v0.4.md` is the
+- **Design promise.** The contract in `Nervipulsa_Design.md` is the
   intended behavior, including the invariants in section 13.1.
 - **Automated tests pass.** `pytest -q` and
   `python -m nervipulsa.demo --scripted` exit non-zero on any assertion

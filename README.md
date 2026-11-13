@@ -35,7 +35,8 @@ key. Configuration is saved under the platform user configuration directory,
 outside the workspace. The key is hidden while entering and is never written to
 the event journal or passed to the Python worker. At startup, the CLI prints the
 active profile, endpoint, and key state, then a `next` line for each missing
-prerequisite such as an unset model or provider key.
+prerequisite such as an unset model or provider key. For loopback endpoints it
+also probes the port and warns when nothing is listening.
 
 Run the no-credential end-to-end trace with:
 
@@ -159,6 +160,51 @@ preview in model history; larger streams are retained as full files under
 print a recovery hint next to the error, for example `/retry`, `/inspect`, or a
 shorter new message.
 
+### One-shot and subagent use
+
+`--prompt` runs a single task without the interactive loop. The prompt is
+submitted as a user message, not parsed as a slash command:
+
+    nervipulsa --dir . --prompt "Fix the failing test in examples/bugfix" \
+      --run-timeout 300
+
+Add `--json` to get one machine-readable result on stdout; startup, tool output,
+and assistant streaming go to stderr:
+
+    nervipulsa --dir . --prompt "..." --json --run-timeout 300 > result.json
+
+The JSON object contains `ok`, `status` (`succeeded`, `paused`, `rejected`,
+`failed`, or `timeout`), `exit_code`, `session_id`, `final_message`,
+`delivery`, `activation` (id, status, tool calls, attempt count, last-request usage),
+`pause` (kind, message, recovery hint), `error`, `transcript_chars`, and
+`resume`. `succeeded` means the runtime became idle with its last activation
+committed and cleanup completed; it does not verify that the model fulfilled
+the task. `final_message` contains the last recorded assistant text; a response
+whose commit hook failed is not published.
+
+Exit codes are 0 for success, 1 for paused/rejected/failed, 124 for a completion
+timeout, and 130 for interruption. `--json` requires `--prompt`.
+`--run-timeout` starts after prompt submission, or after EOF for piped input;
+0 means no limit. Expiry stops waiting and initiates shutdown. Startup, worker
+cleanup, and an already-running blocking HTTP request can extend process exit
+beyond that deadline. Use a parent-process deadline when a hard time limit is
+required. Cancellation does not roll back file or external side effects.
+
+Give a task a stable id and continue it later:
+
+    nervipulsa --dir . --prompt "My name is Ada." --session-id demo --json
+    nervipulsa --dir . --prompt "What is my name?" --session-id demo --resume --json
+
+`--resume` requires `--session-id` and restores only the newest committed
+transcript snapshot. Mailbox frames, the activation ledger, the Python
+namespace, and pending effects are not restored; inspect them with `/inspect`
+or `/effects`. Sequential reuse of a session with existing journal history
+requires `--resume`, including sessions with effect rows but no transcript.
+Startup reserves event IDs above those already stored in observations, durable
+inputs, effects, and receipts. Events omitted from the model view must not be
+overwritten by the next invocation. Use one live process per journal/session;
+concurrent writers to the same session are not supported.
+
 ## Durable execution
 
 Python executions use a durable effect ledger. Before an execute frame is
@@ -275,13 +321,16 @@ forward. Construct it directly when you need them:
 - `session_id="..."` gives the session a stable id so a later runtime can find
   its last committed transcript.
 
-After `start()` and before submitting new input,
-`restore_transcript(session_id=None)` reloads the last committed model view.
-It restores only the transcript: no mailbox frames, no activation ledger, no
-Python namespace, and no pending tool effects. Restoring
-replaces the model view and advances the event-id floor, but re-submitting an
-application observation creates a new id, so it does not guarantee
-deduplication of source observations or recovery of unfinished work.
+For asynchronous startup, `await runtime.start(restore_transcript=True)` loads
+the latest committed model view off the event loop and applies it before actors
+start. It returns the restoration report. The synchronous
+`restore_transcript(session_id=None)` API remains available after `start()` and
+before submitting input. Both restore only the transcript: no mailbox frames,
+activation ledger, Python namespace, or pending tool effects. Explicit session
+IDs reserve previously persisted event sequence numbers during startup even
+when no transcript exists. Resubmitting an application observation creates a
+new event ID; restoration does not deduplicate source observations or recover
+unfinished work.
 
 ### Structured observations
 
@@ -503,10 +552,12 @@ This package stays labeled v0.4-dev. Three claims are kept separate:
   `python -m nervipulsa.demo --scripted` exit non-zero on any assertion
   failure, so a green run means the scripted protocol and the real process
   tests passed on this machine.
-- **Historical real-model runs (previous adapter).** Two `deepseek-flash` runs
-  passed all three experiments using the previous raw HTTP adapter; metrics are
-  in `TEST_RESULTS.md`. They do not verify the current adapter; no live provider
-  was called after migration.
+- **Live-model evidence.** The earlier three-experiment runs used the previous
+  adapter. A separate 2026-11-13 smoke used the current adapter through Magpie
+  with `deepseek/deepseek-flash`: file execution, JSON results, and transcript
+  continuation were checked. Commands, results, and limits are recorded in
+  [TEST_RESULTS.md](TEST_RESULTS.md); neither set establishes general model
+  quality or production reliability.
 
 Known boundaries: `python_exec` runs with the current user's permissions and is
 not a sandbox; event admission is process-local, and the runtime does not provide

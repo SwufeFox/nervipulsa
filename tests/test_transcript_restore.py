@@ -90,6 +90,79 @@ def test_restart_restores_previous_conversation(tmp_path):
     asyncio.run(run())
 
 
+def test_restart_keeps_inputs_and_unprojected_events_in_journal(tmp_path):
+    async def run():
+        sid = "journal-continuation"
+        backend = Backend(answer("first answer"), answer("second answer"))
+        previous_seq = 0
+        expected = []
+        for text in ("first input", "second input"):
+            runtime = Runtime(Settings(), backend, tmp_path, python_host=False,
+                              session_id=sid)
+            try:
+                await runtime.start()
+                if previous_seq:
+                    assert runtime.session_reused is True
+                    assert runtime.restore_transcript()["seq_floor"] >= previous_seq
+                delivery = runtime.submit_text(text)
+                assert delivery.accepted
+                assert int(delivery.event_id[4:]) > previous_seq
+                assert await runtime.wait_until_idle(timeout=10)
+                previous_seq = runtime.bus.seq
+                expected.extend(
+                    (event.id, event.seq, event.type, dict(event.payload))
+                    for event in runtime.trace
+                )
+            finally:
+                await runtime.shutdown()
+        connection = sqlite3.connect(runtime.journal_path)
+        try:
+            rows = connection.execute(
+                "SELECT id,seq,type,payload_json FROM events WHERE session_id=? ORDER BY seq",
+                (sid,),
+            ).fetchall()
+        finally:
+            connection.close()
+        assert [(event_id, seq, kind, json.loads(payload))
+                for event_id, seq, kind, payload in rows] == expected
+        assert [json.loads(payload)["text"] for _, _, kind, payload in rows
+                if kind == "user.message"] == ["first input", "second input"]
+
+    asyncio.run(run())
+
+
+def test_restart_reserves_effect_ids_without_a_transcript(tmp_path):
+    async def run():
+        sid = "effect-only"
+        execution_id = "evt_00000080"
+        first = Runtime(Settings(), Backend(), tmp_path, python_host=False, session_id=sid)
+        try:
+            await first.start()
+            await asyncio.to_thread(first.journal.prepare_effect, sid, execution_id)
+            await asyncio.to_thread(first.journal.mark_effect_dispatching, sid, execution_id)
+        finally:
+            await first.shutdown()
+        second = Runtime(Settings(), Backend(answer()), tmp_path,
+                         python_host=False, session_id=sid)
+        try:
+            await second.start()
+            assert second.session_reused is True
+            assert second.restore_transcript()["reason"] == "no_snapshot"
+            assert second.actor.transcript.messages == []
+            delivery = second.submit_text("inspect, do not replay")
+            assert delivery.accepted
+            assert int(delivery.event_id[4:]) > 80
+            assert await second.wait_until_idle(timeout=10)
+            effects = await asyncio.to_thread(second.unresolved_effects)
+            assert [(row["execution_id"], row["state"]) for row in effects] == [
+                (execution_id, "dispatching")
+            ]
+        finally:
+            await second.shutdown()
+
+    asyncio.run(run())
+
+
 def test_live_system_prompt_wins_over_snapshot(tmp_path):
     async def run():
         sid = "persona-scope"

@@ -160,6 +160,48 @@ def test_namespace_cwd_streams_and_immediate_accept(workspace: Path) -> None:
     asyncio.run(body())
 
 
+def test_system_exit_zero_succeeds_and_nonzero_fails(workspace: Path) -> None:
+    async def body() -> None:
+        rig = HostRig(workspace)
+        try:
+            zero = rig.request("kept_value = 42\nprint('bye')\nraise SystemExit(0)")
+            clean = await _wait(rig.llm, "python.finished", reply_to=zero.event_id)
+            assert clean.payload["status"] == "succeeded"
+            assert clean.payload["stdout"] == "bye\n"
+            assert "exception" not in clean.payload
+            assert "SystemExit" not in clean.payload["stderr"]
+
+            three = rig.request("raise SystemExit(3)")
+            failed = await _wait(rig.llm, "python.finished", reply_to=three.event_id)
+            assert failed.payload["status"] == "failed"
+            assert failed.payload["exception"] == "SystemExit: 3"
+
+            no_code = rig.request("raise SystemExit()")
+            normal = await _wait(rig.llm, "python.finished", reply_to=no_code.event_id)
+            assert normal.payload["status"] == "succeeded"
+
+            float_code = rig.request("raise SystemExit(0.0)")
+            invalid = await _wait(rig.llm, "python.finished", reply_to=float_code.event_id)
+            assert invalid.payload["status"] == "failed"
+
+            bad_code = rig.request(
+                "class BadExit:\n"
+                "    def __str__(self):\n"
+                "        raise RuntimeError('cannot format')\n"
+                "raise SystemExit(BadExit())"
+            )
+            contained = await _wait(rig.llm, "python.finished", reply_to=bad_code.event_id)
+            assert contained.payload["status"] == "failed"
+            assert contained.payload["namespace_reset"] is False
+            check = rig.request("print(kept_value)")
+            kept = await _wait(rig.llm, "python.finished", reply_to=check.event_id)
+            assert kept.payload["stdout"] == "42\n"
+        finally:
+            await rig.close()
+
+    asyncio.run(body())
+
+
 def test_observed_effect_is_committed_before_finished(workspace: Path) -> None:
     import sqlite3
 

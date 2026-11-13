@@ -49,6 +49,12 @@ _PAUSE_HINTS = {
     "response_commit_failed": "Run /retry to run the commit hook again; keep the hook idempotent.",
 }
 
+
+def pause_hint(kind: str | None) -> str | None:
+    """Recovery advice for a pause kind, or None for an unknown kind."""
+    return _PAUSE_HINTS.get(kind or "")
+
+
 # How many settled request views stay reachable in memory. Each one is the exact
 # message list a model request carried, so it is the largest per-activation
 # object; the journal keeps a durable transcript snapshot per activation, which

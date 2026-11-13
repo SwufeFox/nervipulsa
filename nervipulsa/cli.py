@@ -5,12 +5,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
 import shlex
 import shutil
+import socket
+import time
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -20,6 +25,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from .config import PROVIDER_DEFAULTS, Settings, config_path, load_settings, save_settings
 from .application import create_backend, create_runtime
+from .events import Delivery
 from .providers import PROVIDER_KEY_ENV, REQUIRED_KEY_PROVIDERS
 from .runtime import Runtime
 
@@ -123,11 +129,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-activations", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=None, help="Default python_exec timeout in seconds")
     parser.add_argument("--max-timeout", type=float, default=None)
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="Run one prompt, wait for completion, print a result, and exit",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With --prompt: emit one JSON result on stdout and diagnostics on stderr",
+    )
+    parser.add_argument(
+        "--run-timeout",
+        type=float,
+        default=0.0,
+        help="Completion-wait seconds after submission (stdin: after EOF); 0 means no limit",
+    )
+    parser.add_argument(
+        "--session-id",
+        default=None,
+        help="Stable session id, useful with --resume and durable inspection",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Restore the last committed transcript for --session-id before running",
+    )
     return parser
 
 
-def settings_from_args(argv: list[str] | None = None) -> Settings:
-    args = build_parser().parse_args(argv)
+def _settings_from_args(args: argparse.Namespace) -> Settings:
     cli: dict[str, object] = {}
     if args.dir:
         cli["workspace"] = args.dir
@@ -149,6 +180,10 @@ def settings_from_args(argv: list[str] | None = None) -> Settings:
     if not settings.workspace:
         settings.workspace = str(Path.cwd())
     return settings
+
+
+def settings_from_args(argv: list[str] | None = None) -> Settings:
+    return _settings_from_args(build_parser().parse_args(argv))
 
 
 def handle_line(runtime: Runtime, line: str) -> bool:
@@ -468,6 +503,8 @@ def _show_status(runtime: Runtime) -> None:
             )
     runtime.echo(f"context  {used:,}/{limit:,}  {percent}%{compressing}")
     runtime.echo(f"worker epoch {status['worker_epoch']}  {journal}  api key {status['api_key']}")
+    if status.get("pause_hint"):
+        runtime.echo(f"next  {status['pause_hint']}")
 
 
 def _show_config(runtime: Runtime) -> None:
@@ -628,8 +665,30 @@ def _effective_api_key(settings: Settings) -> str | None:
     return os.environ.get(env_name) if env_name else None
 
 
-def _startup_hints(settings: Settings) -> list[str]:
-    """Actionable preflight problems; empty means the configuration is usable."""
+def _local_endpoint_hint(base_url: str) -> str | None:
+    """Warn when a loopback endpoint is configured but not listening."""
+    try:
+        parts = urlsplit(base_url)
+        scheme = parts.scheme.lower()
+        host = (parts.hostname or "").lower()
+        if scheme not in {"http", "https"} or host not in {"127.0.0.1", "localhost", "::1"}:
+            return None
+        port = parts.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return None
+    try:
+        connection = socket.create_connection((host, port), timeout=0.3)
+        connection.close()
+    except OSError:
+        return (
+            f"local endpoint {base_url} is not accepting connections; "
+            "start it or run /config set base-url"
+        )
+    return None
+
+
+def _startup_hints(settings: Settings, *, probe_local: bool = False) -> list[str]:
+    """Configuration hints; these do not validate credentials or model access."""
     hints: list[str] = []
     if not settings.model:
         hints.append("model not selected; run /config set model")
@@ -639,30 +698,265 @@ def _startup_hints(settings: Settings) -> list[str]:
         hints.append(
             "base URL must start with http:// or https://; run /config set base-url"
         )
+    elif probe_local:
+        endpoint_hint = _local_endpoint_hint(settings.base_url)
+        if endpoint_hint:
+            hints.append(endpoint_hint)
     if settings.provider in REQUIRED_KEY_PROVIDERS and not _effective_api_key(settings):
         env_name = PROVIDER_KEY_ENV[settings.provider]
         hints.append(f"API key missing; run /config set api-key or set {env_name}")
     return hints
 
 
-async def run_cli(settings: Settings, workspace: Path) -> int:
-    def echo(text: str) -> None:
-        print(text, flush=True)
+def _last_activation(runtime: Runtime):
+    activations = getattr(runtime.actor, "activations", ())
+    return activations[-1] if activations else None
 
-    runtime = create_runtime(settings, workspace, echo=echo, runtime_factory=Runtime)
-    await runtime.start()
-    echo(f"nervipulsa  {settings.provider}  {settings.model or '(no model)'}  {workspace}")
-    echo(
-        f"  profile {settings.active_profile or settings.provider}  "
-        f"endpoint {settings.base_url or '(unset)'}  "
-        f"key {'set' if _effective_api_key(settings) else 'missing'}"
+
+def _final_assistant_message(runtime: Runtime) -> str | None:
+    for activation in reversed(getattr(runtime.actor, "activations", ())):
+        response = activation.response
+        content = getattr(response, "content", None) if response is not None else None
+        if activation.response_recorded and isinstance(content, str) and content.strip():
+            return content
+    return None
+
+
+async def _wait_for_completion(runtime: Runtime, timeout: float) -> str:
+    """Wait for idle, pause, shutdown, or the wall-clock deadline."""
+    deadline = None if timeout <= 0 else time.monotonic() + timeout
+    while True:
+        snapshot = runtime.status()
+        if snapshot.get("pause_reason") is not None or snapshot.get("actor") == "paused":
+            return "paused"
+        if snapshot.get("runtime") != "RUNNING":
+            return "stopped"
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return "timeout"
+        window = 0.5 if remaining is None else min(0.5, remaining)
+        if await runtime.wait_until_idle(timeout=window):
+            return "idle"
+        if deadline is not None and time.monotonic() >= deadline:
+            return "timeout"
+
+
+def _completion_payload(
+    runtime: Runtime,
+    settings: Settings,
+    *,
+    outcome: str,
+    delivery,
+    error: str | None,
+    started: float,
+    resume_report: dict | None,
+) -> dict:
+    activation = _last_activation(runtime)
+    paused = runtime.actor.paused
+    status_snapshot = runtime.status()
+    if outcome == "idle":
+        succeeded = (
+            activation is not None
+            and activation.status == "committed"
+            and paused is None
+        )
+        status = "succeeded" if succeeded else "failed"
+    elif outcome == "timeout":
+        status = "timeout"
+    elif outcome == "rejected":
+        status = "rejected"
+    elif outcome == "paused":
+        status = "paused"
+    else:
+        status = "failed"
+    if error is None:
+        if paused is not None:
+            error = paused.error_message or paused.error_kind
+        elif status == "failed" and activation is not None:
+            error = activation.error_message or activation.error_kind
+    metrics = activation.context_metrics if activation is not None else {}
+    activation_payload = None
+    if activation is not None:
+        activation_payload = {
+            "id": activation.id,
+            "status": activation.status,
+            "error_kind": activation.error_kind,
+            "input_event_ids": list(activation.input_event_ids),
+            "settle_version": activation.settle_version,
+            "tool_calls": dict(activation.tool_calls),
+            "attempt_count": metrics.get("attempt_count"),
+            "provider_usage": metrics.get("provider_usage"),
+            "provider_model": metrics.get("provider_model"),
+        }
+    exit_code = 0 if status == "succeeded" else 124 if status == "timeout" else 1
+    return {
+        "ok": status == "succeeded",
+        "status": status,
+        "exit_code": exit_code,
+        "session_id": runtime.bus.session_id,
+        "provider": settings.provider,
+        "model": settings.model,
+        "workspace": str(runtime.workspace),
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "delivery": {
+            "accepted": delivery.accepted,
+            "event_id": delivery.event_id,
+            "reason": delivery.reason,
+        },
+        "activation": activation_payload,
+        "pause": (
+            None
+            if paused is None
+            else {
+                "kind": paused.error_kind,
+                "message": paused.error_message,
+                "hint": status_snapshot.get("pause_hint"),
+            }
+        ),
+        "error": error,
+        "final_message": _final_assistant_message(runtime),
+        "transcript_chars": status_snapshot.get("transcript_chars"),
+        "python": status_snapshot.get("python"),
+        "resume": resume_report,
+    }
+
+
+async def _run_prompt(
+    runtime: Runtime,
+    settings: Settings,
+    prompt: str,
+    *,
+    echo,
+    json_output: bool,
+    run_timeout: float,
+    resume_report: dict | None,
+) -> int:
+    started = time.monotonic()
+    delivery = runtime.submit_text(prompt)
+    error: str | None = None
+    if delivery.accepted:
+        outcome = await _wait_for_completion(runtime, run_timeout)
+        if outcome == "timeout":
+            error = f"run timeout after {run_timeout:g}s"
+        elif outcome == "stopped":
+            error = "runtime stopped before becoming idle"
+    else:
+        outcome = "rejected"
+        error = delivery.reason or "delivery refused"
+    payload = _completion_payload(
+        runtime,
+        settings,
+        outcome=outcome,
+        delivery=delivery,
+        error=error,
+        started=started,
+        resume_report=resume_report,
     )
-    echo("Enter sends. /help lists commands.")
-    for hint in _startup_hints(settings):
-        echo(f"  next  {hint}")
+    await runtime.shutdown()
+    payload["duration_seconds"] = round(time.monotonic() - started, 3)
+    if runtime.host.cleanup_failed or runtime.journal.incomplete:
+        payload["cleanup_incomplete"] = True
+        payload["ok"] = False
+        if payload["status"] == "succeeded":
+            payload["status"] = "failed"
+            payload["error"] = "worker cleanup or journal persistence incomplete"
+        if payload["exit_code"] == 0:
+            payload["exit_code"] = 1
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    else:
+        echo(f"done  {payload['status']}  {payload['duration_seconds']:.2f}s")
+        if payload["error"]:
+            echo(f"  {payload['error']}")
+    return int(payload["exit_code"])
+
+
+async def run_cli(
+    settings: Settings,
+    workspace: Path,
+    *,
+    prompt: str | None = None,
+    json_output: bool = False,
+    run_timeout: float = 0.0,
+    session_id: str | None = None,
+    resume: bool = False,
+) -> int:
+    def echo(text: str) -> None:
+        print(text, file=sys.stderr if json_output else sys.stdout, flush=True)
+
+    runtime_factory = (
+        Runtime if session_id is None else partial(Runtime, session_id=session_id)
+    )
+    runtime = create_runtime(settings, workspace, echo=echo, runtime_factory=runtime_factory)
+    resume_report = None
+    preparation_error = None
+    refusal = None
+    try:
+        if resume:
+            resume_report = await runtime.start(restore_transcript=True)
+        else:
+            await runtime.start()
+        echo(f"nervipulsa  {settings.provider}  {settings.model or '(no model)'}  {workspace}")
+        echo(
+            f"  profile {settings.active_profile or settings.provider}  "
+            f"endpoint {settings.base_url or '(unset)'}  "
+            f"key {'set' if _effective_api_key(settings) else 'missing'}"
+        )
+        if prompt is None:
+            echo("Enter sends. /help lists commands.")
+        hints = await asyncio.to_thread(_startup_hints, settings, probe_local=True)
+        for hint in hints:
+            echo(f"  next  {hint}")
+        if resume_report is not None:
+            if not resume_report.get("restored"):
+                echo(f"resume: no committed transcript for session {runtime.bus.session_id}")
+            else:
+                echo(
+                    f"resume: restored {resume_report.get('restored_messages', 0)} messages "
+                    f"from activation {resume_report.get('from_activation')}"
+                )
+        elif session_id is not None and runtime.session_reused:
+            preparation_error = (
+                f"session {session_id} already has journal history; "
+                "pass --resume to continue or choose a new --session-id"
+            )
+            refusal = "session_exists"
+    except Exception as exc:
+        preparation_error = f"{type(exc).__name__}: {exc}"
+        refusal = "initialization_failed"
+    if preparation_error is not None:
+        echo(preparation_error)
+        payload = None
+        if json_output:
+            payload = _completion_payload(
+                runtime,
+                settings,
+                outcome="rejected" if refusal == "session_exists" else "stopped",
+                delivery=Delivery(False, reason=refusal),
+                error=preparation_error,
+                started=time.monotonic(),
+                resume_report=resume_report,
+            )
+        await runtime.shutdown()
+        if payload is not None:
+            print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        return 1
+    if prompt is not None:
+        try:
+            return await _run_prompt(
+                runtime,
+                settings,
+                prompt,
+                echo=echo,
+                json_output=json_output,
+                run_timeout=run_timeout,
+                resume_report=resume_report,
+            )
+        finally:
+            await runtime.shutdown()
     buffer = LineBuffer()
     uninstall_requested = False
-    noninteractive_incomplete = False
+    noninteractive_exit_code = 0
     try:
         if not sys.stdin.isatty():
             while True:
@@ -672,9 +966,15 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
                 text = buffer.feed(raw.rstrip("\r\n"))
                 if text is not None and handle_line(runtime, text):
                     break
-            if not await runtime.wait_until_idle(timeout=None):
+            outcome = await _wait_for_completion(runtime, run_timeout)
+            if outcome != "idle":
                 paused = runtime.actor.paused
-                if paused is not None:
+                if outcome == "timeout":
+                    echo(
+                        f"[stdin] run timeout after {run_timeout:g}s; "
+                        "the task may be incomplete."
+                    )
+                elif paused is not None:
                     reason = paused.error_kind or "unknown"
                     echo(
                         f"[stdin] agent paused after input closed ({reason}); "
@@ -685,7 +985,7 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
                         "[stdin] runtime stopped before becoming idle; "
                         "the task may be incomplete."
                     )
-                noninteractive_incomplete = True
+                noninteractive_exit_code = 124 if outcome == "timeout" else 1
         else:
             bindings = KeyBindings()
 
@@ -738,9 +1038,7 @@ async def run_cli(settings: Settings, workspace: Path) -> int:
     if runtime.host.cleanup_failed or runtime.journal.incomplete:
         echo("[shutdown] cleanup or journal incomplete")
         return 1
-    if noninteractive_incomplete:
-        return 1
-    return 0
+    return noninteractive_exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -749,10 +1047,32 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, OSError):
         pass
-    settings = settings_from_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.run_timeout) or args.run_timeout < 0:
+        parser.error("--run-timeout must be finite and zero or greater")
+    if args.json and args.prompt is None:
+        parser.error("--json requires --prompt")
+    if args.prompt is not None and not args.prompt.strip():
+        parser.error("--prompt must not be empty")
+    if args.resume and not args.session_id:
+        parser.error("--resume requires --session-id")
+    if args.session_id is not None and not args.session_id.strip():
+        parser.error("--session-id must not be empty")
+    settings = _settings_from_args(args)
     workspace = Path(settings.workspace).resolve()
     try:
-        return asyncio.run(run_cli(settings, workspace))
+        return asyncio.run(
+            run_cli(
+                settings,
+                workspace,
+                prompt=args.prompt,
+                json_output=args.json,
+                run_timeout=args.run_timeout,
+                session_id=args.session_id,
+                resume=args.resume,
+            )
+        )
     except KeyboardInterrupt:
         return 130
 

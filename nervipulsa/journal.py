@@ -756,6 +756,71 @@ class Journal:
         finally:
             connection.close()
 
+    def session_history_state(self, session_id: str) -> dict[str, Any]:
+        """Return existence and the highest persisted event id for one session.
+
+        Read metadata only: this never restores or replays an execution. The
+        observation queue can lose rows, so durable inputs and effect/receipt
+        ids also reserve sequence numbers. Call before publishing new events.
+        """
+        if not session_id.strip():
+            raise ValueError("session_id must be non-empty")
+        exists = False
+        highest = 0
+        if not self.path.exists():
+            return {"exists": exists, "seq_floor": highest}
+
+        def remember(event_id: Any) -> None:
+            nonlocal highest
+            if isinstance(event_id, str) and event_id.startswith("evt_"):
+                suffix = event_id[4:]
+                if suffix.isascii() and suffix.isdecimal():
+                    highest = max(highest, int(suffix))
+
+        connection = sqlite3.connect(self.path, timeout=5)
+        try:
+            connection.execute("BEGIN")
+            tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "events" in tables:
+                row = connection.execute(
+                    "SELECT MAX(seq) FROM events WHERE session_id=?", (session_id,)
+                ).fetchone()
+                if row[0] is not None:
+                    exists = True
+                    highest = int(row[0])
+            sources = (
+                ("deliveries", "event_id", False),
+                ("executions", "execution_id", False),
+                ("tool_calls", "execution_id", False),
+                ("durable_effects", "execution_id", False),
+                ("durable_tool_receipts", "execution_id", False),
+                ("activations", "input_event_ids_json", True),
+                ("durable_activation_commits", "input_event_ids_json", True),
+                ("durable_transcript_snapshots", "event_ids_json", True),
+            )
+            for table, column, encoded in sources:
+                if table not in tables:
+                    continue
+                for (value,) in connection.execute(
+                    f"SELECT {column} FROM {table} WHERE session_id=?", (session_id,)
+                ):
+                    exists = True
+                    if encoded:
+                        event_ids = json.loads(value)
+                        if not isinstance(event_ids, list):
+                            raise ValueError(f"invalid event ids in {table}.{column}")
+                        for event_id in event_ids:
+                            remember(event_id)
+                    else:
+                        remember(value)
+            return {"exists": exists, "seq_floor": highest}
+        finally:
+            connection.close()
+
     def latest_transcript_snapshot(self, session_id: str) -> dict[str, Any] | None:
         """Return the newest committed transcript for a session, or None.
 

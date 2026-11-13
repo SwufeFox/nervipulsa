@@ -252,6 +252,16 @@ def run_worker(workspace: Path, epoch: int, output_dir: Path) -> None:
         try:
             compiled = compile(code, "<python_exec>", "exec")
             exec(compiled, namespace, namespace)
+        except SystemExit as exc:
+            exit_code = exc.code
+            if exit_code is not None and not (isinstance(exit_code, int) and exit_code == 0):
+                status = "failed"
+                try:
+                    exception = f"SystemExit: {exit_code}"
+                    if len(exception) > EXCEPTION_PREVIEW_CHARS:
+                        exception = f"{exception[:EXCEPTION_PREVIEW_CHARS - 1]}…"
+                except BaseException:
+                    exception = "SystemExit"
         except BaseException as exc:
             status = "failed"
             try:

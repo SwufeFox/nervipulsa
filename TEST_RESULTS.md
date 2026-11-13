@@ -1,5 +1,59 @@
 # Recorded results
 
+## One-shot and resume smoke (2026-11-13)
+
+Environment: Windows, CPython 3.13.14, local Magpie gateway at
+`http://127.0.0.1:3425/v1`, model `deepseek/deepseek-flash`. These are live
+provider runs, not CI.
+
+- `--prompt 'Reply with exactly: PONG' --json`: `succeeded`, exit 0,
+  `final_message: PONG`, 1375 total tokens.
+- Session `demo-cont`: the first prompt acknowledged "Ada" (1363 tokens); a
+  second prompt with `--session-id demo-cont --resume` answered `Ada`
+  (1380 tokens, 1152 prompt-cache hits), showing the restored transcript
+  reached the model.
+- Reusing `demo-cont` without `--resume` was rejected with `session_exists`,
+  exit 1, before any model call.
+- The first exploratory subagent run exposed a worker bug: user code ending
+  with `raise SystemExit(0)` after a passing pytest was reported as `failed`.
+  The worker now treats `SystemExit(None)` and integer-zero exit as success;
+  other exit values remain failures without terminating the persistent worker.
+  Regression coverage includes a broken exit-value formatter and namespace
+  preservation (`test_system_exit_zero_succeeds_and_nonzero_fails`).
+- A final live file task wrote and reread `result.json` with answer `42`, ended
+  its single Python execution with `SystemExit(0)`, and returned
+  `VERIFIED_COBALT_42`. A fresh process with `--resume` returned `42` without
+  another Python execution. All prior SQLite event rows were preserved; the
+  continued input was `evt_00000008`, above the previous sequence floor of 7.
+- A deterministic restart probe exposed an additional bug: restoring only
+  transcript event IDs reused an earlier assistant event ID, and the journal
+  silently ignored the new input. Explicit sessions now reserve IDs from all
+  persisted observation and durable input/effect/receipt metadata before
+  starting actors. An effect-only session also preserves its IDs without
+  replaying the unresolved operation.
+
+The final live evidence is retained locally in
+`.scratch/runtime-subagent-final-bp2s7ma8/evidence.json`; that directory is
+ignored and is not a portable CI artifact.
+
+Verification stages on the working tree based on `1e97974`:
+
+- Full suite before the final session/result-boundary corrections:
+  `python -m pytest -q` — **233 passed in 383.28s**.
+- After those corrections: CLI, transcript restore, journal, optional-host,
+  and the SystemExit regression group — **72 passed in 39.89s**.
+- Final CLI run after aligning piped-input timeout exit codes:
+  `python -m pytest -q tests/test_cli.py` — **35 passed in 10.95s**.
+- A local HTTP stub delayed its response by 1.2 seconds. A `--run-timeout 0.1`
+  invocation returned `status=timeout`, exit 124, and no late assistant answer;
+  process exit followed the request by 1.26 seconds. The timeout bounds waiting
+  for completion, not blocking-HTTP thread teardown or total process lifetime.
+
+
+Bounded claim: these runs validate the local CLI one-shot/resume path against
+one gateway and model on one machine; they do not establish provider/model
+portability or production task quality.
+
 ## Runtime mechanics benchmarks (2025 incremental-accounting change)
 
 Measured by `benchmarks/bench_runtime.py` on Windows, CPython 3.13.14, before

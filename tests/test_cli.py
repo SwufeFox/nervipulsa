@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from io import StringIO
 import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from prompt_toolkit.document import Document
 
 import nervipulsa.cli as cli
@@ -13,6 +16,7 @@ from nervipulsa.cli import _COMMAND_COMPLETER, handle_line
 from nervipulsa.config import Settings, save_settings
 from nervipulsa.events import Event
 from nervipulsa.journal import Journal
+from nervipulsa.ports import ModelResponse, ProviderFailure
 from nervipulsa.providers import (
     OpenAICompatibleBackend,
     ScriptedBackend,
@@ -57,6 +61,9 @@ def test_non_tty_reads_lines_off_event_loop_and_waits_for_idle(tmp_path: Path, m
             idle_timeouts.append(timeout)
             return True
 
+        def status(self) -> dict[str, object]:
+            return {"actor": "waiting", "pause_reason": None, "runtime": "RUNNING"}
+
         async def shutdown(self) -> None:
             return None
 
@@ -66,7 +73,7 @@ def test_non_tty_reads_lines_off_event_loop_and_waits_for_idle(tmp_path: Path, m
     assert asyncio.run(cli.run_cli(Settings(model="scripted"), tmp_path)) == 0
     assert read_thread_ids and all(thread_id != main_thread for thread_id in read_thread_ids)
     assert submitted == ["hello"]
-    assert idle_timeouts == [None]
+    assert len(idle_timeouts) == 1 and 0 < (idle_timeouts[0] or 0) <= 0.5
 
 
     assert _completions("/config ") == {"show", "set", "profiles", "use"}
@@ -131,6 +138,261 @@ def test_startup_hints_reject_base_url_without_scheme() -> None:
     hints = cli._startup_hints(settings)
 
     assert any("http://" in hint and "https://" in hint for hint in hints)
+
+
+class _NoTools:
+    def schemas(self, *, workspace=None):
+        return []
+
+    def get(self, name):
+        return None
+
+
+def _install_scripted_runtime(monkeypatch, backend, **runtime_options) -> None:
+    def fake_create(settings, workspace, *, echo=None, runtime_factory=Runtime):
+        return runtime_factory(
+            settings,
+            backend,
+            workspace,
+            echo=echo,
+            python_host=False,
+            tool_catalog=_NoTools(),
+            **runtime_options,
+        )
+
+    monkeypatch.setattr(cli, "create_runtime", fake_create)
+
+
+def test_one_shot_json_reports_success(monkeypatch, tmp_path, capsys) -> None:
+    backend = ScriptedBackend(
+        lambda _request: ModelResponse(content="ready", model="scripted")
+    )
+    _install_scripted_runtime(monkeypatch, backend)
+
+    code = asyncio.run(
+        cli.run_cli(
+            Settings(model="scripted"),
+            tmp_path,
+            prompt="hello",
+            json_output=True,
+            run_timeout=10,
+            session_id="cli-test",
+        )
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 0
+    assert payload["status"] == "succeeded"
+    assert payload["exit_code"] == 0
+    assert payload["session_id"] == "cli-test"
+    assert payload["final_message"] == "ready"
+    assert payload["activation"]["status"] == "committed"
+    assert payload["delivery"]["accepted"] is True
+
+
+def test_one_shot_json_reports_pause_and_nonzero_exit(monkeypatch, tmp_path, capsys) -> None:
+    def fail(_request):
+        raise ProviderFailure("response_unknown", "socket dropped")
+
+    backend = ScriptedBackend(fail)
+    _install_scripted_runtime(monkeypatch, backend)
+
+    code = asyncio.run(
+        cli.run_cli(
+            Settings(model="scripted"),
+            tmp_path,
+            prompt="hello",
+            json_output=True,
+            run_timeout=10,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["status"] == "paused"
+    assert payload["exit_code"] == 1
+    assert payload["pause"]["kind"] == "response_unknown"
+
+
+def test_one_shot_json_reports_timeout(monkeypatch, tmp_path, capsys) -> None:
+    async def slow(_request):
+        await asyncio.sleep(5)
+        return ModelResponse(content="late", model="scripted")
+
+    backend = ScriptedBackend(slow)
+    _install_scripted_runtime(monkeypatch, backend)
+
+    code = asyncio.run(
+        cli.run_cli(
+            Settings(model="scripted"),
+            tmp_path,
+            prompt="hello",
+            json_output=True,
+            run_timeout=0.1,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 124
+    assert payload["status"] == "timeout"
+    assert payload["exit_code"] == 124
+
+
+def test_piped_input_deadline_returns_timeout_exit(monkeypatch, tmp_path):
+    async def slow(_request):
+        await asyncio.Event().wait()
+
+    backend = ScriptedBackend(slow)
+    _install_scripted_runtime(monkeypatch, backend)
+    monkeypatch.setattr(cli.sys, "stdin", StringIO("hello\n"))
+    assert asyncio.run(cli.run_cli(
+        Settings(model="scripted"), tmp_path, run_timeout=0.1,
+    )) == 124
+
+
+def test_session_id_reuse_requires_resume(monkeypatch, tmp_path, capsys) -> None:
+    backend = ScriptedBackend(
+        lambda _request: ModelResponse(content="ready", model="scripted")
+    )
+    _install_scripted_runtime(monkeypatch, backend)
+
+    first = asyncio.run(
+        cli.run_cli(
+            Settings(model="scripted"),
+            tmp_path,
+            prompt="one",
+            json_output=True,
+            run_timeout=10,
+            session_id="duplicate",
+        )
+    )
+    assert first == 0
+    capsys.readouterr()
+
+    second = asyncio.run(
+        cli.run_cli(
+            Settings(model="scripted"),
+            tmp_path,
+            prompt="two",
+            json_output=True,
+            run_timeout=10,
+            session_id="duplicate",
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert second == 1
+    assert payload["status"] == "rejected"
+    assert payload["delivery"]["reason"] == "session_exists"
+    assert backend.calls == 1
+
+
+def test_one_shot_does_not_publish_response_before_commit_hook(monkeypatch, tmp_path, capsys):
+    async def fail_commit(_activation, _response):
+        raise RuntimeError("storage unavailable")
+
+    backend = ScriptedBackend(lambda _request: ModelResponse(content="uncommitted answer"))
+    _install_scripted_runtime(monkeypatch, backend, response_commit_hook=fail_commit)
+    code = asyncio.run(cli.run_cli(
+        Settings(model="scripted"), tmp_path, prompt="hello", json_output=True,
+        run_timeout=10,
+    ))
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 1
+    assert payload["pause"]["kind"] == "response_commit_failed"
+    assert payload["final_message"] is None
+    assert "uncommitted answer" not in captured.out + captured.err
+
+
+def test_one_shot_cleanup_failure_cannot_report_success(monkeypatch, tmp_path, capsys):
+    backend = ScriptedBackend(lambda _request: ModelResponse(content="ready"))
+    _install_scripted_runtime(monkeypatch, backend)
+    shutdown = Runtime.shutdown
+
+    async def failed_persistence(self):
+        await shutdown(self)
+        self.journal._error = "injected journal close failure"
+
+    monkeypatch.setattr(Runtime, "shutdown", failed_persistence)
+    code = asyncio.run(cli.run_cli(
+        Settings(model="scripted"), tmp_path, prompt="hello", json_output=True,
+        run_timeout=10,
+    ))
+    payload = json.loads(capsys.readouterr().out)
+    assert code == payload["exit_code"] == 1
+    assert payload["status"] == "failed"
+    assert payload["ok"] is False
+    assert payload["cleanup_incomplete"] is True
+
+
+def test_one_shot_resume_restores_prior_messages(monkeypatch, tmp_path, capsys):
+    backend = ScriptedBackend(lambda _request: ModelResponse(content="saved"))
+    _install_scripted_runtime(monkeypatch, backend)
+    settings = Settings(model="scripted")
+    assert asyncio.run(cli.run_cli(
+        settings, tmp_path, prompt="color: cobalt", session_id="remember",
+        json_output=True, run_timeout=10,
+    )) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert asyncio.run(cli.run_cli(
+        settings, tmp_path, prompt="recall the color", session_id="remember",
+        resume=True, json_output=True, run_timeout=10,
+    )) == 0
+    second = json.loads(capsys.readouterr().out)
+    messages = backend.requests[-1].messages
+    assert {"role": "user", "content": "color: cobalt"} in messages
+    assert {"role": "assistant", "content": "saved"} in messages
+    assert second["resume"]["restored"] is True
+    assert second["delivery"]["event_id"] != first["delivery"]["event_id"]
+
+
+def test_one_shot_corrupt_resume_fails_before_request(monkeypatch, tmp_path, capsys):
+    backend = ScriptedBackend(lambda _request: ModelResponse(content="saved"))
+    _install_scripted_runtime(monkeypatch, backend)
+    settings = Settings(model="scripted")
+    assert asyncio.run(cli.run_cli(
+        settings, tmp_path, prompt="remember", session_id="corrupt",
+        json_output=True, run_timeout=10,
+    )) == 0
+    capsys.readouterr()
+    connection = sqlite3.connect(tmp_path / ".nervipulsa" / "journal.sqlite")
+    try:
+        connection.execute(
+            "UPDATE durable_transcript_snapshots SET messages_json=? WHERE session_id=?",
+            ("invalid-json", "corrupt"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    code = asyncio.run(cli.run_cli(
+        settings, tmp_path, prompt="continue", session_id="corrupt", resume=True,
+        json_output=True, run_timeout=10,
+    ))
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["status"] == "failed"
+    assert payload["delivery"]["reason"] == "initialization_failed"
+    assert backend.calls == 1
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-1"])
+def test_main_rejects_unbounded_or_negative_run_deadlines(value):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([f"--run-timeout={value}", "--prompt", "hello"])
+    assert exc.value.code == 2
+
+
+def test_main_rejects_json_without_prompt(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--json"])
+    assert exc.value.code == 2
+
+
+def test_main_rejects_resume_without_session(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--resume"])
+    assert exc.value.code == 2
 
 
 def test_uninstall_command_completes_at_root() -> None:

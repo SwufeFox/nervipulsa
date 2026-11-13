@@ -72,6 +72,10 @@ python -m pip install -e ".[dev]"
 nervipulsa --dir .
 python -m nervipulsa --dir .
 
+# One-shot subagent mode: JSON result on stdout, diagnostics on stderr
+nervipulsa --dir . --prompt "Fix the failing test" --session-id task-1 --json --run-timeout 300
+nervipulsa --dir . --prompt "What changed?" --session-id task-1 --resume --json
+
 # Offline, credential-free scripted trace
 python -m nervipulsa.demo --scripted
 
@@ -91,6 +95,12 @@ NV_BASE_URL=... NV_API_KEY=... NV_MODEL=deepseek-flash \
 ```
 
 No lint, format, or type-check command is configured.
+
+Use one live process per journal/session. Explicit session IDs reserve all
+persisted event IDs before new events; do not derive that boundary only from
+the model view. `await runtime.start(restore_transcript=True)` loads that view
+before actors start. `--run-timeout` limits completion waiting; parent processes
+must impose their own deadline for total process lifetime.
 
 ## Code Conventions & Common Patterns
 

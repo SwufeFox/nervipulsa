@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from .config import Settings
 from .events import SYSTEM_PROMPT, Bus, Delivery, Event, Lane, Mailbox, RuntimeState
 from .journal import Journal
-from .llm import Activation, LLMActor
+from .llm import Activation, LLMActor, pause_hint
 from .python_host import PythonHost
 from .ports import ModelBackend, ModelResponse, ToolCatalog
 from .tools import DefaultToolCatalog
@@ -102,6 +102,8 @@ class Runtime:
         # existing callers keep their isolation and cannot accidentally
         # resume someone else's conversation.
         self.bus = Bus(session_id=session_id)
+        self._explicit_session_id = session_id is not None
+        self.session_reused = False
         self.trace: list[Event] = []
         self._event_counts: Counter[str] = Counter()
         self._event_total = 0
@@ -197,13 +199,26 @@ class Runtime:
             return self._event_total
         return self._event_counts[event_type]
 
-    async def start(self) -> None:
+    async def start(self, *, restore_transcript: bool = False) -> dict[str, Any] | None:
+        """Start the session; optionally load its model view before actors run."""
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
         self.journal.start()
         if not await asyncio.to_thread(self.journal.flush, timeout=15):
             detail = self.journal.error or "writer did not acknowledge startup flush"
             raise RuntimeError(f"journal initialization failed: {detail}")
+        if self._explicit_session_id:
+            history = await asyncio.to_thread(
+                self.journal.session_history_state, self.bus.session_id
+            )
+            self.session_reused = history["exists"]
+            self.bus.reserve_seq_floor(history["seq_floor"])
+        restore_report = None
+        if restore_transcript:
+            snapshot = await asyncio.to_thread(
+                self.journal.latest_transcript_snapshot, self.bus.session_id
+            )
+            restore_report = self._apply_transcript_snapshot(self.bus.session_id, snapshot)
         self.bus.add_observer(self._observe)
         self.bus.add_delivery_sink(self._observe_delivery)
         self.bus.start()
@@ -213,6 +228,7 @@ class Runtime:
             asyncio.create_task(self._ui_loop(), name="ui"),
             asyncio.create_task(self._lifecycle(), name="lifecycle"),
         ]
+        return restore_report
 
     def restore_transcript(self, *, session_id: str | None = None) -> dict[str, Any]:
         """Reload this session's last committed model view, if one exists.
@@ -233,6 +249,11 @@ class Runtime:
         """
         target = self.bus.session_id if session_id is None else session_id
         snapshot = self.journal.latest_transcript_snapshot(target)
+        return self._apply_transcript_snapshot(target, snapshot)
+
+    def _apply_transcript_snapshot(
+        self, target: str, snapshot: dict[str, Any] | None
+    ) -> dict[str, Any]:
         if snapshot is None:
             return {"restored": False, "reason": "no_snapshot", "session_id": target}
         report = self.actor.transcript.restore(
@@ -240,10 +261,9 @@ class Runtime:
             event_ids=snapshot["event_ids"],
             event_types=snapshot["event_types"],
         )
-        # Event ids are numbered per process (`evt_00000001`, ...). Without
-        # moving the floor past the restored ids, the next event this process
-        # creates would reuse one and project as a duplicate of history.
-        highest = 0
+        # Startup reserves all persisted ids, including events absent from the
+        # model view. Also reserve snapshot ids when importing another session.
+        highest = self.bus.seq
         for event_id in snapshot["event_ids"]:
             if isinstance(event_id, str) and event_id.startswith("evt_"):
                 try:
@@ -343,6 +363,7 @@ class Runtime:
             "runtime": self.bus.state.value,
             "actor": "paused" if paused is not None else self.actor.phase,
             "pause_reason": None if paused is None else paused.error_kind,
+            "pause_hint": None if paused is None else pause_hint(paused.error_kind),
             "python": (
                 (self.host.current_execution_id or "idle")
                 if self.python_enabled

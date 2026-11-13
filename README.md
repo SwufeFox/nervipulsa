@@ -187,15 +187,41 @@ in this invocation, or null; it can contain intermediate progress on a failed
 run. Responses whose commit hook failed are absent from both fields. Use `ok`,
 `status`, and `exit_code` for runtime completion, and independently verify the task.
 
-Exit codes are 0 for success, 1 for paused/rejected/failed, 124 for a completion
-timeout, and 130 for interruption. `--json` requires `--prompt`.
+Exit codes are 0 for success, 1 for paused/rejected/failed, 124 for a timeout,
+and 130 for Ctrl+C (supervised SIGTERM uses 143). `--json` requires `--prompt`.
 `--run-timeout` starts after prompt submission, or after EOF for piped input;
-0 means no limit. Expiry stops waiting and initiates shutdown. Startup, worker
-cleanup, an already-running blocking HTTP request, and waiting for the journal
-writer to stop can extend process exit beyond that deadline. A caller needing
-a hard process deadline must supervise the entire process tree; this CLI does
-not provide that supervisor. Cancellation does not roll back file or external
+0 means no limit. Expiry stops waiting and initiates orderly shutdown. Startup,
+blocking HTTP threads, worker cleanup, and journal-writer shutdown can extend
+process exit beyond this completion deadline.
+
+For one-shot calls that also need a process deadline, add `--process-timeout`:
+
+    nervipulsa --dir . --prompt "..." --json --run-timeout 180 --process-timeout 210
+
+`--process-timeout` is finite and nonnegative, defaults to 0 (disabled), and
+requires `--prompt` when enabled. A separate supervisor measures from before
+runtime-child launch, after parent argument/configuration loading, through
+runtime startup, model/tool execution, shutdown, and HTTP-thread teardown.
+At expiry it forcibly stops the managed process tree and returns timeout/124,
+allowing up to five further seconds for OS cleanup and reaping. OS scheduling
+and process creation are not real-time guarantees.
+
+Supervised JSON adds `supervision` with `process_timeout`, `timed_out`,
+`tree_stopped`, and `child_exit_code`. The supervisor withholds child stdout
+until process exit, so an early answer cannot escape as success while teardown
+is still blocked. On forced timeout, `final_message` and `last_message` are null;
+`delivery.accepted` is null when admission cannot be established. A failed
+tree-cleanup attempt sets `cleanup_incomplete=true`. Forced interruption may
+leave journal observations incomplete and effects uncertain: inspect the
+durable ledger before retrying. Cancellation never rolls back file or external
 side effects.
+
+Windows containment uses a Job Object before the child may start the runtime;
+POSIX containment requires `waitid(WNOWAIT)` and tracks the runtime and registered
+worker process groups without reaping their leaders before cleanup.
+Processes that deliberately detach themselves from managed groups are outside
+this boundary. Experimental Windows AppContainer mode cannot be combined with
+`--process-timeout`, because its ACL/profile teardown cannot honor bounded cleanup.
 
 Give a task a stable id and continue it later:
 
@@ -456,9 +482,11 @@ For a repeatable CLI subagent acceptance run with an empty configuration directo
 
 This fixes a copied bug fixture, independently runs pristine tests, resumes the
 session in a new process to recall a marker without tools, and checks refusal
-of reuse without `--resume`. Each invocation retains a separate JSON report,
-CLI receipts, stderr, and journal under `.scratch/subagent-acceptance-<uuid>/`.
-Runtime completion and externally verified task success are separate fields.
+of reuse without `--resume`. All CLI runs use process supervision. A separate
+local stalled-HTTP scenario checks hard timeout after the completion deadline.
+Each invocation retains a separate JSON report, CLI receipts, stderr, and
+journal under `.scratch/subagent-acceptance-<uuid>/`. Runtime completion and
+externally verified task success are separate fields.
 See [live-check instructions](examples/REAL_MODEL.md) for limits and artifacts.
 
 ## Files
@@ -482,6 +510,7 @@ See [live-check instructions](examples/REAL_MODEL.md) for limits and artifacts.
 | `nervipulsa/cli.py` | Input, display, commands |
 | `nervipulsa/runtime.py` | Session wiring, event routing, durable inspection |
 | `nervipulsa/session_lock.py` | Nonblocking OS ownership of each journal/session |
+| `nervipulsa/supervision.py` | One-shot process deadlines, tree ownership, gated child startup and final receipts |
 | `nervipulsa/demo.py` | Credential-free scripted end-to-end trace |
 | `examples/real_model_experiments.py` | Runnable driver for the three live checks |
 | `examples/subagent_acceptance.py` | Isolated CLI bugfix, independent tests, resume and refusal acceptance |

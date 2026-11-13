@@ -29,6 +29,8 @@ flowchart TD
 
 图中箭头是控制或数据流，不全是 Python import。`ports.py` 定义中立数据类型及协议；`application.py` 是默认适配器选择点；`runtime.py` 是会话装配点。Bus 根据 `Runtime._register()` 的固定表路由至一个接收邮箱，没有通用广播调度器。`python.finished` 路由至 actor，Runtime 同时通过同步观察器渲染结果。
 
+单次 CLI 指定正数 `--process-timeout` 时，`cli.main()` 在父进程同步调用 `supervision.run_supervised()`；Runtime 与上述 asyncio loop 整体放入受控子进程。未开启时仍沿原有入口运行。
+
 ## 2. 从用户请求到执行终态
 
 1. CLI 加载 `Settings`，解析 workspace，经 `application.create_runtime()` 选择 backend、tool catalog 并创建 Runtime。`Runtime.start()` 先在线程中取得 canonical journal path/session 的非阻塞 OS 文件锁，再启动 Journal、等待初始化 flush、读取持久事件序号边界。占用冲突抛 `SessionBusyError`，CLI 返回 `rejected/session_busy`，不读取历史、不发布输入、不请求模型。`await runtime.start(restore_transcript=True)` 在线程中读取最后提交的快照，并在启动 Bus、host 和 actor/UI/lifecycle 任务前应用模型视图。worker 启动有独立的 ready 等待，Bus 启动不等于解释器已经 ready。
@@ -52,7 +54,13 @@ flowchart TD
 
 `actor.activations` 在内存中保留最近至多 `ACTIVATION_LEDGER_RETENTION`（256）个对象，`activation_count` 仍报告 Runtime 生命周期总数；按 event 和 activation id 的索引随对象一起过期，过期关联可从 journal 检查。当前 running/paused activation 不因窗口裁剪。`Runtime.trace` 保留最近至多 1,024 个事件，`Runtime.event_count(event_type=None)` 提供累计计数；journal writer 的丢弃/错误状态仍由 `journal.incomplete`、`journal.dropped` 暴露。
 
-CLI 的 `--prompt` 将一条任务提交后等待 idle、pause 或期限到达；`--json` 的 stdout 只输出结果对象，诊断输出到 stderr。成功表示最后 activation 已 committed、运行时空闲且清理完成，不代表模型任务已被独立验收。`final_message` 只包含成功运行的最后 activation 中无工具调用的已记录文本，所有失败/暂停/超时/拒绝路径均为 null；`last_message={activation_id,text}` 单独提供本次调用最近的已记录发言，可为中间进度。提交钩子失败的响应不进入任一字段。初始化/恢复失败返回非零和失败 JSON，清理失败不能同时报告 succeeded。`--run-timeout` 从输入提交后（管道模式从 EOF 后）开始限制完成等待，期限到达后仍执行 shutdown；线程中的阻塞 HTTP、进程清理及等待 journal writer 停止可能推迟最终退出，因此不是硬进程期限，CLI 没有外层进程监护器。已退出的 one-shot 通过 `--resume` 创建新 activation，仅恢复 transcript，不重试旧 paused activation、不重放或解决未知 effect。
+CLI 的 `--prompt` 将一条任务提交后等待 idle、pause 或期限到达；`--json` 的 stdout 只输出结果对象，诊断输出到 stderr。成功表示最后 activation 已 committed、运行时空闲且清理完成，不代表模型任务已被独立验收。`final_message` 只包含成功运行的最后 activation 中无工具调用的已记录文本，所有失败/暂停/超时/拒绝路径均为 null；`last_message={activation_id,text}` 单独提供本次调用最近的已记录发言，可为中间进度。提交钩子失败的响应不进入任一字段。初始化/恢复失败返回非零和失败 JSON，清理失败不能同时报告 succeeded。`--run-timeout` 从输入提交后（管道模式从 EOF 后）开始限制完成等待，期限到达后仍执行 shutdown；线程中的阻塞 HTTP、进程清理及等待 journal writer 停止可能推迟最终退出。已退出的 one-shot 通过 `--resume` 创建新 activation，仅恢复 transcript，不重试旧 paused activation、不重放或解决未知 effect。
+
+`--process-timeout` 为 opt-in 的外层进程期限，只接受 `--prompt`；计时从父进程参数/配置加载后、子进程启动前开始，覆盖 startup、执行、shutdown 与 executor 中阻塞 HTTP 的退出等待，超时后额外最多 5 秒用于 OS 清理和回收。Windows 子进程在父进程取得 Job Object 所有权后才通过启动门；POSIX worker 在父监护器确认登记 PID 后才离开 runtime 进程组创建自己的 session，关闭登记窗口中的泄漏风险。正常 worker 的独立 timeout/cancel 仍由 host 处理。硬期限到达时父进程停止 runtime 组及已登记 worker 组，或终止 Windows Job。监督进程保留 child stdout 至整个子进程退出，不能在 executor 仍阻塞时先报告成功。
+
+监护结果增加 `supervision={process_timeout,timed_out,tree_stopped,child_exit_code}`。强制终止返回 `timeout/124`，无法确认的 admission/activation/text 均为 null，不能据此推断“未执行”；Journal 观测队列可能来不及落盘，effect ledger 可保留 dispatching/unknown。清理失败另标 `cleanup_incomplete`。该机制不是实时 OS 保证，也不约束主动脱离受控进程组的用户进程；Windows AppContainer 因 ACL/profile 清理无法有界完成，开启硬期限时在启动前拒绝此组合。
+
+POSIX 监护依赖 `waitid(WNOWAIT)` 保留未回收的组长身份，直到 group 清理完成或监护器确认解除登记，防止已回收 PID 被复用后误杀无关进程；缺少此原语时在启动前拒绝监护模式。Linux 还检查 `/proc` 中的 group/state，避免把已停止但尚未回收的 zombie 误报为仍在执行。
 
 
 ## 3. 模块职责与状态归属
@@ -64,6 +72,7 @@ CLI 的 `--prompt` 将一条任务提交后等待 idle、pause 或期限到达�
 | `ports.py` | ModelRequest/Response、ToolCall、backend/tool/catalog/context/sink/registry 协议 | 契约与传值类型；不做调度或持久化 |
 | `runtime.py` | 路由、组件生命周期、状态/日志接口、结果展示 | 拥有 Bus、邮箱、host、actor、Journal、trace/listeners；配置热更新只替换 provider 相关设置及 backend/model |
 | `session_lock.py` | 每个 canonical journal/session 的非阻塞 OS 文件锁 | descriptor 归属单个 Runtime；持有至清理完成，进程死亡自动释放；文件保留不代表仍被占用 |
+| `supervision.py` | 单次 CLI 的同步父进程监护、启动门、硬期限与最终回执 | 父进程拥有 Windows Job / POSIX 登记进程组；已解析的 Settings/prompt 经私有通道传递，保留宿主 proxy/TLS 环境；强制中断只报告已知状态，不恢复/重放 effect |
 | `events.py` | JSON 边界、校验、同步 admission、邮箱与预留 | Bus 拥有 session、seq、路由及 CREATED/RUNNING/DRAINING/CLOSED；Mailbox 分别限制 ordinary 输入、单项 retry、结果、handler、feedback 与 diagnostic lane |
 | `llm.py` | 输入投影、上下文预算/摘要、单次模型请求、响应提交与暂停/重试 | actor 拥有 Activation、held 输入、已接受/拒绝调用状态及 Transcript；ContextProjector 构建模型视图，不拥有 worker namespace |
 | `providers.py` | HTTP 协议映射、错误分类与脱敏；ScriptedBackend | 实现 ModelBackend；不执行工具，不隐式恢复 Python |
@@ -135,3 +144,4 @@ Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：�
 
 - 2026-11-13：新增单次子代理调用与 JSON 结果、显式会话续接；实跑发现并修复 `SystemExit(0)` 误报失败及续接复用 event id 导致观测静默丢失的问题。最终 live 运行验证一次 Python 执行、跨进程记忆与既有 SQLite 事件保留；测试阶段及 HTTP 超时边界见 [验证记录](../TEST_RESULTS.md#one-shot-and-resume-smoke-2026-11-13)。未据此宣称并发同会话写入、硬进程期限或生产任务质量已验收。
 - 2026-11-13 结果/会话收紧：`final_message` 与 `last_message` 分离，同一 journal/session 用 OS 锁明确拒绝并发；相关 CLI、锁、恢复、可选 host 和 T0–T4 回归 **83 passed in 59.94s**。空配置目录下的真实 CLI bugfix/独立验证/跨进程续接/复用拒绝验收通过 27 项条件；脚本与保留证据见 [验证记录](../TEST_RESULTS.md#subagent-result-and-session-ownership-acceptance-2026-11-13)。硬进程期限、POSIX 实跑、跨平台与长时间 live 验收仍未建立。
+- 2026-11-13 进程监护：新增单次调用的 `--process-timeout`、启动门与整棵受管进程树终止；相关 supervision、CLI、worker、OS lock 和 AppContainer 回归 **95 passed in 116.92s**。新增 executor 退出阻塞、HTTP 超时和工具后代终止场景；监护下真实任务验收通过 37 项条件。命令、产物与边界见 [验证记录](../TEST_RESULTS.md#supervised-process-deadlines-2026-11-13)。POSIX 实跑、hosted CI 与长时间稳定性仍未验证。

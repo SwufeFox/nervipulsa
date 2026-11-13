@@ -41,6 +41,9 @@ The required checks are:
   from the restored transcript without tools, retaining all prior journal rows.
 - Reuse the existing session without `--resume`; require `session_exists`,
   coherent process/JSON exit status, and retained history.
+- Stall a local HTTP response past the completion deadline. Require the outer
+  process supervisor to terminate it, return timeout/124 with no final answer,
+  confirm managed-tree cleanup, and exit within the cleanup allowance.
 
 Each run keeps `.scratch/subagent-acceptance-<uuid>/report.json`, `workspace/`
 with the SQLite journal, `verifier/`, and `artifacts/` with commands, stdout JSON,
@@ -50,12 +53,15 @@ check makes the driver exit nonzero. `runtime_completed` and
 alone cannot pass the acceptance run. Failed runs are retained alongside later runs.
 
 Options are `--max-activations` (12), `--run-timeout` (180 seconds per CLI
-invocation), and `--pytest-timeout` (60 seconds). The CLI deadline bounds
-completion waiting, not total process lifetime; the driver waits for orderly
-shutdown. This check does not establish hard deadlines, effect replay,
-long-running stability, or general task quality. Credential-free session
-contention, cancellation, process-death release, and result-failure regressions
-live in `tests/test_session_lock.py` and `tests/test_cli.py`.
+invocation), `--process-timeout` (210 seconds per CLI invocation), and
+`--pytest-timeout` (60 seconds). The completion deadline requests orderly
+shutdown; the outer process deadline covers startup and teardown as well, then
+allows up to five seconds for forced OS tree cleanup. The local stalled-HTTP
+check uses shorter limits and no live provider. This check does not establish
+effect replay, long-running stability, or general task quality. Credential-free
+tree-termination and deadline regressions live in `tests/test_supervision.py`;
+session contention, cancellation, and result-failure regressions live in
+`tests/test_session_lock.py` and `tests/test_cli.py`.
 
 ## Or do them by hand
 

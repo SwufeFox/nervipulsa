@@ -1,5 +1,71 @@
 # Recorded results
 
+## Supervised process deadlines (2026-11-13)
+
+Added opt-in `--process-timeout` for one-shot `--prompt` calls. A synchronous
+parent owns the runtime child, holds stdout until full interpreter exit, and
+terminates the managed tree at expiry. Timing begins after parent argument and
+configuration resolution, before child launch; up to five further seconds are
+reserved for OS cleanup/reaping. The existing `--run-timeout` still initiates
+orderly shutdown after the completion-wait deadline.
+
+Windows installs a strict Job Object before releasing the runtime startup
+gate. POSIX workers register with the supervisor before creating independent
+sessions, and `waitid(WNOWAIT)` retains leader identities until group cleanup
+or acknowledged retirement. The host child's proxy/TLS environment is preserved;
+ordinary Python workers still receive the filtered environment. Child settings
+and prompts use a private socket, and held stdout uses a temporary file rather
+than growing a list of output chunks in memory.
+
+Focused Windows / CPython 3.13.14 verification:
+
+    python -m pytest -q tests/test_supervision.py tests/test_process_tree.py tests/test_cli.py tests/test_python_host.py tests/test_session_lock.py tests/test_appcontainer.py
+
+**95 passed in 116.92s.** New real-subprocess and loopback-HTTP cases prove:
+
+- A normal supervised call returns one success JSON object with coherent
+  process/JSON exit status and its final response.
+- A shorter completion timeout cannot leave blocking HTTP teardown running
+  beyond the outer deadline and cleanup window.
+- A child that has already produced a successful receipt but remains alive
+  in executor teardown yields only the parent's timeout receipt. The successful
+  child receipt is observed separately by a disposable startup extension.
+- A real running Python tool and its gated descendant are stopped; releasing
+  the descendant's file-write gate after termination cannot produce the effect.
+  The session lease is released, and transcript continuation does not replay
+  the already-performed tool effect.
+- A worker's own timeout can still reset its namespace, start a replacement
+  worker, and complete a task while the outer supervisor remains active.
+- Invalid numeric process deadlines and positive deadlines without `--prompt`
+  are rejected before running the task. Existing CLI, worker, session-lock,
+  process-tree, and AppContainer regressions also passed in this group.
+
+The updated `examples/subagent_acceptance.py` then passed **37 required
+criteria**, with no failures or dependent skips, against Magpie at
+`http://127.0.0.1:3425/v1`, model `deepseek/deepseek-flash`. Its separate local
+stalled-HTTP case used `--run-timeout 0.25 --process-timeout 3`: the outer CLI
+exited 124 in **4.269s**, within the deadline plus cleanup allowance, with
+`supervision.timed_out=true`, `tree_stopped=true`, and no final message.
+The live-model cases fixed the copied module, preserved the original test,
+passed independent verification (**1 passed in 0.01s**), recalled the marker
+after a fresh-process resume without tools, and rejected reuse without resume.
+Every CLI invocation used supervision. The final report independently records
+`runtime_completed=true` and `verified_task_success=true`.
+
+Local artifacts are retained under
+`.scratch/subagent-acceptance-10d86614bfe848ada51bdbdddd571541/`, including
+`report.json`, process receipts, stderr, verifier output, fixture hashes, and
+journal snapshots. No full-suite, hosted-CI, POSIX execution, or long-duration
+result is claimed for this revision.
+
+OS scheduling and process creation are not real-time guarantees. Processes
+deliberately detached from managed groups remain outside containment; a forced
+supervisor kill on POSIX cannot execute its cleanup handler. Experimental
+Windows AppContainer is rejected with process supervision because its ACL and
+profile cleanup cannot honor the bounded teardown contract. Forced interruption
+can lose queued journal observations and leave effects uncertain; unknown
+admission/activation/text fields are null, and no replay or rollback is implied.
+
 ## Subagent result and session ownership acceptance (2026-11-13)
 
 This revision separates runtime completion from progress text. `final_message`

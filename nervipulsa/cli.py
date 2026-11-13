@@ -147,6 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Completion-wait seconds after submission (stdin: after EOF); 0 means no limit",
     )
     parser.add_argument(
+        "--process-timeout",
+        type=float,
+        default=0.0,
+        help="With --prompt: supervise process lifetime, including startup and cleanup; 0 disables",
+    )
+    parser.add_argument(
         "--session-id",
         default=None,
         help="Stable session id, useful with --resume and durable inspection",
@@ -1067,6 +1073,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not math.isfinite(args.run_timeout) or args.run_timeout < 0:
         parser.error("--run-timeout must be finite and zero or greater")
+    if not math.isfinite(args.process_timeout) or args.process_timeout < 0:
+        parser.error("--process-timeout must be finite and zero or greater")
+    if args.process_timeout > 0 and args.prompt is None:
+        parser.error("--process-timeout requires --prompt")
     if args.json and args.prompt is None:
         parser.error("--json requires --prompt")
     if args.prompt is not None and not args.prompt.strip():
@@ -1077,6 +1087,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--session-id must not be empty")
     settings = _settings_from_args(args)
     workspace = Path(settings.workspace).resolve()
+    if args.process_timeout > 0:
+        from .supervision import run_supervised
+
+        return run_supervised(
+            settings,
+            workspace,
+            prompt=args.prompt,
+            json_output=args.json,
+            run_timeout=args.run_timeout,
+            process_timeout=args.process_timeout,
+            session_id=args.session_id,
+            resume=args.resume,
+        )
     try:
         return asyncio.run(
             run_cli(

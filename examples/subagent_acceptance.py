@@ -1,17 +1,17 @@
 """Repeatable live CLI acceptance; requires NV_BASE_URL, NV_API_KEY and NV_MODEL.
 
 Run: python examples/subagent_acceptance.py [--max-activations 12]
-         [--run-timeout 180] [--pytest-timeout 60]
+         [--run-timeout 180] [--process-timeout 210] [--pytest-timeout 60]
 NV_PROVIDER defaults to openai. Credentials are passed only in the environment.
 Every invocation creates .scratch/subagent-acceptance-<uuid>/ containing report.json,
 workspace/ (fixture and runtime journal), verifier/ (independent pytest fixture),
 and artifacts/ (sanitized argv, stdout, parsed JSON, stderr, and journal snapshots).
 
-The CLI run timeout is a SOFT completion deadline: startup, provider cancellation,
-worker cleanup, and journal flushing may extend process lifetime. This harness
-waits for orderly CLI exit and never kills a process tree. It does not test effect
-replay. A completed runtime is recorded separately from independently verified
-bugfix success. This is a paid live-model check, not part of the normal test suite.
+The CLI process timeout supervises startup, execution and teardown, with up to
+five additional seconds for OS tree cleanup. The shorter run timeout initiates
+orderly shutdown. A local stalled HTTP scenario verifies forced termination;
+the remaining checks use the live model. Runtime completion is separate from
+independently verified task success. This paid check is outside the test suite.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import argparse
 from collections import Counter
 import hashlib
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import math
 import os
 from pathlib import Path
@@ -27,19 +28,21 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 DEADLINE_NOTE = (
-    "--run-timeout is a soft completion deadline, not a hard process deadline; "
-    "startup and orderly cancellation/cleanup can take longer. No process-tree kills."
+    "--run-timeout initiates orderly shutdown; --process-timeout also bounds "
+    "runtime startup and teardown, with up to 5s for forced OS tree cleanup."
 )
 CRITERIA = {
     "configuration": [],
     "first.json_object": ["configuration"],
     "first.exit_coherent": ["first.json_object"],
     "first.message_contract": ["first.json_object"],
+    "first.supervision": ["first.json_object"],
     "first.runtime_completed": ["first.exit_coherent"],
     "fixture.calc_changed": ["configuration"],
     "fixture.test_unchanged": ["configuration"],
@@ -48,6 +51,7 @@ CRITERIA = {
     "resume.json_object": ["first.runtime_completed", "journal.first_readable"],
     "resume.exit_coherent": ["resume.json_object"],
     "resume.message_contract": ["resume.json_object"],
+    "resume.supervision": ["resume.json_object"],
     "resume.runtime_completed": ["resume.exit_coherent"],
     "resume.transcript_restored": ["resume.json_object"],
     "resume.marker_recalled": ["resume.runtime_completed"],
@@ -58,10 +62,18 @@ CRITERIA = {
     "reuse.json_object": ["journal.first_readable"],
     "reuse.exit_coherent": ["reuse.json_object"],
     "reuse.message_contract": ["reuse.json_object"],
+    "reuse.supervision": ["reuse.json_object"],
     "reuse.session_exists": ["reuse.json_object"],
     "journal.reuse_readable": ["reuse.json_object"],
     "reuse.prior_rows_preserved": ["journal.reuse_readable"],
     "fixture.test_still_unchanged": ["configuration"],
+    "deadline.json_object": ["configuration"],
+    "deadline.exit_coherent": ["deadline.json_object"],
+    "deadline.message_contract": ["deadline.json_object"],
+    "deadline.supervision": ["deadline.json_object"],
+    "deadline.request_started": ["configuration"],
+    "deadline.forced_timeout": ["deadline.exit_coherent"],
+    "deadline.bounded_exit": ["deadline.exit_coherent"],
     "harness_execution": [],
 }
 
@@ -148,11 +160,14 @@ class Acceptance:
     def passed(self, name: str) -> bool:
         return self.criteria[name]["status"] == "passed"
 
-    def command(self, prompt: str, *, resume: bool = False) -> list[str]:
+    def command(self, prompt: str, *, resume: bool = False, workspace: Path | None = None,
+                run_timeout: float | None = None, process_timeout: float | None = None) -> list[str]:
         command = [
-            sys.executable, "-m", "nervipulsa", "--dir", str(self.workspace),
+            sys.executable, "-m", "nervipulsa", "--dir", str(workspace or self.workspace),
             "--session-id", self.session_id, "--max-activations", str(self.args.max_activations),
-            "--run-timeout", str(self.args.run_timeout), "--timeout", "30",
+            "--run-timeout", str(self.args.run_timeout if run_timeout is None else run_timeout),
+            "--process-timeout", str(self.args.process_timeout if process_timeout is None else process_timeout),
+            "--timeout", "30",
             "--max-timeout", "60", "--prompt", prompt, "--json",
         ]
         if resume:
@@ -196,8 +211,12 @@ class Acceptance:
         }
         return code, stdout
 
-    def cli(self, name: str, prompt: str, *, resume: bool = False) -> dict | None:
-        code, stdout = self.run_process(name, self.command(prompt, resume=resume), ROOT)
+    def cli(self, name: str, prompt: str, *, resume: bool = False,
+            command: list[str] | None = None, env: dict | None = None) -> dict | None:
+        code, stdout = self.run_process(
+            name, command if command is not None else self.command(prompt, resume=resume),
+            ROOT, env=env,
+        )
         try:
             payload = json.loads(stdout)
             if not isinstance(payload, dict):
@@ -238,7 +257,11 @@ class Acceptance:
         )
         self.check(f"{name}.message_contract", message_contract,
                    "final_message belongs only to success; last_message is null or activation/text")
-        if name != "reuse":
+        supervision = payload.get("supervision")
+        self.check(f"{name}.supervision", isinstance(supervision, dict)
+                   and supervision.get("tree_stopped") is True,
+                   "Supervisor confirms termination of the managed process tree")
+        if name in {"first", "resume"}:
             self.check(f"{name}.runtime_completed", coherent and status == "succeeded",
                        "Runtime completion alone does not verify the requested task")
         return payload
@@ -317,11 +340,56 @@ class Acceptance:
             "returncode": code, "tests": "pristine test_calc.py in independent verifier directory",
         })
 
+    def verify_process_deadline(self) -> None:
+        requested = threading.Event()
+        release = threading.Event()
+
+        class StalledProvider(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                requested.set()
+                release.wait(15)
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), StalledProvider)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        limit = 3.0
+        prompt = "Reply when the provider responds."
+        command = self.command(
+            prompt, workspace=self.directory / "deadline-workspace",
+            run_timeout=0.25, process_timeout=limit,
+        )
+        env = dict(self.env, NERVIPULSA_PROVIDER="openai", NERVIPULSA_MODEL="deadline-fixture",
+                   NERVIPULSA_API_KEY="deadline-fixture",
+                   NERVIPULSA_BASE_URL=f"http://127.0.0.1:{server.server_port}/v1")
+        try:
+            result = self.cli("deadline", prompt, command=command, env=env)
+            self.check("deadline.request_started", requested.is_set(),
+                       "Local HTTP request entered its blocking handler before termination")
+            supervision = result.get("supervision") if result is not None else None
+            self.check("deadline.forced_timeout", self.passed("deadline.exit_coherent")
+                       and result.get("status") == "timeout" and isinstance(supervision, dict)
+                       and supervision.get("timed_out") is True,
+                       "Outer supervisor terminated blocking HTTP teardown after the soft deadline")
+            duration = self.processes["deadline"]["duration_seconds"]
+            self.check("deadline.bounded_exit", duration < limit + 8,
+                       {"seconds": duration, "deadline_seconds": limit, "cleanup_allowance_seconds": 5})
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def exercise(self) -> None:
         missing = [name for name in ("NV_BASE_URL", "NV_API_KEY", "NV_MODEL")
                    if not os.environ.get(name, "").strip()]
         if not self.check("configuration", not missing, {"missing_environment": missing}):
             return
+        self.verify_process_deadline()
         original_calc = (ROOT / "examples" / "bugfix" / "calc.py").read_bytes()
         original_test = (ROOT / "examples" / "bugfix" / "test_calc.py").read_bytes()
         (self.workspace / "calc.py").write_bytes(original_calc)
@@ -419,6 +487,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-activations", type=positive_int, default=12)
     parser.add_argument("--run-timeout", type=positive_seconds, default=180.0)
+    parser.add_argument("--process-timeout", type=positive_seconds, default=210.0)
     parser.add_argument("--pytest-timeout", type=positive_seconds, default=60.0)
     args = parser.parse_args()
     acceptance = Acceptance(args)

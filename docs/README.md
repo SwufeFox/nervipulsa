@@ -45,9 +45,12 @@ architecture reference and the tests in this tree.
   and no-replay checks.
 - [`test_session_lock.py`](../tests/test_session_lock.py) — real OS contention,
   startup/shutdown cancellation, and ownership release on process death.
+- [`test_supervision.py`](../tests/test_supervision.py) — process deadlines
+  across blocking HTTP teardown and running worker/descendant processes.
 - [`subagent_acceptance.py`](../examples/subagent_acceptance.py) — opt-in real
   CLI task with isolated configuration, independent verification, transcript
-  continuation, and session-reuse rejection; keeps separate run artifacts.
+  continuation, session-reuse rejection, and a stalled-HTTP deadline check;
+  runs under process supervision and keeps separate artifacts.
 - [`bench_handler_ablation.py`](../benchmarks/bench_handler_ablation.py) —
   scripted A0/A1/A2 mechanism comparison.
 - [`failure_baseline.json`](../benchmarks/failure_baseline.json) and

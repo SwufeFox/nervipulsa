@@ -126,11 +126,12 @@ def filtered_environment() -> dict[str, str]:
 
 
 class ManagedProcess:
-    def __init__(self, proc: subprocess.Popen[bytes], control: socket.socket, job: Any, cleanup: Any = None) -> None:
+    def __init__(self, proc: subprocess.Popen[bytes], control: socket.socket, job: Any, cleanup: Any = None, supervisor: Any = None) -> None:
         self.proc = proc
         self.control = control
         self.job = job
         self._sandbox_cleanup = cleanup
+        self._supervisor = supervisor
         self._lock = threading.Lock()
         self._sandbox_cleanup_lock = threading.Lock()
         self._termination_result: bool | None = None
@@ -158,7 +159,9 @@ class ManagedProcess:
         return int(self.proc.pid)
 
     def poll(self) -> int | None:
-        status = self.proc.poll()
+        # A registered POSIX group must retain its leader PID until the
+        # supervisor acknowledges retirement, including an already dead leader.
+        status = peek_returncode(self.proc) if self._supervisor is not None else self.proc.poll()
         if status is not None:
             self._cleanup_sandbox()
         return status
@@ -172,6 +175,8 @@ class ManagedProcess:
 
 
     def _terminate_tree(self) -> bool:
+        if self._supervisor is not None:
+            return self._supervisor.stop_worker(self)
         tree_stopped = True
         if os.name == "nt":
             if self.job is not None:
@@ -216,6 +221,9 @@ class ManagedProcess:
 
 
 def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProcess:
+    from .supervision import worker_supervisor
+
+    supervisor = worker_supervisor() if os.name != "nt" else None
     parent, child = socket.socketpair()
     child.set_inheritable(True)
     env = filtered_environment()
@@ -225,6 +233,9 @@ def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProces
         "--workspace", str(workspace), "--epoch", str(epoch),
         "--output-dir", str(output_dir),
     ]
+    if supervisor is not None:
+        argv[3] = "nervipulsa.supervision"
+        argv.insert(4, "--worker-child")
     sandbox_cleanup = None
     try:
         if os.name == "nt" and os.environ.get("NERVIPULSA_WINDOWS_APPCONTAINER", "").lower() in {"1", "true", "yes"}:
@@ -246,8 +257,8 @@ def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProces
         else:
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE, env=env, cwd=str(workspace), pass_fds=(child.fileno(),),
-                start_new_session=True, close_fds=True)
-    except Exception:
+                start_new_session=supervisor is None, close_fds=True)
+    except BaseException:
         parent.close()
         child.close()
         raise
@@ -255,7 +266,41 @@ def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProces
         child.close()
     job = _assign_windows_job(proc) if os.name == "nt" else None
     parent.setblocking(True)
-    return ManagedProcess(proc, parent, job, sandbox_cleanup)
+    managed = ManagedProcess(proc, parent, job, sandbox_cleanup, supervisor)
+    if supervisor is not None:
+        from .framing import read_frame, write_frame
+
+        try:
+            supervisor.register(managed)
+            # The worker cannot leave the root group until registration is
+            # acknowledged. A root-group kill therefore catches every race
+            # before registration, including a blocked interpreter startup.
+            write_frame(parent, {"kind": "worker-release"})
+            ready = read_frame(parent)
+            if ready != {"kind": "worker-group-ready", "pid": proc.pid}:
+                raise RuntimeError("supervised worker did not establish its process group")
+        except BaseException:
+            managed.terminate_tree()
+            parent.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+            raise
+    return managed
+
+
+def peek_returncode(proc: subprocess.Popen[bytes]) -> int | None:
+    """Observe exit without releasing a POSIX group leader's PID ownership."""
+    if proc.returncode is not None:
+        return proc.returncode
+    if os.name == "nt":
+        return proc.poll()
+    required = ("waitid", "WNOWAIT", "WEXITED", "WNOHANG", "P_PID")
+    if not all(hasattr(os, name) for name in required):
+        raise RuntimeError("process supervision requires POSIX waitid(WNOWAIT)")
+    result = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    if result is None:
+        return None
+    return result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
 
 
 def _cleanup_appcontainer(profile: str, acl: tuple[str, list[tuple[Path, bool]]]) -> bool:
@@ -298,7 +343,8 @@ def _cleanup_appcontainer(profile: str, acl: tuple[str, list[tuple[Path, bool]]]
     return ok
 
 
-def _assign_windows_job(proc: subprocess.Popen[bytes]) -> Any:
+def _assign_windows_job(proc: subprocess.Popen[bytes], *, strict: bool = False) -> Any:
+    kernel32 = job = None
     try:
         kernel32, job = _create_kill_on_close_job()
         raw_handle = getattr(proc, "_handle")
@@ -307,12 +353,14 @@ def _assign_windows_job(proc: subprocess.Popen[bytes]) -> Any:
             raise OSError("worker process handle is unavailable")
         from ctypes import wintypes
 
-        assigned = kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(handle_value))
-        if not assigned:
-            kernel32.CloseHandle(job)
-            return None
+        if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(handle_value)):
+            raise OSError("AssignProcessToJobObject failed; process containment is unavailable")
         return job
     except Exception:
+        if job is not None and kernel32 is not None:
+            kernel32.CloseHandle(job)
+        if strict:
+            raise
         return None
 
 
@@ -387,6 +435,49 @@ def _terminate_job(job: Any) -> bool:
         return bool(kernel32.TerminateJobObject(job, 1))
     finally:
         kernel32.CloseHandle(job)
+
+
+def windows_job_active_processes(job: Any) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class Accounting(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", ctypes.c_int64), ("TotalKernelTime", ctypes.c_int64),
+            ("ThisPeriodTotalUserTime", ctypes.c_int64), ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+            ("TotalPageFaultCount", wintypes.DWORD), ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD), ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+    kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+    info = Accounting()
+    if not kernel32.QueryInformationJobObject(job, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+        raise OSError("QueryInformationJobObject failed")
+    return int(info.ActiveProcesses)
+
+
+def terminate_windows_job(job: Any) -> bool:
+    """Terminate without closing, so the owner can confirm active process count."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    return bool(kernel32.TerminateJobObject(job, 1))
+
+
+def close_windows_job(job: Any) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    if not kernel32.CloseHandle(job):
+        raise OSError("CloseHandle(job) failed")
 
 
 def _taskkill(pid: int) -> bool:

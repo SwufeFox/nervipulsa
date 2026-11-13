@@ -557,6 +557,66 @@ def test_worker_hashline_import_view_and_put_edit(workspace: Path) -> None:
     asyncio.run(body())
 
 
+def test_worker_source_page_survives_output_preview(workspace: Path) -> None:
+    async def body() -> None:
+        lines = [f"line {number}: " + "界" * 40 for number in range(1, 101)]
+        (workspace / "large.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        rig = HostRig(workspace)
+        try:
+            first = rig.request("print(hashline_edit.view_file('large.txt'))")
+            page = await _wait(rig.llm, "python.finished", reply_to=first.event_id)
+            assert page.payload["status"] == "succeeded"
+            assert page.payload["truncated"] is False
+            assert page.payload["stdout_bytes"] <= 3073
+            assert "[More: print(hashline_edit.view_file(" in page.payload["stdout"]
+            selected = rig.request(
+                "print(hashline_edit.view_file('large.txt', start=80, end=82))"
+            )
+            result = await _wait(rig.llm, "python.finished", reply_to=selected.event_id)
+            assert result.payload["status"] == "succeeded"
+            assert result.payload["truncated"] is False
+            assert result.payload["stdout"].splitlines()[1:] == [
+                f"{number}:{lines[number - 1]}" for number in range(80, 83)
+            ]
+        finally:
+            await rig.close()
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("shadow", ["nervipulsa", "json.py"])
+def test_worker_bootstrap_ignores_workspace_package_shadowing(workspace: Path, shadow: str) -> None:
+    async def body() -> None:
+        target = workspace / shadow
+        if shadow == "nervipulsa":
+            target.mkdir()
+            target = target / "__init__.py"
+        target.write_text(
+            "from pathlib import Path\n"
+            "Path('shadow-loaded').write_text('unexpected import')\n"
+            "raise RuntimeError('workspace package loaded during runtime bootstrap')\n",
+            encoding="utf-8",
+        )
+        (workspace / "workspace_module.py").write_text("VALUE = 42\n", encoding="utf-8")
+        (workspace / "sample.txt").write_text("first\nsecond\n", encoding="utf-8")
+        rig = HostRig(workspace)
+        try:
+            request = rig.request(
+                "from workspace_module import VALUE\n"
+                "print(VALUE)\n"
+                "print(hashline_edit.view_file('sample.txt', start=2, end=2))"
+            )
+            result = await _wait(rig.llm, "python.finished", reply_to=request.event_id)
+            assert result.payload["status"] == "succeeded", result.payload
+            assert result.payload["stdout"].splitlines()[0] == "42"
+            assert result.payload["stdout"].splitlines()[-1] == "2:second"
+            assert not (workspace / "shadow-loaded").exists()
+        finally:
+            await rig.close()
+
+    asyncio.run(body())
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows AppContainer API")
 def test_appcontainer_startup_failure_is_emitted(
     workspace: Path, monkeypatch: pytest.MonkeyPatch

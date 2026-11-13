@@ -43,6 +43,11 @@ architecture reference and the tests in this tree.
 - [`test_crash_boundaries.py`](../tests/test_crash_boundaries.py) — T0–T4
   Durable Effect Protocol process-termination boundaries, restart inspection,
   and no-replay checks.
+- [`test_session_lock.py`](../tests/test_session_lock.py) — real OS contention,
+  startup/shutdown cancellation, and ownership release on process death.
+- [`subagent_acceptance.py`](../examples/subagent_acceptance.py) — opt-in real
+  CLI task with isolated configuration, independent verification, transcript
+  continuation, and session-reuse rejection; keeps separate run artifacts.
 - [`bench_handler_ablation.py`](../benchmarks/bench_handler_ablation.py) —
   scripted A0/A1/A2 mechanism comparison.
 - [`failure_baseline.json`](../benchmarks/failure_baseline.json) and

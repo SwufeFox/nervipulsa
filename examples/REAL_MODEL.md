@@ -22,6 +22,41 @@ working, and reads a later message before acting on it.
 Two recorded runs of all three experiments passed; see `TEST_RESULTS.md` for
 the numbers, observed timings, and timeout the model had to correct.
 
+## Repeatable CLI subagent acceptance
+
+    NV_PROVIDER=magpie NV_BASE_URL=... NV_API_KEY=... NV_MODEL=... \
+    python examples/subagent_acceptance.py
+
+This separate driver creates a fresh workspace and empty user-configuration
+directory. It uses only the supplied `NV_*` provider configuration;
+`NV_PROVIDER` defaults to `openai`. Credentials are passed in the environment,
+and captured text is redacted before being written to reports.
+
+The required checks are:
+
+- Fix a copy of `bugfix/calc.py`, preserving the original test file. Run pristine
+  tests against the resulting module in a separate verifier directory, with
+  model-added test/config files excluded.
+- Start a new CLI process with `--resume`; recall a unique first-prompt marker
+  from the restored transcript without tools, retaining all prior journal rows.
+- Reuse the existing session without `--resume`; require `session_exists`,
+  coherent process/JSON exit status, and retained history.
+
+Each run keeps `.scratch/subagent-acceptance-<uuid>/report.json`, `workspace/`
+with the SQLite journal, `verifier/`, and `artifacts/` with commands, stdout JSON,
+stderr, fixture hashes, and journal snapshots. A failed or skipped required
+check makes the driver exit nonzero. `runtime_completed` and
+`verified_task_success` are reported separately; a successful model response
+alone cannot pass the acceptance run. Failed runs are retained alongside later runs.
+
+Options are `--max-activations` (12), `--run-timeout` (180 seconds per CLI
+invocation), and `--pytest-timeout` (60 seconds). The CLI deadline bounds
+completion waiting, not total process lifetime; the driver waits for orderly
+shutdown. This check does not establish hard deadlines, effect replay,
+long-running stability, or general task quality. Credential-free session
+contention, cancellation, process-death release, and result-failure regressions
+live in `tests/test_session_lock.py` and `tests/test_cli.py`.
+
 ## Or do them by hand
 
 Start a session with a configured OpenAI-compatible endpoint:

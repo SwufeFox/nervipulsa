@@ -31,7 +31,7 @@ flowchart TD
 
 ## 2. 从用户请求到执行终态
 
-1. CLI 加载 `Settings`，解析 workspace，经 `application.create_runtime()` 选择 backend、tool catalog 并创建 Runtime。注册路由后，`Runtime.start()` 启动 Journal 并等待初始化 flush；显式 session_id 会在线程中读取该会话已持久化的事件序号边界，避免重新使用旧 ID。`await runtime.start(restore_transcript=True)` 在线程中读取最后提交的快照，并在启动 Bus、host 和 actor/UI/lifecycle 任务前应用模型视图。worker 启动有独立的 ready 等待，Bus 启动不等于解释器已经 ready。
+1. CLI 加载 `Settings`，解析 workspace，经 `application.create_runtime()` 选择 backend、tool catalog 并创建 Runtime。`Runtime.start()` 先在线程中取得 canonical journal path/session 的非阻塞 OS 文件锁，再启动 Journal、等待初始化 flush、读取持久事件序号边界。占用冲突抛 `SessionBusyError`，CLI 返回 `rejected/session_busy`，不读取历史、不发布输入、不请求模型。`await runtime.start(restore_transcript=True)` 在线程中读取最后提交的快照，并在启动 Bus、host 和 actor/UI/lifecycle 任务前应用模型视图。worker 启动有独立的 ready 等待，Bus 启动不等于解释器已经 ready。
 2. `Runtime.submit_text()` 同步调用 emitter。`Bus.call()` 检查运行状态、路由、有限 JSON 快照、事件大小和邮箱容量，再赋会话内 seq/id 并投递。返回 `Delivery` 是进程内接受回执，不是磁盘提交或业务完成确认。`submit_text()` 与 `submit_observation()` 将 actor 持有的 paused 输入和 ordinary mailbox 队列合并计入输入容量；`Runtime.retry()` 使用独立的单项 `Lane.RETRY`，普通输入占满时仍可提交 retry。观察器在接受后被同步调用，Journal 观察记录仅入有界线程队列。
 3. `LLMActor.run()` 按 seq 取批，`_activate()` 将输入投影到 Transcript，消费邮箱预留，建立 Activation。`ContextProjector` 在请求时加入 host 的实时 epoch/未完成执行事实。上下文限制按序列化 JSON 字符估计，非 tokenizer token；必要时先请求模型摘要，摘要成功且可安全应用才替换历史片段。完整的普通轮次和已有摘要都可以参与压缩；超限或预算耗尽会暂停。
 4. actor 经 `ModelBackend.complete(ModelRequest)` 请求模型；默认 provider 是 OpenAI-compatible Chat Completions HTTP 适配器。actor 校验整个响应的工具调用，再记录 assistant 内容并按顺序调用 catalog 中的工具。原生 tool 消息记录的是工具回执。无工具的 assistant 文本可结束本次 activation，但不意味着此前提交的 Python 都完成。
@@ -40,7 +40,9 @@ flowchart TD
 7. worker 在每次执行前恢复 cwd，以同一 namespace 执行代码，捕获异常和输出。`SystemExit(None)` 和整数零退出按成功结束当前执行，非零整数和非整数退出值按失败处理；这些路径都保留 namespace，不退出 worker。结束时固定 handler 快照，发送 `handler.snapshot`、逐个 `handler.fired` 和 `finished`。回调在 worker 中同步执行，其耗时及失败也受 host 的等待/超时约束。
 8. host 校验 request/epoch/handler 快照，接收 worker terminal 后先同步提交 effect `observed`。提交失败则返回失败终态并标明 `effect_state=unknown`。host 在 loop 上交付 handler 结果，计算缺失项，再通过预留槽发一次 `python.finished`；`_done` 防止本会话重复生成终态，投递失败另记计数。actor 有界合并 handler 结果（兼容旧生产者的 25ms 窗口），将观测加入后续 activation，模型再决定下一步。
 
-标识关联：session_id 是持久会话作用域，默认每个 Runtime 随机生成，也可显式用于顺序续接；event id/seq 在会话内唯一。显式会话启动时从 events、输入记录、effect 和 receipt 的已保存 ID 恢复序号边界，不能只取 transcript 中残留的 ID，否则 assistant/UI 事件会与下一轮输入冲突并造成日志丢失。activation_id 关联一次输入批次和模型提交；tool_call_id 关联模型调用与回执；execution_id 是 `python.requested` 的 event id，`python.finished.reply_to` 指向它。SQLite 查询始终需要 session_id。相同 journal/session 不支持多个进程同时写入。
+标识关联：session_id 是持久会话作用域，默认每个 Runtime 随机生成，也可显式用于顺序续接；event id/seq 在会话内唯一。显式会话启动时从 events、输入记录、effect 和 receipt 的已保存 ID 恢复序号边界，不能只取 transcript 中残留的 ID，否则 assistant/UI 事件会与下一轮输入冲突并造成日志丢失。activation_id 关联一次输入批次和模型提交；tool_call_id 关联模型调用与回执；execution_id 是 `python.requested` 的 event id，`python.finished.reply_to` 指向它。SQLite 查询始终需要 session_id。相同 journal/session 的并发 Runtime 在启动时明确拒绝，不同 session 可共用 journal。
+
+会话锁由 Windows byte-range lock 或 POSIX flock 持有，文件名哈希包含 canonical journal path 和 session_id。锁文件不删除，避免新旧 inode 同时被持有；进程死亡由 OS 释放句柄。启动取消先等待线程中的取得锁/Journal 初始化操作结束再清理；shutdown 取消也等待 host/actor 清理及 Journal writer 真正停止，随后才释放本实例的锁。这保证正常生命周期内不会在旧 writer 仍活动时交出会话，不是分布式锁或硬退出期限。
 
 输入到输出的关联是公开接口，不要求宿主扫描 ledger：`Runtime.activation_for_event(event_id)` 常数时间返回消费该输入的 activation；`await Runtime.wait_for_activation(input_event_id=..., timeout=...)` 在该 activation 不再 `running` 时返回，`None` 表示超时、尚无消费，或该输入被停在只能由显式 retry 解除的 pause 之后。每次 settle 递增 `Activation.settle_version`；retry 之后传入 `after_version` 等待下一次结果。同一次 settle 还会以 `agent.activation_finished` 进入 trace 与 journal，payload 为 `{activation_id, input_event_ids, status, error_kind, ended_at, settle_version}`。retry 复用同一 activation 对象，因此 `input_event_ids` 在重试前后保持稳定。
 
@@ -50,7 +52,7 @@ flowchart TD
 
 `actor.activations` 在内存中保留最近至多 `ACTIVATION_LEDGER_RETENTION`（256）个对象，`activation_count` 仍报告 Runtime 生命周期总数；按 event 和 activation id 的索引随对象一起过期，过期关联可从 journal 检查。当前 running/paused activation 不因窗口裁剪。`Runtime.trace` 保留最近至多 1,024 个事件，`Runtime.event_count(event_type=None)` 提供累计计数；journal writer 的丢弃/错误状态仍由 `journal.incomplete`、`journal.dropped` 暴露。
 
-CLI 的 `--prompt` 将一条任务提交后等待 idle、pause 或期限到达；`--json` 的 stdout 只输出结果对象，诊断输出到 stderr。成功表示最后 activation 已 committed、运行时空闲且清理完成，不代表模型任务已被独立验收。提交钩子失败的响应不会进入 `final_message`；初始化/恢复失败返回非零和失败 JSON，清理失败不能同时报告 succeeded。`--run-timeout` 从输入提交后（管道模式从 EOF 后）开始限制完成等待，期限到达后仍执行 shutdown；线程中的阻塞 HTTP 及进程清理可能推迟最终退出，因此不是硬进程期限。
+CLI 的 `--prompt` 将一条任务提交后等待 idle、pause 或期限到达；`--json` 的 stdout 只输出结果对象，诊断输出到 stderr。成功表示最后 activation 已 committed、运行时空闲且清理完成，不代表模型任务已被独立验收。`final_message` 只包含成功运行的最后 activation 中无工具调用的已记录文本，所有失败/暂停/超时/拒绝路径均为 null；`last_message={activation_id,text}` 单独提供本次调用最近的已记录发言，可为中间进度。提交钩子失败的响应不进入任一字段。初始化/恢复失败返回非零和失败 JSON，清理失败不能同时报告 succeeded。`--run-timeout` 从输入提交后（管道模式从 EOF 后）开始限制完成等待，期限到达后仍执行 shutdown；线程中的阻塞 HTTP、进程清理及等待 journal writer 停止可能推迟最终退出，因此不是硬进程期限，CLI 没有外层进程监护器。已退出的 one-shot 通过 `--resume` 创建新 activation，仅恢复 transcript，不重试旧 paused activation、不重放或解决未知 effect。
 
 
 ## 3. 模块职责与状态归属
@@ -61,6 +63,7 @@ CLI 的 `--prompt` 将一条任务提交后等待 idle、pause 或期限到达�
 | `application.py` | 默认 provider/tool registry、构造入口 | 接受 registry 或 callable；保留 runtime_factory 签名兼容路径，不拥有执行状态 |
 | `ports.py` | ModelRequest/Response、ToolCall、backend/tool/catalog/context/sink/registry 协议 | 契约与传值类型；不做调度或持久化 |
 | `runtime.py` | 路由、组件生命周期、状态/日志接口、结果展示 | 拥有 Bus、邮箱、host、actor、Journal、trace/listeners；配置热更新只替换 provider 相关设置及 backend/model |
+| `session_lock.py` | 每个 canonical journal/session 的非阻塞 OS 文件锁 | descriptor 归属单个 Runtime；持有至清理完成，进程死亡自动释放；文件保留不代表仍被占用 |
 | `events.py` | JSON 边界、校验、同步 admission、邮箱与预留 | Bus 拥有 session、seq、路由及 CREATED/RUNNING/DRAINING/CLOSED；Mailbox 分别限制 ordinary 输入、单项 retry、结果、handler、feedback 与 diagnostic lane |
 | `llm.py` | 输入投影、上下文预算/摘要、单次模型请求、响应提交与暂停/重试 | actor 拥有 Activation、held 输入、已接受/拒绝调用状态及 Transcript；ContextProjector 构建模型视图，不拥有 worker namespace |
 | `providers.py` | HTTP 协议映射、错误分类与脱敏；ScriptedBackend | 实现 ModelBackend；不执行工具，不隐式恢复 Python |
@@ -68,9 +71,9 @@ CLI 的 `--prompt` 将一条任务提交后等待 idle、pause 或期限到达�
 | `python_environment.py` | 静态包、项目和 API 发现 | 宿主侧只读发现，不导入目标模块执行，不安装依赖 |
 | `python_host.py` | 串行执行队列、worker 生命周期、取消、超时、帧关联、终态与 effect 提交 | host 拥有 Execution、pending/current/done、epoch、handler 关联镜像、诊断计数；不调用模型 |
 | `python_worker.py` | compile/exec、持久 namespace、handler 注册/快照、输出捕获 | namespace/回调仅存在于该 worker epoch；host 镜像只用于关联和投递 |
-| `framing.py` / `process_tree.py` / `appcontainer.py` | 长度前缀 JSON socket、过滤环境和进程树管理、可选 Windows 隔离 | 控制帧与用户输出分离；平台清理失败必须保留诊断 |
+| `framing.py` / `process_tree.py` / `appcontainer.py` | 长度前缀 JSON socket、过滤环境和进程树管理、可选 Windows 隔离 | worker 以 `-P` 从宿主 runtime 路径启动，完成加载后再加入 workspace 以供用户模块导入；控制帧与用户输出分离，平台清理失败必须保留诊断 |
 | `journal.py` | 异步观测表、同步 durable effect 表、人工评估与查询 | 两条写入路径共用 SQLite 文件，提交保证不同；不是通用状态恢复引擎 |
-| `hashline_edit.py` | worker 可调用的文件快照/tag 与受限 PUT 编辑 | 防陈旧编辑的局部工具，不约束任意 Python 文件访问 |
+| `hashline_edit.py` | worker 可调用的文件快照/tag、按字节有界的源码分页与受限 PUT 编辑 | 每页至多 3 KiB，支持行区间与长行字符续读；tag 仍覆盖全文件。防陈旧编辑的局部工具，不约束任意 Python 文件访问 |
 | `cli.py` | 交互输入、命令、配置与展示 | 经 application/Runtime 使用会话，退出时发起清理 |
 
 这些文件是实际边界，不要求每项都成为一个新服务或抽象层。
@@ -131,3 +134,4 @@ Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：�
 - 更早的验证范围：初稿整理仅做静态检查；后续 scheduler 修复运行完整的 `python -m pytest tests/test_events.py tests/test_python_host.py -vv`，Windows / Python 3.13.14 / pytest 9.1.1 下 30 passed（163.80s），包含真实 worker、取消/重启及 durable commit 故障替身。新增回归在内存恢复回退实现时失败，证明覆盖该异常边界问题。当时未重现 startup flush 失败，未调整 timeout；一次通过不能排除间歇性 startup 问题。未运行全库测试、CLI/provider 或扫描竞态专项验证，以上测试不构成这些行为的验收。
 
 - 2026-11-13：新增单次子代理调用与 JSON 结果、显式会话续接；实跑发现并修复 `SystemExit(0)` 误报失败及续接复用 event id 导致观测静默丢失的问题。最终 live 运行验证一次 Python 执行、跨进程记忆与既有 SQLite 事件保留；测试阶段及 HTTP 超时边界见 [验证记录](../TEST_RESULTS.md#one-shot-and-resume-smoke-2026-11-13)。未据此宣称并发同会话写入、硬进程期限或生产任务质量已验收。
+- 2026-11-13 结果/会话收紧：`final_message` 与 `last_message` 分离，同一 journal/session 用 OS 锁明确拒绝并发；相关 CLI、锁、恢复、可选 host 和 T0–T4 回归 **83 passed in 59.94s**。空配置目录下的真实 CLI bugfix/独立验证/跨进程续接/复用拒绝验收通过 27 项条件；脚本与保留证据见 [验证记录](../TEST_RESULTS.md#subagent-result-and-session-ownership-acceptance-2026-11-13)。硬进程期限、POSIX 实跑、跨平台与长时间 live 验收仍未建立。

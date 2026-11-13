@@ -187,6 +187,9 @@ def test_one_shot_json_reports_success(monkeypatch, tmp_path, capsys) -> None:
     assert payload["exit_code"] == 0
     assert payload["session_id"] == "cli-test"
     assert payload["final_message"] == "ready"
+    assert payload["last_message"] == {
+        "activation_id": payload["activation"]["id"], "text": "ready",
+    }
     assert payload["activation"]["status"] == "committed"
     assert payload["delivery"]["accepted"] is True
 
@@ -237,6 +240,8 @@ def test_one_shot_json_reports_timeout(monkeypatch, tmp_path, capsys) -> None:
     assert code == 124
     assert payload["status"] == "timeout"
     assert payload["exit_code"] == 124
+    assert payload["final_message"] is None
+    assert payload["last_message"] is None
 
 
 def test_piped_input_deadline_returns_timeout_exit(monkeypatch, tmp_path):
@@ -287,6 +292,41 @@ def test_session_id_reuse_requires_resume(monkeypatch, tmp_path, capsys) -> None
     assert backend.calls == 1
 
 
+def test_one_shot_rejects_active_session_before_resume(monkeypatch, tmp_path, capsys):
+    backend = ScriptedBackend(lambda _request: ModelResponse(content="saved"))
+    _install_scripted_runtime(monkeypatch, backend)
+
+    async def body():
+        holder = Runtime(
+            Settings(model="scripted"), backend, tmp_path, session_id="busy",
+            python_host=False, tool_catalog=_NoTools(),
+        )
+        await holder.start()
+        try:
+            assert holder.submit_text("remember").accepted
+            assert await holder.wait_until_idle(timeout=10)
+            code = await cli.run_cli(
+                Settings(model="scripted"), tmp_path, prompt="competing input",
+                session_id="busy", resume=True, json_output=True, run_timeout=10,
+            )
+            payload = json.loads(capsys.readouterr().out)
+            assert code == payload["exit_code"] == 1
+            assert payload["status"] == "rejected"
+            assert payload["delivery"]["reason"] == "session_busy"
+            assert payload["delivery"]["accepted"] is False
+            assert payload["activation"] is None
+            assert payload["final_message"] is None
+            assert payload["last_message"] is None
+            assert backend.calls == 1
+            assert holder.submit_text("holder still owns the session").accepted
+            assert await holder.wait_until_idle(timeout=10)
+            assert backend.calls == 2
+        finally:
+            await holder.shutdown()
+
+    asyncio.run(body())
+
+
 def test_one_shot_does_not_publish_response_before_commit_hook(monkeypatch, tmp_path, capsys):
     async def fail_commit(_activation, _response):
         raise RuntimeError("storage unavailable")
@@ -303,6 +343,70 @@ def test_one_shot_does_not_publish_response_before_commit_hook(monkeypatch, tmp_
     assert payload["pause"]["kind"] == "response_commit_failed"
     assert payload["final_message"] is None
     assert "uncommitted answer" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("terminal", ["success", "commit_failure", "unknown", "timeout", "budget"])
+def test_one_shot_distinguishes_tool_progress_from_final_answer(
+    terminal, monkeypatch, tmp_path, capsys,
+):
+    async def respond(_request):
+        if backend.calls == 1:
+            return tool_response((
+                "write-effect",
+                "from pathlib import Path\n"
+                "Path('effect.txt').write_text('executed', encoding='utf-8')\n"
+                "print('effect recorded')",
+                None,
+            ), text="I will run that tool.")
+        if terminal == "unknown":
+            raise ProviderFailure("response_unknown", "connection lost")
+        if terminal == "timeout":
+            await asyncio.Event().wait()
+        return ModelResponse(content="final answer")
+
+    async def commit(_activation, response):
+        if terminal == "commit_failure" and response.content == "final answer":
+            raise RuntimeError("storage unavailable")
+
+    backend = ScriptedBackend(respond)
+
+    def create(settings, workspace, *, echo=None, runtime_factory=Runtime):
+        return runtime_factory(
+            settings, backend, workspace, echo=echo, response_commit_hook=commit,
+        )
+
+    monkeypatch.setattr(cli, "create_runtime", create)
+    code = asyncio.run(cli.run_cli(
+        Settings(model="scripted", max_activations=1 if terminal == "budget" else 10),
+        tmp_path, prompt="perform the task", json_output=True,
+        run_timeout=5 if terminal == "timeout" else 20,
+    ))
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert (tmp_path / "effect.txt").read_text(encoding="utf-8") == "executed"
+    assert code == payload["exit_code"]
+    if terminal == "success":
+        assert code == 0
+        assert payload["status"] == "succeeded"
+        assert payload["final_message"] == "final answer"
+        assert payload["last_message"] == {
+            "activation_id": payload["activation"]["id"], "text": "final answer",
+        }
+    else:
+        assert code == (124 if terminal == "timeout" else 1)
+        assert payload["status"] == ("timeout" if terminal == "timeout" else "paused")
+        assert payload["final_message"] is None
+        assert payload["last_message"] == {
+            "activation_id": backend.requests[0].activation_id,
+            "text": "I will run that tool.",
+        }
+        if terminal == "commit_failure":
+            assert payload["pause"]["kind"] == "response_commit_failed"
+            assert "final answer" not in captured.out + captured.err
+        elif terminal == "unknown":
+            assert payload["pause"]["kind"] == "response_unknown"
+        elif terminal == "budget":
+            assert payload["pause"]["kind"] == "budget"
 
 
 def test_one_shot_cleanup_failure_cannot_report_success(monkeypatch, tmp_path, capsys):
@@ -324,6 +428,8 @@ def test_one_shot_cleanup_failure_cannot_report_success(monkeypatch, tmp_path, c
     assert payload["status"] == "failed"
     assert payload["ok"] is False
     assert payload["cleanup_incomplete"] is True
+    assert payload["final_message"] is None
+    assert payload["last_message"]["text"] == "ready"
 
 
 def test_one_shot_resume_restores_prior_messages(monkeypatch, tmp_path, capsys):
@@ -373,6 +479,8 @@ def test_one_shot_corrupt_resume_fails_before_request(monkeypatch, tmp_path, cap
     assert code == 1
     assert payload["status"] == "failed"
     assert payload["delivery"]["reason"] == "initialization_failed"
+    assert payload["final_message"] is None
+    assert payload["last_message"] is None
     assert backend.calls == 1
 
 

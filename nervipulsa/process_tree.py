@@ -3,6 +3,8 @@
 The worker runs with a filtered environment. Provider credentials and
 NERVIPULSA_* values are not inherited. A Windows job object (or a POSIX
 process group) makes timeout and cancel stop managed child processes too.
+Worker bootstrap uses -P with the host source root on PYTHONPATH, preventing
+the workspace from replacing the runtime package before user code starts.
 This is process cleanup, not a sandbox.
 """
 
@@ -219,7 +221,7 @@ def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProces
     env = filtered_environment()
     env["NERVIPULSA_CONTROL_FD"] = str(child.fileno())
     argv = [
-        sys.executable, "-m", "nervipulsa.python_worker",
+        sys.executable, "-P", "-m", "nervipulsa.python_worker",
         "--workspace", str(workspace), "--epoch", str(epoch),
         "--output-dir", str(output_dir),
     ]
@@ -230,7 +232,7 @@ def spawn_worker(workspace: Path, epoch: int, output_dir: Path) -> ManagedProces
             sandbox_workspace = workspace.resolve(strict=True)
             sandbox_output = Path(os.path.abspath(output_dir))
             argv = [
-                sys.executable, "-m", "nervipulsa.python_worker",
+                sys.executable, "-P", "-m", "nervipulsa.python_worker",
                 "--workspace", str(sandbox_workspace), "--epoch", str(epoch),
                 "--output-dir", str(sandbox_output),
             ]

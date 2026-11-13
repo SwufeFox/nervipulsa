@@ -174,21 +174,28 @@ and assistant streaming go to stderr:
     nervipulsa --dir . --prompt "..." --json --run-timeout 300 > result.json
 
 The JSON object contains `ok`, `status` (`succeeded`, `paused`, `rejected`,
-`failed`, or `timeout`), `exit_code`, `session_id`, `final_message`,
+`failed`, or `timeout`), `exit_code`, `session_id`, `final_message`, `last_message`,
 `delivery`, `activation` (id, status, tool calls, attempt count, last-request usage),
 `pause` (kind, message, recovery hint), `error`, `transcript_chars`, and
 `resume`. `succeeded` means the runtime became idle with its last activation
 committed and cleanup completed; it does not verify that the model fulfilled
-the task. `final_message` contains the last recorded assistant text; a response
-whose commit hook failed is not published.
+the task. `final_message` contains only the last activation's recorded text
+when the run succeeds and that response has no tool calls. It is null on pause,
+timeout, rejection, initialization failure, or cleanup failure.
+`last_message` is `{activation_id, text}` for the latest recorded assistant text
+in this invocation, or null; it can contain intermediate progress on a failed
+run. Responses whose commit hook failed are absent from both fields. Use `ok`,
+`status`, and `exit_code` for runtime completion, and independently verify the task.
 
 Exit codes are 0 for success, 1 for paused/rejected/failed, 124 for a completion
 timeout, and 130 for interruption. `--json` requires `--prompt`.
 `--run-timeout` starts after prompt submission, or after EOF for piped input;
 0 means no limit. Expiry stops waiting and initiates shutdown. Startup, worker
-cleanup, and an already-running blocking HTTP request can extend process exit
-beyond that deadline. Use a parent-process deadline when a hard time limit is
-required. Cancellation does not roll back file or external side effects.
+cleanup, an already-running blocking HTTP request, and waiting for the journal
+writer to stop can extend process exit beyond that deadline. A caller needing
+a hard process deadline must supervise the entire process tree; this CLI does
+not provide that supervisor. Cancellation does not roll back file or external
+side effects.
 
 Give a task a stable id and continue it later:
 
@@ -202,8 +209,19 @@ or `/effects`. Sequential reuse of a session with existing journal history
 requires `--resume`, including sessions with effect rows but no transcript.
 Startup reserves event IDs above those already stored in observations, durable
 inputs, effects, and receipts. Events omitted from the model view must not be
-overwritten by the next invocation. Use one live process per journal/session;
-concurrent writers to the same session are not supported.
+overwritten by the next invocation. An OS file lock admits only one live Runtime
+per canonical journal path/session, including within one process. A competing
+CLI invocation exits 1 with `status=rejected` and `delivery.reason=session_busy`
+before reading history, publishing inputs, or requesting a model response.
+Different sessions can share a journal. Ownership lasts through shutdown and
+is released by the OS on process death; persistent files in `.nervipulsa-locks`
+beside the journal are not stale-owner markers and must not be deleted to bypass
+an active lock. This is cooperative local ownership, not distributed locking.
+
+A paused one-shot process has already shut down. `--resume` starts a new
+activation from the committed transcript; it does not retry the old paused
+activation or resolve uncertain effects. Inspect `/inspect` and `/effects`
+before repeating work whose file or external effects may already have occurred.
 
 ## Durable execution
 
@@ -431,6 +449,18 @@ corrected in experiment 3. Provider tests use a local HTTP stub; they make no
 live provider requests. After automated tests, configure the actual provider,
 base URL, model, and key in the Magpie CLI for a separate live user test.
 
+For a repeatable CLI subagent acceptance run with an empty configuration directory:
+
+    NV_PROVIDER=magpie NV_BASE_URL=... NV_API_KEY=... NV_MODEL=... \
+    python examples/subagent_acceptance.py
+
+This fixes a copied bug fixture, independently runs pristine tests, resumes the
+session in a new process to recall a marker without tools, and checks refusal
+of reuse without `--resume`. Each invocation retains a separate JSON report,
+CLI receipts, stderr, and journal under `.scratch/subagent-acceptance-<uuid>/`.
+Runtime completion and externally verified task success are separate fields.
+See [live-check instructions](examples/REAL_MODEL.md) for limits and artifacts.
+
 ## Files
 
 | Path | Responsibility |
@@ -451,8 +481,10 @@ base URL, model, and key in the Magpie CLI for a separate live user test.
 | `nervipulsa/config.py` | Precedence, persistence, redaction |
 | `nervipulsa/cli.py` | Input, display, commands |
 | `nervipulsa/runtime.py` | Session wiring, event routing, durable inspection |
+| `nervipulsa/session_lock.py` | Nonblocking OS ownership of each journal/session |
 | `nervipulsa/demo.py` | Credential-free scripted end-to-end trace |
 | `examples/real_model_experiments.py` | Runnable driver for the three live checks |
+| `examples/subagent_acceptance.py` | Isolated CLI bugfix, independent tests, resume and refusal acceptance |
 | `examples/REAL_MODEL.md` | What each live check means and how to read it |
 | `benchmarks/bench_runtime.py` | Credential-free mechanism benchmarks |
 | `docs/README.md` | Documentation index and evidence boundaries |
@@ -466,6 +498,10 @@ Use this only with trusted local workspaces. The worker keeps Python variables
 and imports between calls. Timeout and running cancellation terminate the
 worker and reset that namespace. File and external side effects are not rolled
 back.
+
+The worker loads Nervipulsa from the host installation, even when the workspace
+contains another checkout or a package with the same name. Once runtime startup
+is complete, ordinary user code can still import modules from the workspace.
 
 Python dispatch uses synchronous durable effect commits in the same SQLite file,
 as described in [Architecture](docs/architecture.md#5-持久性边界).
@@ -531,6 +567,17 @@ print(hashline_edit.edit("""[src/example.py#1A2B]
 PUT 2.=2:
 +updated line"""))
 ```
+
+`view_file()` returns at most 3 KiB of UTF-8 text so one printed page fits the
+worker's 4 KiB stdout preview. For a targeted read, use
+`print(hashline_edit.view_file("src/example.py", start=200, end=260))` with
+inclusive, one-based line numbers. Follow the printed `[More: ...]` call for
+the rest. Very long lines continue with a zero-based character `column` and
+are labeled `N+column:text`; the cursor never splits a UTF-8 character.
+Print one page per execution, since combining pages can exceed the preview.
+The tag still covers the whole file, and edit coordinates remain the original
+line numbers. `edit()` also returns a bounded view with the new tag.
+
 
 Tags are four uppercase hex digits from the low 16 bits of xxHash32 over the
 normalized whole-file snapshot. Every edit uses the latest view tag and original

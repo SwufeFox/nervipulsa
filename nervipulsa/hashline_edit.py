@@ -12,6 +12,7 @@ from pathlib import Path, PureWindowsPath
 _MASK32 = 0xFFFFFFFF
 _P1, _P2, _P3, _P4, _P5 = 2654435761, 2246822519, 3266489917, 668265263, 374761393
 _MAX_FILE_BYTES = 4 * 1024 * 1024
+_MAX_VIEW_BYTES = 3 * 1024
 _MAX_SNAPSHOT_ITEMS = 128
 _MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
 _MAX_VERSIONS_PER_PATH = 4
@@ -179,24 +180,80 @@ def _remember(snapshot: _Snapshot) -> None:
         _snapshot_bytes -= removed.size_bytes
 
 
-def _render(snapshot: _Snapshot) -> str:
+def _render(snapshot: _Snapshot, start: int, end: int | None, column: int) -> str:
     lines = snapshot.text.split("\n")
     if snapshot.text.endswith("\n"):
         lines.pop()
-    rows = [f"[{snapshot.relative_path}#{snapshot.tag}]"]
-    rows.extend(f"{number}:{line}" for number, line in enumerate(lines, 1))
-    return "\n".join(rows)
+    if start > len(lines):
+        raise ValueError(f"start is outside the {len(lines)}-line snapshot")
+    if column > len(lines[start - 1]):
+        raise ValueError("column is outside the starting line")
+    stop = len(lines) if end is None else min(end, len(lines))
+    header = f"[{snapshot.relative_path}#{snapshot.tag}]"
+
+    def continuation(line: int, offset: int) -> str:
+        return (
+            "\n[More: print(hashline_edit.view_file("
+            f"{snapshot.relative_path!r}, start={line}, end={end!r}, column={offset}))]"
+        )
+
+    # Reserve enough room for the longest possible cursor in this snapshot.
+    room = _MAX_VIEW_BYTES - len(header.encode("utf-8")) - len(
+        continuation(stop, len(snapshot.text)).encode("utf-8")
+    )
+    rows: list[str] = []
+    index = start - 1
+    offset = column
+    while index < stop:
+        coordinate = str(index + 1) if offset == 0 else f"{index + 1}+{offset}"
+        prefix = f"\n{coordinate}:"
+        content = lines[index][offset:]
+        encoded = content.encode("utf-8")
+        needed = len(prefix.encode("utf-8")) + len(encoded)
+        if needed <= room:
+            rows.append(prefix + content)
+            room -= needed
+            index += 1
+            offset = 0
+            continue
+        if rows:
+            break
+        available = room - len(prefix.encode("utf-8"))
+        fragment = encoded[:max(0, available)].decode("utf-8", errors="ignore")
+        if not fragment:
+            raise ValueError("path leaves no room for a bounded source view")
+        rows.append(prefix + fragment)
+        offset += len(fragment)
+        break
+    footer = continuation(index + 1, offset) if index < stop else ""
+    return header + "".join(rows) + footer
 
 
-def view_file(path: str | os.PathLike[str]) -> str:
-    """Return OMP-style ``[path#TAG]`` and ``N:text`` rows; records a snapshot."""
+def view_file(
+    path: str | os.PathLike[str], *, start: int = 1, end: int | None = None,
+    column: int = 0,
+) -> str:
+    """Render at most 3 KiB of numbered source and a full-file snapshot tag.
+
+    start/end are inclusive one-based lines. Follow the printed continuation
+    call for more; column is a zero-based character offset for a split long
+    line, shown as N+column:text. Print one view per execution so it fits the
+    worker output preview. The snapshot and edit coordinates cover the file.
+    """
+    if type(start) is not int or start < 1:
+        raise ValueError("start must be a positive integer")
+    if end is not None and (type(end) is not int or end < start):
+        raise ValueError("end must be an integer at or after start")
+    if type(column) is not int or column < 0:
+        raise ValueError("column must be a nonnegative integer")
     relative, target = _relative_path(path)
     raw = _read_raw(target)
     text, bom, line_ending = _normalize(raw)
     size_bytes = len(text.encode("utf-8"))
     snapshot = _Snapshot(relative, _tag(text), text, bom, line_ending, size_bytes)
+    rendered = _render(snapshot, start, end, column)
     _remember(snapshot)
-    return _render(snapshot)
+    return rendered
 
 
 def _parse_patch(patch: str) -> tuple[str, str, list[tuple[str, int, int, tuple[str, ...]]]]:

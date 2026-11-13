@@ -28,6 +28,7 @@ from .application import create_backend, create_runtime
 from .events import Delivery
 from .providers import PROVIDER_KEY_ENV, REQUIRED_KEY_PROVIDERS
 from .runtime import Runtime
+from .session_lock import SessionBusyError
 
 
 _CONFIG_USAGE = "/config [show | set <provider|base-url|model|api-key> | profiles | use <name>]"
@@ -713,12 +714,13 @@ def _last_activation(runtime: Runtime):
     return activations[-1] if activations else None
 
 
-def _final_assistant_message(runtime: Runtime) -> str | None:
+def _last_recorded_message(runtime: Runtime) -> dict[str, str] | None:
+    """Return recorded text from this invocation, including intermediate progress."""
     for activation in reversed(getattr(runtime.actor, "activations", ())):
         response = activation.response
         content = getattr(response, "content", None) if response is not None else None
         if activation.response_recorded and isinstance(content, str) and content.strip():
-            return content
+            return {"activation_id": activation.id, "text": content}
     return None
 
 
@@ -789,6 +791,15 @@ def _completion_payload(
             "provider_model": metrics.get("provider_model"),
         }
     exit_code = 0 if status == "succeeded" else 124 if status == "timeout" else 1
+    last_message = _last_recorded_message(runtime)
+    final_message = None
+    if (
+        status == "succeeded"
+        and last_message is not None
+        and last_message["activation_id"] == activation.id
+        and not activation.response.tool_calls
+    ):
+        final_message = last_message["text"]
     return {
         "ok": status == "succeeded",
         "status": status,
@@ -814,7 +825,8 @@ def _completion_payload(
             }
         ),
         "error": error,
-        "final_message": _final_assistant_message(runtime),
+        "final_message": final_message,
+        "last_message": last_message,
         "transcript_chars": status_snapshot.get("transcript_chars"),
         "python": status_snapshot.get("python"),
         "resume": resume_report,
@@ -857,6 +869,7 @@ async def _run_prompt(
     if runtime.host.cleanup_failed or runtime.journal.incomplete:
         payload["cleanup_incomplete"] = True
         payload["ok"] = False
+        payload["final_message"] = None
         if payload["status"] == "succeeded":
             payload["status"] = "failed"
             payload["error"] = "worker cleanup or journal persistence incomplete"
@@ -921,6 +934,9 @@ async def run_cli(
                 "pass --resume to continue or choose a new --session-id"
             )
             refusal = "session_exists"
+    except SessionBusyError as exc:
+        preparation_error = str(exc)
+        refusal = "session_busy"
     except Exception as exc:
         preparation_error = f"{type(exc).__name__}: {exc}"
         refusal = "initialization_failed"
@@ -931,7 +947,7 @@ async def run_cli(
             payload = _completion_payload(
                 runtime,
                 settings,
-                outcome="rejected" if refusal == "session_exists" else "stopped",
+                outcome="rejected" if refusal in {"session_exists", "session_busy"} else "stopped",
                 delivery=Delivery(False, reason=refusal),
                 error=preparation_error,
                 started=time.monotonic(),

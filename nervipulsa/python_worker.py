@@ -180,6 +180,9 @@ def run_worker(workspace: Path, epoch: int, output_dir: Path) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     hashline_edit._configure_workspace(workspace)
+    # Bootstrap uses -P so workspace packages cannot shadow the host runtime.
+    # Once runtime imports are fixed, user code can import workspace modules.
+    sys.path.insert(0, str(workspace))
     sock = _control_socket()
     socket_write_lock = threading.Lock()
 

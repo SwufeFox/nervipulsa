@@ -15,10 +15,30 @@ from .journal import Journal
 from .llm import Activation, LLMActor, pause_hint
 from .python_host import PythonHost
 from .ports import ModelBackend, ModelResponse, ToolCatalog
+from .session_lock import SessionLease
 from .tools import DefaultToolCatalog
 
 TRACE_EVENT_RETENTION = 1024
 _TRACE_EVENT_PRUNE_BATCH = 256
+
+
+async def _finish_before_cancelling(operation: Awaitable[Any]) -> Any:
+    """Keep ownership until an off-loop operation or cleanup has finished."""
+    task = asyncio.ensure_future(operation)
+    cancellation = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+        except BaseException:
+            break
+    if cancellation is not None:
+        # Retrieve failures even when the caller's cancellation takes priority.
+        if not task.cancelled():
+            task.exception()
+        raise cancellation
+    return task.result()
 
 
 class NullPythonHost:
@@ -161,6 +181,9 @@ class Runtime:
         self.actor.note = self.echo
         self._tasks: list[asyncio.Task[None]] = []
         self._shutting = False
+        self._lifecycle_lock = asyncio.Lock()
+        self._session_lease: SessionLease | None = None
+        self._start_attempted = False
 
     def _register(self) -> None:
         routes = {
@@ -200,35 +223,52 @@ class Runtime:
         return self._event_counts[event_type]
 
     async def start(self, *, restore_transcript: bool = False) -> dict[str, Any] | None:
-        """Start the session; optionally load its model view before actors run."""
+        """Lease the session, then optionally restore its model view; never replay."""
+        async with self._lifecycle_lock:
+            if self._start_attempted or self._shutting:
+                raise RuntimeError("runtime has already been started or shut down")
+            self._start_attempted = True
+            try:
+                history, snapshot = await _finish_before_cancelling(
+                    asyncio.to_thread(self._start_journal, restore_transcript)
+                )
+                if history is not None:
+                    self.session_reused = history["exists"]
+                    self.bus.reserve_seq_floor(history["seq_floor"])
+                restore_report = None
+                if restore_transcript:
+                    restore_report = self._apply_transcript_snapshot(self.bus.session_id, snapshot)
+                self.bus.add_observer(self._observe)
+                self.bus.add_delivery_sink(self._observe_delivery)
+                self.bus.start()
+                self.host.start()
+                self._tasks = [
+                    asyncio.create_task(self.actor.run(), name="llm-actor"),
+                    asyncio.create_task(self._ui_loop(), name="ui"),
+                    asyncio.create_task(self._lifecycle(), name="lifecycle"),
+                ]
+                return restore_report
+            except BaseException:
+                await _finish_before_cancelling(self._close(asyncio.current_task()))
+                raise
+
+    def _start_journal(self, restore_transcript: bool) -> tuple[Any, Any]:
+        # This entire disk phase finishes before cancellation can clean up.
+        self._session_lease = SessionLease.acquire(self.journal_path, self.bus.session_id)
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
         self.journal.start()
-        if not await asyncio.to_thread(self.journal.flush, timeout=15):
+        if not self.journal.flush(timeout=15):
             detail = self.journal.error or "writer did not acknowledge startup flush"
             raise RuntimeError(f"journal initialization failed: {detail}")
-        if self._explicit_session_id:
-            history = await asyncio.to_thread(
-                self.journal.session_history_state, self.bus.session_id
-            )
-            self.session_reused = history["exists"]
-            self.bus.reserve_seq_floor(history["seq_floor"])
-        restore_report = None
-        if restore_transcript:
-            snapshot = await asyncio.to_thread(
-                self.journal.latest_transcript_snapshot, self.bus.session_id
-            )
-            restore_report = self._apply_transcript_snapshot(self.bus.session_id, snapshot)
-        self.bus.add_observer(self._observe)
-        self.bus.add_delivery_sink(self._observe_delivery)
-        self.bus.start()
-        self.host.start()
-        self._tasks = [
-            asyncio.create_task(self.actor.run(), name="llm-actor"),
-            asyncio.create_task(self._ui_loop(), name="ui"),
-            asyncio.create_task(self._lifecycle(), name="lifecycle"),
-        ]
-        return restore_report
+        history = (
+            self.journal.session_history_state(self.bus.session_id)
+            if self._explicit_session_id else None
+        )
+        snapshot = (
+            self.journal.latest_transcript_snapshot(self.bus.session_id)
+            if restore_transcript else None
+        )
+        return history, snapshot
 
     def restore_transcript(self, *, session_id: str | None = None) -> dict[str, Any]:
         """Reload this session's last committed model view, if one exists.
@@ -509,24 +549,45 @@ class Runtime:
         return False
 
     async def shutdown(self) -> None:
-        if self._shutting:
-            return
+        async with self._lifecycle_lock:
+            if self._shutting:
+                return
+            await _finish_before_cancelling(self._close(asyncio.current_task()))
+
+    async def _close(self, caller: asyncio.Task[Any] | None) -> None:
         self._shutting = True
         if self.bus.state is RuntimeState.RUNNING:
             self.bus.begin_draining()
         self.actor.request_stop()
-        await self.host.close()
-        if self.bus.state is not RuntimeState.CLOSED:
-            self.bus.close()
-        current = asyncio.current_task()
-        tasks = [task for task in self._tasks if task is not current]
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self.journal.flush(timeout=5)
-        self.journal.close(timeout=5)
+        try:
+            await self.host.close()
+        finally:
+            if self.bus.state is not RuntimeState.CLOSED:
+                self.bus.close()
+            # A lifecycle task can itself request shutdown. Do not cancel or
+            # await that caller from its own shielded cleanup operation.
+            tasks = [task for task in self._tasks if task is not caller]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            try:
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await asyncio.to_thread(self._close_journal)
+
+    def _close_journal(self) -> None:
+        try:
+            self.journal.flush(timeout=5)
+        finally:
+            # A flush/close timeout is not proof that the writer stopped.
+            # Keep the lease until it cannot write this session any longer.
+            while not self.journal.close(timeout=5):
+                if not self.journal._thread.is_alive():
+                    break
+            lease, self._session_lease = self._session_lease, None
+            if lease is not None:
+                lease.close()
 
     def _observe(self, event: Event) -> None:
         self._event_total += 1

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -89,3 +91,84 @@ def test_hashline_rejects_workspace_escape(workspace: Path) -> None:
 
     with pytest.raises(ValueError, match="parent-directory traversal"):
         hashline_edit.view_file("../outside.py")
+
+
+def _continuation(page: str) -> dict | None:
+    footer = page.splitlines()[-1]
+    if not footer.startswith("[More: "):
+        return None
+    # Parse the public continuation call without executing file content.
+    printing = ast.parse(footer[len("[More: "):-1], mode="eval").body
+    call = printing.args[0]
+    return {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
+
+
+def test_paged_view_reconstructs_unicode_and_long_lines(workspace: Path) -> None:
+    lines = ["first", "\U00020000界" * 1600]
+    lines.extend(f"row {number}: " + "ä界" * 25 for number in range(150))
+    target = workspace / "source's.txt"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    hashline_edit._configure_workspace(workspace)
+    cursor = {}
+    reconstructed: dict[int, str] = {}
+    header = None
+    seen_cursors = set()
+    for _ in range(100):
+        page = hashline_edit.view_file(target.name, **cursor)
+        assert len(page.encode("utf-8")) <= 3072
+        rows = page.splitlines()
+        if header is None:
+            header = rows[0]
+        assert rows[0] == header
+        for row in rows[1:]:
+            if row.startswith("[More: "):
+                continue
+            match = re.fullmatch(r"(\d+)(?:\+(\d+))?:(.*)", row)
+            assert match is not None, row
+            number, offset, content = match.groups()
+            number = int(number)
+            previous = reconstructed.get(number, "")
+            assert int(offset or 0) == len(previous)
+            reconstructed[number] = previous + content
+        cursor = _continuation(page)
+        if cursor is None:
+            break
+        position = (cursor["start"], cursor["column"])
+        assert position not in seen_cursors
+        seen_cursors.add(position)
+    else:
+        pytest.fail("source reader did not reach the end of the file")
+    assert [reconstructed[i] for i in range(1, len(lines) + 1)] == lines
+
+
+def test_targeted_page_keeps_whole_file_edit_identity(workspace: Path) -> None:
+    lines = [f"line {number}: " + "content " * 8 for number in range(1, 201)]
+    target = workspace / "large.txt"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    hashline_edit._configure_workspace(workspace)
+    first_header = hashline_edit.view_file(target.name).splitlines()[0]
+    page = hashline_edit.view_file(target.name, start=150, end=152)
+    assert page.splitlines() == [first_header] + [
+        f"{number}:{lines[number - 1]}" for number in range(150, 153)
+    ]
+    result = hashline_edit.edit(f"{first_header}\nPUT 151.=151:\n+changed")
+    assert len(result.encode("utf-8")) <= 3072
+    assert target.read_text(encoding="utf-8").splitlines()[150] == "changed"
+    header = hashline_edit.view_file(target.name, start=150, end=152).splitlines()[0]
+    contents = target.read_text(encoding="utf-8").splitlines()
+    contents[0] = "changed outside the displayed range"
+    target.write_text("\n".join(contents) + "\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="stale snapshot"):
+        hashline_edit.edit(f"{header}\nPUT 151.=151:\n+unsafe")
+    assert target.read_text(encoding="utf-8").splitlines()[150] == "changed"
+
+
+@pytest.mark.parametrize("cursor", [{"start": 0}, {"start": 3}, {"column": -1},
+                                    {"column": 99}, {"start": 2, "end": 1}])
+def test_invalid_view_cursor_cannot_change_file(workspace: Path, cursor: dict) -> None:
+    target = workspace / "cursor.txt"
+    target.write_text("first\nsecond\n", encoding="utf-8")
+    hashline_edit._configure_workspace(workspace)
+    with pytest.raises(ValueError):
+        hashline_edit.view_file(target.name, **cursor)
+    assert target.read_text(encoding="utf-8") == "first\nsecond\n"

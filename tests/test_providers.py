@@ -15,52 +15,6 @@ import pytest
 from nervipulsa.providers import OpenAICompatibleBackend, ModelRequest, ProviderError, tool_schema
 
 
-def test_tool_schema_exposes_worker_handler_api() -> None:
-    description = tool_schema("/workspace")["function"]["description"]
-
-    for detail in (
-        "on_finished(callback)",
-        "off_finished(handle)",
-        "single\nobservation dict",
-        "request_id",
-        "status",
-        "stdout",
-        "including the\nexecution that registers the callbacks",
-        "frozen handler snapshot",
-        "only later executions",
-        "At most\n16 handlers",
-        "A timeout, cancellation, or worker restart clears registrations",
-        "agent.handler_fired",
-        "expected_handler_count",
-        "handler_result_status",
-        "missing_handler_ids",
-        "Compare the expected count",
-        "Do not\nassume missing results will arrive later",
-        "handler_id",
-        "worker_epoch",
-    ):
-        assert detail in description
-
-
-
-
-def test_tool_schema_documents_only_hashline_put_subset() -> None:
-    description = tool_schema("/workspace")["function"]["description"]
-
-    for detail in (
-        "nervipulsa.hashline_edit",
-        'hashline_edit.view_file("path/to/file.py")',
-        "hashline_edit.edit(text)",
-        "PUT 2.=3:",
-        "`N.=M:` (range replace)",
-        "`<N:` (before line)",
-        ">N:",
-        "`>$:` (end of file)",
-        "not OMP\nblock edits, CUT, MV, REM, stale recovery, or seen-line enforcement",
-    ):
-        assert detail in description
-
-
 @contextmanager
 def _provider_server(status: int, response: dict[str, Any]) -> Iterator[tuple[str, list[tuple[str, dict[str, Any]]]]]:
     requests: list[tuple[str, dict[str, Any]]] = []

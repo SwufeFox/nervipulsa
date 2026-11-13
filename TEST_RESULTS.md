@@ -1,5 +1,121 @@
 # Recorded results
 
+## Subagent result and session ownership acceptance (2026-11-13)
+
+This revision separates runtime completion from progress text. `final_message`
+is the successful terminal activation's recorded, tool-free response; it is
+null for every non-success result, including cleanup failure. `last_message`
+retains the latest recorded text and activation ID for diagnosis. A later
+commit-hook failure can no longer present earlier tool progress as the final
+answer, and uncommitted response text remains unpublished.
+
+Each Runtime now acquires a nonblocking OS lock for its canonical journal
+path/session before journal startup or history reads. A competing CLI returns
+`rejected/session_busy` without publishing input or calling the model. Startup
+failure/cancellation and shutdown cancellation retain ownership until pending
+initialization and cleanup finish, including actual journal-writer termination.
+OS process death releases the lock; its persistent file is not deleted.
+
+Focused verification on Windows / CPython 3.13.14:
+
+    python -m pytest -q tests/test_cli.py tests/test_session_lock.py tests/test_transcript_restore.py tests/test_python_host_optional.py tests/test_crash_boundaries.py
+
+**83 passed in 59.94s.** Coverage includes multi-activation success, commit-hook
+failure, response-unknown, timeout and budget pauses; cleanup-failure results;
+same-process and real-subprocess contention; independent sessions; cancellation
+and process-death release; transcript restoration and event-ID preservation;
+and T0–T4 crash/restart inspection without replay. POSIX locking is implemented
+but was not exercised on this Windows host. No full-suite or hosted-CI result
+is claimed for this revision.
+
+The new opt-in `examples/subagent_acceptance.py` was then run with Magpie at
+`http://127.0.0.1:3425/v1`, model `deepseek/deepseek-flash`. Each invocation used
+a fresh fixture workspace and empty configuration directory. The final run
+passed all **27 required criteria**, with no dependent skips:
+
+- The model changed `calc.py` from subtraction to addition; the original test
+  bytes remained unchanged. A separate verifier ran pristine tests against
+  the resulting module: **1 passed in 0.01s**.
+- A new CLI process resumed the session and recalled the unique first-prompt
+  marker. No tool calls, receipts, executions, or Python requests were added
+  during this continuation, and all prior journal rows were preserved.
+- Reuse without `--resume` returned `rejected/session_exists`, exit 1, while
+  retaining prior history. JSON status and process exits agreed throughout.
+- The final report records `ok=true`, `runtime_completed=true`, and
+  `verified_task_success=true` separately.
+
+Evidence is retained under
+`.scratch/subagent-acceptance-d6b7038298cd43d0bf2044c4793d1310/`: `report.json`,
+CLI stdout JSON/stderr, verifier output, fixture hashes, and journal snapshots.
+The earlier run under
+`.scratch/subagent-acceptance-3137a33cb0354e7facaea401616300f2/` is also retained:
+the runtime scenarios succeeded, but the verifier's `python -I` hid user-site
+pytest. The driver now uses `-P`, preserving installed dependencies while
+keeping a separate pristine verifier directory; the later full acceptance run
+exercises that correction.
+
+These are local live-provider observations, not a model-quality benchmark or
+general production-readiness claim. `--run-timeout` still bounds completion
+waiting, not total process lifetime. Blocking HTTP, worker cleanup, and waiting
+for a journal writer can extend exit; no outer process supervisor or hard
+process deadline was added. Restore remains transcript-only, with no effect
+replay or rollback. Long-duration and cross-platform live runs remain unverified.
+
+## Repository investigation dogfooding (2026-11-13)
+
+After committing `17b258d`, Nervipulsa reviewed its own CLI/session lifecycle in
+an isolated worktree at that revision, using Magpie and
+`deepseek/deepseek-flash`. The task required a deterministic reproduction and
+a JSON findings report, with no tracked-file edits or full-suite runs.
+
+- The initial run repeatedly read truncated file prefixes and exhausted its
+  activation budget before writing a report. This exposed a missing bounded
+  source-reading workflow.
+- A resumed run tried the new `view_file(start=..., end=...)` API but received
+  `TypeError`: the worker imported Nervipulsa from the older workspace checkout,
+  while its host advertised the updated helper. Worker bootstrap now uses
+  Python's `-P` option and the host source root, then enables workspace imports
+  for user code after runtime initialization.
+- Source views now fit within 3 KiB, carry executable continuation cursors,
+  support line ranges and Unicode-safe long-line paging, and retain full-file
+  snapshot tags. The tool description explains the output cap and how to read
+  targeted source without repeatedly dumping entire files.
+- With both fixes active, the same subagent finished the review and wrote its
+  report. Bounded helper pages were usable; arbitrary large `print()` calls
+  still truncated. The inherited conversation also needed model compaction.
+
+| Run | Python executions | Truncated outputs | Outcome |
+| --- | --- | --- | --- |
+| Initial repository task | 14 | 7 | Activation-budget pause; no report |
+| Resume before bootstrap fix | 14 | 5 | Old workspace helper rejected `start`; budget pause |
+| Resume after bootstrap fix | 9 | 3 | Report produced; CLI succeeded |
+
+The report labeled an earlier recorded assistant message in `final_message`
+after a later commit-hook failure as a defect. The parent independently
+reproduced the output: exit 1, `paused/response_commit_failed`, the prior
+recorded message, and no uncommitted answer. This matched the documented
+last-recorded-text contract at the time; the initial change only clarified the
+README. The later result-contract change is recorded above. The worktree had
+no tracked-file changes from the subagent.
+
+Local evidence is retained under
+`.scratch/subagent-review-17b258d/.scratch/`: `review-findings.json`,
+`parent-verification.json`, and the disposable reproduction. These are ignored
+local artifacts, not portable CI results. Run the reproduction through `runpy`
+from the repository root; executing the nested script directly does not put
+the repository package on Python's import path.
+
+
+Verification: source-view, provider, and selected real-worker tests reported
+**23 passed in 5.76s**; worker lifecycle, process-tree, and AppContainer tests
+reported **32 passed in 38.10s**. The latter includes real workers started in
+workspaces containing a conflicting `nervipulsa` package or `json.py`, while
+ordinary workspace-module imports remain functional.
+
+The sessions share prior conversation and use corrective prompts; this is a
+workflow investigation, not a controlled model-quality or performance benchmark.
+
+
 ## One-shot and resume smoke (2026-11-13)
 
 Environment: Windows, CPython 3.13.14, local Magpie gateway at

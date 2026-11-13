@@ -8,11 +8,13 @@ import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 _MASK32 = 0xFFFFFFFF
 _P1, _P2, _P3, _P4, _P5 = 2654435761, 2246822519, 3266489917, 668265263, 374761393
 _MAX_FILE_BYTES = 4 * 1024 * 1024
 _MAX_VIEW_BYTES = 3 * 1024
+_MAX_BATCH_VIEWS = 8
 _MAX_SNAPSHOT_ITEMS = 128
 _MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
 _MAX_VERSIONS_PER_PATH = 4
@@ -180,7 +182,10 @@ def _remember(snapshot: _Snapshot) -> None:
         _snapshot_bytes -= removed.size_bytes
 
 
-def _render(snapshot: _Snapshot, start: int, end: int | None, column: int) -> str:
+def _render(
+    snapshot: _Snapshot, start: int, end: int | None, column: int, *,
+    max_bytes: int = _MAX_VIEW_BYTES,
+) -> str:
     lines = snapshot.text.split("\n")
     if snapshot.text.endswith("\n"):
         lines.pop()
@@ -198,7 +203,7 @@ def _render(snapshot: _Snapshot, start: int, end: int | None, column: int) -> st
         )
 
     # Reserve enough room for the longest possible cursor in this snapshot.
-    room = _MAX_VIEW_BYTES - len(header.encode("utf-8")) - len(
+    room = max_bytes - len(header.encode("utf-8")) - len(
         continuation(stop, len(snapshot.text)).encode("utf-8")
     )
     rows: list[str] = []
@@ -229,6 +234,21 @@ def _render(snapshot: _Snapshot, start: int, end: int | None, column: int) -> st
     return header + "".join(rows) + footer
 
 
+def _validate_cursor(start: int, end: int | None, column: int) -> None:
+    if type(start) is not int or start < 1:
+        raise ValueError("start must be a positive integer")
+    if end is not None and (type(end) is not int or end < start):
+        raise ValueError("end must be an integer at or after start")
+    if type(column) is not int or column < 0:
+        raise ValueError("column must be a nonnegative integer")
+
+
+def _read_snapshot(relative: str, target: Path) -> _Snapshot:
+    text, bom, line_ending = _normalize(_read_raw(target))
+    return _Snapshot(relative, _tag(text), text, bom, line_ending,
+                     len(text.encode("utf-8")))
+
+
 def view_file(
     path: str | os.PathLike[str], *, start: int = 1, end: int | None = None,
     column: int = 0,
@@ -237,23 +257,53 @@ def view_file(
 
     start/end are inclusive one-based lines. Follow the printed continuation
     call for more; column is a zero-based character offset for a split long
-    line, shown as N+column:text. Print one view per execution so it fits the
-    worker output preview. The snapshot and edit coordinates cover the file.
+    line, shown as N+column:text. Use view_files for several excerpts sharing
+    one output budget. The snapshot and edit coordinates cover the whole file.
     """
-    if type(start) is not int or start < 1:
-        raise ValueError("start must be a positive integer")
-    if end is not None and (type(end) is not int or end < start):
-        raise ValueError("end must be an integer at or after start")
-    if type(column) is not int or column < 0:
-        raise ValueError("column must be a nonnegative integer")
+    _validate_cursor(start, end, column)
     relative, target = _relative_path(path)
-    raw = _read_raw(target)
-    text, bom, line_ending = _normalize(raw)
-    size_bytes = len(text.encode("utf-8"))
-    snapshot = _Snapshot(relative, _tag(text), text, bom, line_ending, size_bytes)
+    snapshot = _read_snapshot(relative, target)
     rendered = _render(snapshot, start, end, column)
     _remember(snapshot)
     return rendered
+
+
+def view_files(requests: list[dict[str, Any]]) -> str:
+    """Render 1–8 source excerpts within one shared 3 KiB UTF-8 budget.
+
+    Each request has path and optional start/end/column, as in view_file.
+    Entries share the budget evenly and retain their own continuation calls.
+    Each distinct file is read once, with one full-file snapshot for all its
+    excerpts. Combined snapshots must fit the 16 MiB snapshot cache. Invalid
+    requests or paths that leave no source room raise without a partial view.
+    """
+    if not isinstance(requests, list) or not 1 <= len(requests) <= _MAX_BATCH_VIEWS:
+        raise ValueError(f"requests must contain 1–{_MAX_BATCH_VIEWS} source views")
+    budget, extra = divmod(_MAX_VIEW_BYTES - 2 * (len(requests) - 1), len(requests))
+    snapshots: dict[str, _Snapshot] = {}
+    snapshot_bytes = 0
+    pages: list[str] = []
+    for index, request in enumerate(requests):
+        if (not isinstance(request, dict) or "path" not in request
+                or request.keys() - {"path", "start", "end", "column"}):
+            raise ValueError("each view needs path and optional start/end/column")
+        start = request.get("start", 1)
+        end = request.get("end")
+        column = request.get("column", 0)
+        _validate_cursor(start, end, column)
+        relative, target = _relative_path(request["path"])
+        snapshot = snapshots.get(relative)
+        if snapshot is None:
+            snapshot = _read_snapshot(relative, target)
+            snapshot_bytes += snapshot.size_bytes
+            if snapshot_bytes > _MAX_SNAPSHOT_BYTES:
+                raise ValueError("combined files exceed the snapshot cache byte limit")
+            snapshots[relative] = snapshot
+        pages.append(_render(snapshot, start, end, column,
+                             max_bytes=budget + (1 if index < extra else 0)))
+    for snapshot in snapshots.values():
+        _remember(snapshot)
+    return "\n\n".join(pages)
 
 
 def _parse_patch(patch: str) -> tuple[str, str, list[tuple[str, int, int, tuple[str, ...]]]]:
@@ -404,4 +454,4 @@ def edit(patch: str) -> str:
     return view_file(path)
 
 
-__all__ = ["view_file", "edit"]
+__all__ = ["view_file", "view_files", "edit"]

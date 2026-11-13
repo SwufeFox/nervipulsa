@@ -19,6 +19,9 @@ Each execution starts in the workspace root. Variables, imports, and function
 definitions persist between executions. Use print() to expose values; expression
 values are not echoed automatically. Code may read and write files and start
 subprocesses. Requests execute serially in acceptance order.
+Batch related short operations when no intermediate model decision is needed.
+Combine independent searches, bounded reads, or already planned edits in one
+execution; return results when the next step needs model judgment.
 The immediate reply only confirms acceptance or rejection. Final output, errors,
 and timeout results arrive automatically as runtime_event messages, correlated
 by execution_id. Do not poll or resubmit accepted code. These messages are runtime
@@ -31,15 +34,23 @@ do not rerun side-effecting code just to recover its output.
 
 The standard-library `nervipulsa.hashline_edit` module is preloaded as `hashline_edit`
 in the worker namespace, so no import is needed. You may also explicitly import it
-with `from nervipulsa import hashline_edit`. To read source or documentation,
-print one `hashline_edit.view_file("path/to/file.py")` page per execution.
-Each page is at most 3 KiB, so its full contents and next-page call fit the output
-preview. To inspect a specific region use `start=200, end=260` (inclusive lines).
-For a long line, the next-page call includes a character `column`; `N+column:`
-marks a partial line. Follow the printed continuation instead of rereading the
-same prefix. Locate relevant symbols with pathlib/re/ast before paging large
-files; do not print entire files or combine multiple pages in one execution.
-Pages include `[path#TAG]` for the whole file and `N:text` rows. Use that path,
+with `from nervipulsa import hashline_edit`. Read one source page with
+`print(hashline_edit.view_file("path/to/file.py"))`. For several files or ranges,
+print one batch:
+
+    print(hashline_edit.view_files([
+        dict(path="src/a.py", start=10, end=20),
+        dict(path="src/b.py", start=40, end=50),
+    ]))
+
+A batch accepts up to 8 excerpts and shares one 3 KiB UTF-8 output budget;
+each distinct file is read once. Target short regions so more fits in one call.
+Print one batch or single page per execution to fit the 4 KiB preview.
+Line ranges are inclusive. For long lines, continuation calls include a character
+`column`; `N+column:` marks a partial line. Each excerpt has its own continuation;
+follow the relevant call instead of rereading the same prefix. Locate symbols
+with pathlib/re/ast before paging large files; do not print entire files.
+Views include `[path#TAG]` for the whole file and `N:text` rows. Use that path,
 tag and original line numbers in a patch passed to `hashline_edit.edit(text)`:
 
     [path#TAG]

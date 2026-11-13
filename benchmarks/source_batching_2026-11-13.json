@@ -1,0 +1,248 @@
+{
+  "label": "single input; separate source views versus shared-budget batches; synthetic provider",
+  "operations_per_case": 6,
+  "provider_ms": 20,
+  "work_ms": 5,
+  "group_order": [
+    1,
+    3,
+    6,
+    6,
+    3,
+    1
+  ],
+  "cases": [
+    {
+      "group_size": 1,
+      "external_measured_inputs": 1,
+      "operations": 6,
+      "active_s": 2.1644536000021617,
+      "model_requests": 7,
+      "python_executions": 6,
+      "verified_operations": 6,
+      "integrity_ok": true,
+      "source_excerpts": 6,
+      "output_bytes": [
+        71,
+        71,
+        71,
+        71,
+        71,
+        71
+      ],
+      "source_preview_truncated": false,
+      "durable_effects_including_warmup": 7,
+      "durable_activations_including_warmup": 9
+    },
+    {
+      "group_size": 3,
+      "external_measured_inputs": 1,
+      "operations": 6,
+      "active_s": 0.8145093999992241,
+      "model_requests": 3,
+      "python_executions": 2,
+      "verified_operations": 6,
+      "integrity_ok": true,
+      "source_excerpts": 6,
+      "output_bytes": [
+        215,
+        215
+      ],
+      "source_preview_truncated": false,
+      "durable_effects_including_warmup": 3,
+      "durable_activations_including_warmup": 5
+    },
+    {
+      "group_size": 6,
+      "external_measured_inputs": 1,
+      "operations": 6,
+      "active_s": 0.5127310999996553,
+      "model_requests": 2,
+      "python_executions": 1,
+      "verified_operations": 6,
+      "integrity_ok": true,
+      "source_excerpts": 6,
+      "output_bytes": [
+        431
+      ],
+      "source_preview_truncated": false,
+      "durable_effects_including_warmup": 2,
+      "durable_activations_including_warmup": 4
+    },
+    {
+      "group_size": 6,
+      "external_measured_inputs": 1,
+      "operations": 6,
+      "active_s": 0.4911380999983521,
+      "model_requests": 2,
+      "python_executions": 1,
+      "verified_operations": 6,
+      "integrity_ok": true,
+      "source_excerpts": 6,
+      "output_bytes": [
+        431
+      ],
+      "source_preview_truncated": false,
+      "durable_effects_including_warmup": 2,
+      "durable_activations_including_warmup": 4
+    },
+    {
+      "group_size": 3,
+      "external_measured_inputs": 1,
+      "operations": 6,
+      "active_s": 0.8243793999972695,
+      "model_requests": 3,
+      "python_executions": 2,
+      "verified_operations": 6,
+      "integrity_ok": true,
+      "source_excerpts": 6,
+      "output_bytes": [
+        215,
+        215
+      ],
+      "source_preview_truncated": false,
+      "durable_effects_including_warmup": 3,
+      "durable_activations_including_warmup": 5
+    },
+    {
+      "group_size": 1,
+      "external_measured_inputs": 1,
+      "operations": 6,
+      "active_s": 2.750737599999411,
+      "model_requests": 7,
+      "python_executions": 6,
+      "verified_operations": 6,
+      "integrity_ok": true,
+      "source_excerpts": 6,
+      "output_bytes": [
+        71,
+        71,
+        71,
+        71,
+        71,
+        71
+      ],
+      "source_preview_truncated": false,
+      "durable_effects_including_warmup": 7,
+      "durable_activations_including_warmup": 9
+    }
+  ],
+  "ok": true,
+  "method": "one external measured input, next tool issued on previous terminal, same 6 source excerpts and numbered markers, default FULL, fresh warm persistent worker; timing through durable tool-free completion",
+  "deduplication": {
+    "regions": 8,
+    "file_bytes": 128893,
+    "output_bytes": 682,
+    "output_identical": true,
+    "samples": [
+      {
+        "mode": "separate",
+        "seconds": 0.48451379999823985,
+        "raw_reads": 8
+      },
+      {
+        "mode": "batch",
+        "seconds": 0.04729829999996582,
+        "raw_reads": 1
+      },
+      {
+        "mode": "batch",
+        "seconds": 0.04459820000192849,
+        "raw_reads": 1
+      },
+      {
+        "mode": "separate",
+        "seconds": 0.28371830000105547,
+        "raw_reads": 8
+      },
+      {
+        "mode": "separate",
+        "seconds": 0.43511190000208444,
+        "raw_reads": 8
+      },
+      {
+        "mode": "batch",
+        "seconds": 0.04340579999916372,
+        "raw_reads": 1
+      }
+    ]
+  },
+  "source_sha256": {
+    "hashline_edit.py": "dc1d86d94fdd6e008a4962cc426ce4bf62c2679d8eb72499fbce42f2a2f6a801",
+    "tools.py": "865925eb0f8a3c12730f849fa71894e81215cfa18aec653f2988c078031fa891"
+  },
+  "environment": {
+    "python": "3.13.14",
+    "platform": "win32",
+    "sqlite": "3.50.4"
+  },
+  "schema_version": 1,
+  "date": "2026-11-13",
+  "qualification": "finite synthetic provider experiment; no live-model behavior, production throughput rating or statistical confidence claim",
+  "summary": [
+    {
+      "group_size": 1,
+      "tool_calls": 6,
+      "model_requests": 7,
+      "min_s": 2.1644536000021617,
+      "median_s": 2.4575956000007864,
+      "max_s": 2.750737599999411,
+      "all_verified": true
+    },
+    {
+      "group_size": 3,
+      "tool_calls": 2,
+      "model_requests": 3,
+      "min_s": 0.8145093999992241,
+      "median_s": 0.8194443999982468,
+      "max_s": 0.8243793999972695,
+      "all_verified": true
+    },
+    {
+      "group_size": 6,
+      "tool_calls": 1,
+      "model_requests": 2,
+      "min_s": 0.4911380999983521,
+      "median_s": 0.5019345999990037,
+      "max_s": 0.5127310999996553,
+      "all_verified": true
+    }
+  ],
+  "median_batch_speedup": 4.89624664250216,
+  "deduplication_summary": {
+    "separate": {
+      "raw_reads": [
+        8,
+        8,
+        8
+      ],
+      "min_ms": 283.71830000105547,
+      "median_ms": 435.11190000208444,
+      "max_ms": 484.51379999823985
+    },
+    "batch": {
+      "raw_reads": [
+        1,
+        1,
+        1
+      ],
+      "min_ms": 43.40579999916372,
+      "median_ms": 44.59820000192849,
+      "max_ms": 47.29829999996582
+    }
+  },
+  "verification": {
+    "hashline_tests": {
+      "passed": 23,
+      "seconds": 0.77
+    },
+    "existing_real_worker_view_tests": {
+      "passed": 2,
+      "seconds": 1.44
+    },
+    "native_batch_cases": {
+      "passed": 6
+    },
+    "raw_report": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\source-batching-00078cd94767462da49949937104913d\\source-report.json"
+  }
+}

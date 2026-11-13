@@ -88,7 +88,7 @@ POSIX 监护依赖 `waitid(WNOWAIT)` 保留未回收的组长身份，直到 gro
 | `python_worker.py` | compile/exec、持久 namespace、handler 注册/快照、输出捕获 | namespace/回调仅存在于该 worker epoch；host 镜像只用于关联和投递 |
 | `framing.py` / `process_tree.py` / `appcontainer.py` | 长度前缀 JSON socket、过滤环境和进程树管理、可选 Windows 隔离 | worker 以 `-P` 从宿主 runtime 路径启动，完成加载后再加入 workspace 以供用户模块导入；控制帧与用户输出分离，平台清理失败必须保留诊断 |
 | `journal.py` | 异步观测表、同步 durable effect 表、人工评估与查询 | 两条写入路径共用 SQLite 文件，提交保证不同；不是通用状态恢复引擎 |
-| `hashline_edit.py` | worker 可调用的文件快照/tag、按字节有界的源码分页与受限 PUT 编辑 | 每页至多 3 KiB，支持行区间与长行字符续读；tag 仍覆盖全文件。防陈旧编辑的局部工具，不约束任意 Python 文件访问 |
+| `hashline_edit.py` | worker 可调用的文件快照/tag、共享字节预算的单/多文件分页与受限 PUT 编辑 | 单次返回总共至多 3 KiB；批量最多 8 个片段，共享输出预算并各带续读游标。同一文件在批内只读取和计算 tag 一次，仍按全文件快照拒绝陈旧编辑；不约束任意 Python 文件访问 |
 | `cli.py` | 交互输入、命令、配置与展示 | 经 application/Runtime 使用会话，退出时发起清理 |
 
 这些文件是实际边界，不要求每项都成为一个新服务或抽象层。

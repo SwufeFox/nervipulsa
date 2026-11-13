@@ -1,5 +1,64 @@
 # Recorded results
 
+## Shared-budget source reads (2026-11-13)
+
+Added `hashline_edit.view_files(requests)` for 1–8 source excerpts sharing one
+3 KiB UTF-8 return budget, including headers, separators and per-excerpt
+continuation calls. Each request supplies `path` and optional `start`, `end`
+and `column`. Repeated paths use one frozen whole-file snapshot per batch;
+combined snapshots must fit the 16 MiB cache so returned tags remain usable.
+The single-file API remains available. The tool description now recommends
+batching short operations that do not require an intermediate model decision.
+
+Focused Windows / CPython 3.13.14 verification:
+
+```bash
+python -m pytest -q tests/test_hashline_edit.py
+python -m pytest -q tests/test_python_host.py::test_worker_hashline_import_view_and_put_edit tests/test_python_host.py::test_worker_source_page_survives_output_preview
+```
+
+**23 passed in 0.77s** and **2 passed in 1.44s**. New behavioral coverage checks
+whole-file edit identity from targeted batch excerpts, stale edits after an
+unseen change, Unicode/long-line continuation reconstruction, empty files,
+same-file consistency during an external change, cache-budget rejection and
+invalid/escaping requests. Existing real-worker checks still exercise import,
+editing, source paging and the actual output preview boundary.
+
+A separate real-worker experiment read the same six selected source regions
+from one external input, issuing each next tool on the previous terminal.
+It used an already warmed persistent worker, default FULL commits, a synthetic
+20 ms provider delay, and the same 5 ms bookkeeping and numbered marker writes
+per excerpt. Two trials per grouping ran in order 1/3/6/6/3/1. Active timing
+ends after the final tool-free response is durably committed; startup, warm-up,
+shutdown and offline inspection are excluded.
+
+| Excerpts per execution | Python executions | Model requests | Active seconds, two-trial range |
+| ---: | ---: | ---: | ---: |
+| 1 (`view_file`) | 6 | 7 | 2.164–2.751 |
+| 3 (`view_files`) | 2 | 3 | 0.815–0.824 |
+| 6 (`view_files`) | 1 | 2 | 0.491–0.513 |
+
+All six cases passed. Every case returned all six requested regions without
+truncation, preserved the input files, and verified the numbered operation log,
+accepted receipts, observed/succeeded effects, activation/snapshot correspondence
+and persisted final response. The full batch's two-trial median was 4.90 times
+faster than separate calls. This measures the complete scripted path, not only
+the reader function or a live model's willingness to use batching.
+
+A separate CPU/I/O probe requested eight short regions from the same
+128,893-byte file. Three alternating paired samples returned identical 682-byte
+views. Separate reads made eight raw reads per sample; the batch made one.
+The measured median fell from 435.11 ms to 44.60 ms, with ranges 283.72–484.51 ms
+and 43.41–47.30 ms respectively. This isolates snapshot reuse within the parent
+process and excludes model, worker transport and durable commits.
+
+The [portable evidence JSON](benchmarks/source_batching_2026-11-13.json) retains
+all timings, output sizes, source hashes, environment and verification results.
+Complete local journals, fixture files and the raw report remain under
+`.scratch/source-batching-00078cd94767462da49949937104913d/`.
+Disposable probe code was removed. No full-suite, hosted CI, live-model adoption,
+statistical-confidence or production-capacity result is claimed for this change.
+
 ## Durable runtime throughput study (2026-11-13)
 
 This study measures finite runtime capacity with FULL commits and no automatic

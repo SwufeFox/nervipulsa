@@ -172,3 +172,129 @@ def test_invalid_view_cursor_cannot_change_file(workspace: Path, cursor: dict) -
     with pytest.raises(ValueError):
         hashline_edit.view_file(target.name, **cursor)
     assert target.read_text(encoding="utf-8") == "first\nsecond\n"
+
+
+def test_batch_views_keep_full_snapshot_edit_identity(workspace: Path) -> None:
+    left = [f"left {number}" for number in range(1, 201)]
+    right = [f"right {number}" for number in range(1, 201)]
+    (workspace / "left.py").write_text("\n".join(left) + "\n", encoding="utf-8")
+    (workspace / "right.py").write_text("\n".join(right) + "\n", encoding="utf-8")
+    hashline_edit._configure_workspace(workspace)
+
+    blocks = hashline_edit.view_files([
+        {"path": "left.py", "start": 150, "end": 152},
+        {"path": "right.py", "start": 50, "end": 52},
+    ]).split("\n\n")
+    assert blocks[0].splitlines()[1:] == [f"{n}:{left[n - 1]}" for n in range(150, 153)]
+    assert blocks[1].splitlines()[1:] == [f"{n}:{right[n - 1]}" for n in range(50, 53)]
+    hashline_edit.edit(f"{blocks[0].splitlines()[0]}\nPUT 151.=151:\n+updated")
+    left[150] = "updated"
+    assert (workspace / "left.py").read_text(encoding="utf-8").splitlines() == left
+
+    right[0] = "changed outside the displayed range"
+    (workspace / "right.py").write_text("\n".join(right) + "\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="stale snapshot"):
+        hashline_edit.edit(f"{blocks[1].splitlines()[0]}\nPUT 51.=51:\n+unsafe")
+    assert (workspace / "right.py").read_text(encoding="utf-8").splitlines() == right
+
+
+def test_batch_unicode_continuations_reconstruct_requested_ranges(workspace: Path) -> None:
+    sources = {
+        "source's.py": "\U00020000界" * 1200 + "\nlast\nnot requested\n",
+        "other.py": "ä" * 2200 + "\nnot requested\n",
+        "empty.py": "",
+    }
+    requests = [
+        {"path": "source's.py", "end": 2},
+        {"path": "other.py", "end": 1},
+        {"path": "empty.py"},
+    ]
+    for path, text in sources.items():
+        (workspace / path).write_text(text, encoding="utf-8")
+    hashline_edit._configure_workspace(workspace)
+    batch = hashline_edit.view_files(requests)
+    assert len(batch.encode("utf-8")) <= 3072
+    blocks = batch.split("\n\n")
+    assert len(blocks) == len(requests)
+    for request, first_page in zip(requests, blocks):
+        page = first_page
+        header = page.splitlines()[0]
+        reconstructed: dict[int, str] = {}
+        seen = set()
+        for _ in range(20):
+            assert len(page.encode("utf-8")) <= 3072
+            assert page.splitlines()[0] == header
+            for row in page.splitlines()[1:]:
+                if row.startswith("[More: "):
+                    continue
+                match = re.fullmatch(r"(\d+)(?:\+(\d+))?:(.*)", row)
+                assert match is not None, row
+                number, offset, content = match.groups()
+                number = int(number)
+                previous = reconstructed.get(number, "")
+                assert int(offset or 0) == len(previous)
+                reconstructed[number] = previous + content
+            cursor = _continuation(page)
+            if cursor is None:
+                break
+            position = (cursor["start"], cursor["column"])
+            assert position not in seen
+            seen.add(position)
+            page = hashline_edit.view_file(request["path"], **cursor)
+        else:
+            pytest.fail("batch continuation did not reach the requested end")
+        expected = sources[request["path"]].splitlines()[:request.get("end")] or [""]
+        assert [reconstructed[n] for n in sorted(reconstructed)] == expected
+
+
+def test_batch_repeated_file_uses_one_consistent_snapshot(workspace: Path, monkeypatch) -> None:
+    source = workspace / "source.py"
+    source.write_text("alpha\nbeta\n", encoding="utf-8")
+    hashline_edit._configure_workspace(workspace)
+    original_read = hashline_edit._read_raw
+    changed = False
+
+    def change_after_read(target: Path) -> bytes:
+        nonlocal changed
+        raw = original_read(target)
+        if not changed:
+            changed = True
+            source.write_text("external\nexternal\n", encoding="utf-8")
+        return raw
+
+    monkeypatch.setattr(hashline_edit, "_read_raw", change_after_read)
+    blocks = hashline_edit.view_files([
+        {"path": "source.py", "start": 1, "end": 1},
+        {"path": "source.py", "start": 2, "end": 2},
+    ]).split("\n\n")
+    assert blocks[0].splitlines()[0] == blocks[1].splitlines()[0]
+    assert blocks[0].splitlines()[1:] == ["1:alpha"]
+    assert blocks[1].splitlines()[1:] == ["2:beta"]
+    with pytest.raises(RuntimeError, match="stale snapshot"):
+        hashline_edit.edit(f"{blocks[0].splitlines()[0]}\nPUT 1.=1:\n+unsafe")
+    assert source.read_text(encoding="utf-8") == "external\nexternal\n"
+
+
+def test_batch_rejects_snapshots_that_would_expire_each_other(workspace: Path, monkeypatch) -> None:
+    for path in ("first.py", "second.py"):
+        (workspace / path).write_text("x" * 80, encoding="utf-8")
+    hashline_edit._configure_workspace(workspace)
+    monkeypatch.setattr(hashline_edit, "_MAX_SNAPSHOT_BYTES", 100)
+    with pytest.raises(ValueError, match="snapshot cache byte limit"):
+        hashline_edit.view_files([{"path": "first.py"}, {"path": "second.py"}])
+
+
+@pytest.mark.parametrize("requests", [
+    [],
+    [{"path": "source.py"}] * 9,
+    [{"path": "source.py", "start": 0}],
+    [{"path": "source.py", "start_line": 2}],
+    [{"path": "source.py"}, {"path": "../outside.py"}],
+])
+def test_invalid_batch_cannot_change_files(workspace: Path, requests: list) -> None:
+    source = workspace / "source.py"
+    source.write_text("first\nsecond\n", encoding="utf-8")
+    hashline_edit._configure_workspace(workspace)
+    with pytest.raises(ValueError):
+        hashline_edit.view_files(requests)
+    assert source.read_text(encoding="utf-8") == "first\nsecond\n"

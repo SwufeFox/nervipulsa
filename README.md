@@ -637,9 +637,31 @@ worker's 4 KiB stdout preview. For a targeted read, use
 inclusive, one-based line numbers. Follow the printed `[More: ...]` call for
 the rest. Very long lines continue with a zero-based character `column` and
 are labeled `N+column:text`; the cursor never splits a UTF-8 character.
-Print one page per execution, since combining pages can exceed the preview.
+Print one batch or single page per execution to stay within the preview.
 The tag still covers the whole file, and edit coordinates remain the original
 line numbers. `edit()` also returns a bounded view with the new tag.
+
+Use `view_files()` for several files or several regions of the same file:
+
+```python
+print(hashline_edit.view_files([
+    {"path": "src/left.py", "start": 20, "end": 28},
+    {"path": "src/right.py", "start": 70, "end": 78},
+]))
+```
+
+A batch accepts 1–8 requests with `path` and optional `start`, `end`, and `column`.
+The excerpts share a total 3 KiB UTF-8 budget evenly, including headers,
+separators and continuation calls. Each excerpt retains its own whole-file tag
+and `[More: ...]` call. Use short ranges to get more relevant source in one
+execution. A repeated file is read and hashed once per batch, so all its excerpts
+use the same snapshot. Combined file snapshots must fit the 16 MiB cache;
+invalid requests or paths that leave no source room fail without a partial view.
+
+Group related short searches, reads, or already planned edits in one execution
+when no intermediate model decision is needed. Keep a separate call where the
+next action depends on inspecting the result; a larger script also has a larger
+failure and cancellation scope.
 
 
 Tags are four uppercase hex digits from the low 16 bits of xxHash32 over the

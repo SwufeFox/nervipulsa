@@ -44,6 +44,8 @@ flowchart TD
 
 标识关联：session_id 是持久会话作用域，默认每个 Runtime 随机生成，也可显式用于顺序续接；event id/seq 在会话内唯一。显式会话启动时从 events、输入记录、effect 和 receipt 的已保存 ID 恢复序号边界，不能只取 transcript 中残留的 ID，否则 assistant/UI 事件会与下一轮输入冲突并造成日志丢失。activation_id 关联一次输入批次和模型提交；tool_call_id 关联模型调用与回执；execution_id 是 `python.requested` 的 event id，`python.finished.reply_to` 指向它。SQLite 查询始终需要 session_id。相同 journal/session 的并发 Runtime 在启动时明确拒绝，不同 session 可共用 journal。
 
+Journal 的初始化在后台 writer 线程内完成。切换 WAL 时，SQLite 可能因并发模式升级直接返回 `SQLITE_BUSY` 而不调用 busy handler；此处只在连接原有的 busy-timeout 预算内等待并重试幂等模式切换，随后恢复该连接的 busy handler。建表、旧主键迁移及字段检查/变更置于同一个 `BEGIN IMMEDIATE` 事务中，取得写锁后才检查 schema，提交后才确认 startup flush。等待耗尽或其他错误仍使初始化失败；不增加工具/effect 的自动重试或重放。
+
 Actor 的 activation/transcript snapshot 与 tool receipt 仍走同步 FULL 事务接口，但调用前在 loop 内冻结独立 payload，再通过 `asyncio.to_thread` 执行 SQLite 并 await 结果。初始输入快照提交成功前不调用 provider；receipt 提交成功前不推进后续工具；最终 commit/pause 成功或明确失败后才发布对应 settlement。取消不能撤销已经开始的 SQLite 调用，因此 actor 先等待线程退出并完成必要状态转换，Runtime 才能结束清理、释放会话锁。
 
 显式 retry 也遵守这些顺序：输入快照失败须先重新提交再请求模型；已经接纳的工具若 receipt 提交失败，actor 保留该 activation 的分离回执，retry 只补交回执再继续，不重复调用工具。该状态仅存在于当前 actor 内，不随 transcript restore 恢复，不新增自动重试或 effect replay。

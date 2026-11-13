@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 import sqlite3
 import time
+import threading
 from pathlib import Path
 
 from nervipulsa.journal import Journal
@@ -351,10 +352,12 @@ def test_migrates_legacy_primary_keys_preserving_rows(tmp_path: Path) -> None:
             INSERT INTO events VALUES ('legacy-event','s',7,'notice','src','dst',NULL,'{"x":1}',3.5);
             INSERT INTO executions VALUES ('legacy-exec','s','act',4,'complete',1,2,3,1,'{"keep":true}');
         """)
-    journal = Journal(path)
-    journal.start()
+    journals = [Journal(path), Journal(path)]
+    for journal in journals:
+        journal.start()
     try:
-        assert journal.flush()
+        for journal in journals:
+            assert journal.flush(), journal.error
         with sqlite3.connect(path) as connection:
             assert connection.execute("SELECT * FROM events").fetchone() == ("legacy-event", "s", 7, "notice", "src", "dst", None, '{"x":1}', 3.5)
             assert connection.execute("SELECT * FROM executions").fetchone() == ("legacy-exec", "s", "act", 4, "complete", 1.0, 2.0, 3.0, 1, '{"keep":true}')
@@ -362,4 +365,65 @@ def test_migrates_legacy_primary_keys_preserving_rows(tmp_path: Path) -> None:
             assert [row[1] for row in sorted(connection.execute("PRAGMA table_info(executions)"), key=lambda row: row[5]) if row[5]] == ["session_id", "execution_id"]
             assert connection.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events'").fetchall()
     finally:
+        for journal in journals:
+            assert journal.close()
+
+
+@pytest.mark.parametrize("release_lock", [True, False])
+def test_startup_waits_for_wal_switch_within_busy_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_lock: bool,
+) -> None:
+    from nervipulsa.events import Event
+
+    path = tmp_path / "journal.sqlite"
+    connect = sqlite3.connect
+    blocker = connect(path)
+    blocker.execute("CREATE TABLE seed (value TEXT)")
+    blocker.execute("INSERT INTO seed VALUES ('preserved')")
+    blocker.commit()
+    blocker.execute("BEGIN EXCLUSIVE")
+    busy = threading.Event()
+
+    class Connection(sqlite3.Connection):
+        def execute(self, statement, *args, **kwargs):
+            try:
+                return super().execute(statement, *args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if (statement == "PRAGMA journal_mode=WAL"
+                        and exc.sqlite_errorcode & 0xFF == sqlite3.SQLITE_BUSY):
+                    busy.set()
+                raise
+
+    def open_connection(*args, **kwargs):
+        kwargs["factory"] = Connection
+        if not release_lock:
+            kwargs["timeout"] = 0.05
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", open_connection)
+    journal = Journal(path)
+    journal.start()
+    journal.observe_event(Event("s", "after-contention", 1, "notice", "a", "b", None, {}, 1.0))
+    try:
+        assert busy.wait(3), "startup did not reach the locked WAL transition"
+        if release_lock:
+            blocker.rollback()
+            assert journal.flush(), journal.error
+            assert not journal.incomplete
+            assert [row["id"] for row in journal.recent("s")["events"]] == ["after-contention"]
+        else:
+            journal._thread.join(timeout=3)
+            assert journal.error is not None
+            assert journal.incomplete
+            assert not journal.flush()
+            blocker.rollback()
+        with connect(path) as connection:
+            assert connection.execute("SELECT value FROM seed").fetchall() == [("preserved",)]
+            if release_lock:
+                assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+            else:
+                assert connection.execute("SELECT name FROM sqlite_master WHERE name='events'").fetchall() == []
+    finally:
+        blocker.rollback()
+        blocker.close()
         assert journal.close()

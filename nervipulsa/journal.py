@@ -19,6 +19,30 @@ from .events import Delivery, Event
 _STOP = object()
 
 
+def _enable_wal(connection: sqlite3.Connection) -> None:
+    """Wait within this connection's busy budget for an idempotent WAL switch.
+
+    Concurrent journal-mode upgrades can return SQLITE_BUSY without invoking
+    SQLite's busy handler. Retry only this mode change, never durable effects.
+    """
+    timeout_ms = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+    deadline = time.monotonic() + timeout_ms / 1000
+    connection.execute("PRAGMA busy_timeout=0")
+    try:
+        while True:
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, "sqlite_errorcode", None)
+                remaining = deadline - time.monotonic()
+                if code is None or code & 0xFF != sqlite3.SQLITE_BUSY or remaining <= 0:
+                    raise
+                time.sleep(min(0.01, remaining))
+    finally:
+        connection.execute(f"PRAGMA busy_timeout={timeout_ms}")
+
+
 def _ensure_durable_memory_tables(connection: sqlite3.Connection) -> None:
     """Tables for restart-inspectable (never auto-replayed) memory commits."""
     connection.execute("""CREATE TABLE IF NOT EXISTS durable_transcript_snapshots (
@@ -111,6 +135,7 @@ class Journal:
 
     @staticmethod
     def _migrate_session_primary_keys(connection: sqlite3.Connection) -> None:
+        """Migrate legacy keys inside the caller's initialization transaction."""
         def primary_key(table: str) -> tuple[str, ...]:
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             return tuple(str(row[1]) for row in sorted(rows, key=lambda row: int(row[5])) if row[5])
@@ -141,29 +166,26 @@ class Journal:
         old_tables = [table for table, (old_key, _, _) in migrations.items() if primary_key(table) == old_key]
         if not old_tables:
             return
-        connection.execute("BEGIN")
-        try:
-            for table in old_tables:
-                _, create_sql, columns = migrations[table]
-                connection.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
-                connection.execute(create_sql)
-                connection.execute(f"INSERT INTO {table}_new ({columns}) SELECT {columns} FROM {table}_old")
-                connection.execute(f"DROP TABLE {table}_old")
-                connection.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
+        for table in old_tables:
+            _, create_sql, columns = migrations[table]
+            connection.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+            connection.execute(create_sql)
+            connection.execute(f"INSERT INTO {table}_new ({columns}) SELECT {columns} FROM {table}_old")
+            connection.execute(f"DROP TABLE {table}_old")
+            connection.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
 
     def _writer(self) -> None:
         connection: sqlite3.Connection | None = None
         pending: list[object] = []
         try:
             connection = sqlite3.connect(self.path, timeout=5)
-            connection.execute("PRAGMA journal_mode=WAL")
+            _enable_wal(connection)
             connection.execute("PRAGMA synchronous=NORMAL")
+            # executescript commits a pending transaction; begin inside it so
+            # schema inspection and migrations share one writer reservation.
             connection.executescript(
                 """
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS events (
                     id TEXT NOT NULL,
                     session_id TEXT NOT NULL,

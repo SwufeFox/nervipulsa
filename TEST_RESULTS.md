@@ -1,5 +1,41 @@
 # Recorded results
 
+## Concurrent journal initialization (2026-11-13)
+
+The reported Ubuntu / Python 3.11 CI failure occurred during two concurrent
+`Runtime.start()` calls sharing one SQLite file, before the receipt commit gate.
+The existing concurrent test is retained.
+
+Journal startup now waits for `SQLITE_BUSY` from the idempotent WAL-mode switch
+within the connection's existing busy-timeout budget, restoring that busy
+handler afterwards. Other errors and budget exhaustion still fail startup.
+Schema creation, legacy-key migration and column checks/changes execute in one
+`BEGIN IMMEDIATE` transaction, so a competing initializer checks the schema only
+after obtaining the write reservation. Tool/effect commits are not retried.
+
+Focused local verification on Windows / CPython 3.13.14:
+
+```bash
+python -m pytest -q tests/test_journal.py tests/test_actor_persistence.py
+```
+
+**28 passed in 23.68s**, including the reported receipt case. New regressions
+hold a real SQLite exclusive lock: releasing it allows startup and the queued
+observation to persist; retaining it beyond a short configured budget produces
+an explicit incomplete/error state with no observation schema committed.
+Both paths preserve pre-existing data. The legacy migration case now starts
+two journal writers against the same database and verifies its original rows
+and session-scoped primary keys.
+
+Full local regression after the repair:
+
+```bash
+python -m pytest -q
+```
+
+**305 passed in 382.73s** on Windows / CPython 3.13.14. This is the full local
+suite result; hosted Ubuntu/Windows Python 3.11 results are separate evidence.
+
 ## Shared-budget source reads (2026-11-13)
 
 Added `hashline_edit.view_files(requests)` for 1–8 source excerpts sharing one

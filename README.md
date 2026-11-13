@@ -272,6 +272,11 @@ record. After a restart, `/inspect` can read the previous session, but the
 runtime does not replay Python, refill the mailbox, or restore the worker
 namespace. Durable memory is inspectable, not automatically resumable.
 
+The actor awaits these SQLite calls in a worker thread. Input snapshots commit
+before model requests, receipts commit before later tools, and final commits
+finish before settlement. Shutdown waits for an in-flight commit to finish;
+thread scheduling does not cancel or roll back a transaction.
+
 The journal's event observation path is asynchronous. Event acceptance does not
 mean those observations have been flushed to disk. A visible incomplete-journal
 marker is shown if its bounded observation queue fills or writing fails. Python
@@ -458,6 +463,35 @@ Four probes, all credential-free:
 The transcript probe asserts `chars_match_full_dump`; the incremental size
 accounting in `nervipulsa/llm.py` must stay bit-exact with a full
 `json.dumps` of the same snapshot.
+
+`bench_runtime.py` retains a fresh `.scratch/bench-runtime-<id>/` workspace per
+invocation. Its sequential tool-session timing includes observer polling and
+fixed settling waits; use it as a mechanism probe, not a saturation rate.
+
+`benchmarks/bench_load.py` adds finite, credential-free load experiments:
+
+    python benchmarks/bench_load.py --sessions 1 2 4 --journals shared separate \
+      --mode all --jobs 12 --rate 500 --seconds 2 --provider-ms 20 --work-ms 5 \
+      --json .scratch/load-results.json --workspace-root .scratch/load-workspaces
+
+Worker mode submits one task per session at a time through the real Python
+worker, then waits for its terminal and committed follow-up. A task contributes
+verified goodput only after its file marker, receipts, effect state, transcript
+snapshot and observation rows reconcile. Admission mode schedules ordinary
+inputs at an absolute aggregate rate, reports refusal reasons and producer
+lateness, and drains every accepted input. Input settlements and model calls
+are counted separately because batching can combine several inputs.
+
+Reports include per-session and aggregate rates, latency sample counts and
+p50/p95/p99, loop lag, startup/active/drain/shutdown costs, parent CPU, context
+sizes and source hashes. Each trial uses a new workspace; output JSON must be
+a new file, and integrity failures return nonzero with the evidence retained.
+FULL durability, default capacities and context policy stay enabled. Synthetic
+provider delay is not inference, and short benchmark rates are not production
+coding-task throughput or a service-level guarantee.
+
+The [2026-11-13 load study](TEST_RESULTS.md#durable-runtime-throughput-study-2026-11-13)
+records the comparison, including shared-journal failures and capacity limits.
 
 ## Real-model checks
 

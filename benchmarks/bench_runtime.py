@@ -21,6 +21,7 @@ import gc
 import json
 import statistics
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,7 @@ def bench_transcript_measurement(message_target: int = 400) -> dict[str, Any]:
         transcript.project(finished)
 
     ground_truth = len(json.dumps(transcript.snapshot(), ensure_ascii=False))
+    assert transcript.serialized_length() == ground_truth, "incremental transcript size differs from full JSON"
     rounds = 200
     samples: list[float] = []
     legacy: list[float] = []
@@ -320,9 +322,13 @@ def main(argv: list[str] | None = None) -> int:
         args.host_rounds = 6
         args.idle_seconds = 1.0
 
-    root = Path(__file__).resolve().parents[1] / ".scratch" / "bench"
-    root.mkdir(parents=True, exist_ok=True)
-    results: dict[str, Any] = {"python": sys.version.split()[0], "platform": sys.platform}
+    scratch = Path(__file__).resolve().parents[1] / ".scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="bench-runtime-", dir=scratch))
+    results: dict[str, Any] = {
+        "python": sys.version.split()[0], "platform": sys.platform,
+        "workspace": str(root),
+    }
     results["transcript_measurement"] = bench_transcript_measurement(args.messages)
     print(f"transcript measurement: {results['transcript_measurement']}")
     results["tool_session"] = bench_tool_session(root / "session", args.activations)

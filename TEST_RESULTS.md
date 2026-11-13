@@ -1,5 +1,160 @@
 # Recorded results
 
+## Durable runtime throughput study (2026-11-13)
+
+This study measures finite runtime capacity with FULL commits and no automatic
+effect replay. It establishes a large event-loop responsiveness improvement,
+not a general throughput increase or a production rating. Single-session
+throughput regressed, and shared-journal failures remain in both revisions.
+
+### Method and reproduction
+
+Four serial runs used the order **A1 baseline / B1 offload / B2 offload /
+A2 baseline**, with two independent trials per workload/session/layout cell.
+A is `465a034048cd88e944ae45c39b69b47f58544d93`; B is the working-tree actor
+persistence change. The exact same load script was copied into both source
+checkouts. Harness SHA-256:
+`5cbf854f91d70f2ab2539c1ad3ee81802462a37fce96772e04326b57f39836af`.
+Of the four fingerprinted runtime modules (`llm.py`, `journal.py`,
+`python_host.py`, `events.py`), only `llm.py` differs. Imported source paths,
+both source hashes and the runtime defaults are retained in the JSON evidence.
+
+Environment: Windows 11 build 26300, CPython 3.13.14, SQLite 3.50.4, x64,
+8 logical CPUs, AppContainer disabled. All four runs used these arguments,
+with a distinct output file and workspace root for each label:
+
+```bash
+python benchmarks/bench_load.py --sessions 1 2 4 --journals shared separate \
+  --mode all --jobs 12 --rate 500 --seconds 2 --provider-ms 20 --work-ms 5 \
+  --repeats 1 --seed 20261113 --json .scratch/load-reproduction.json \
+  --workspace-root .scratch/load-reproduction
+```
+
+The 20 ms provider delay is synthetic async sleep; no live HTTP or inference
+is measured. Worker mode runs actual Python processes, one outstanding task
+per session, including a 5 ms worker sleep, marker write, accepted receipt,
+observed effect, transcript snapshot and committed follow-up. Admission mode
+schedules 1,000 ordinary inputs at an aggregate 500/s by absolute clock time;
+it retains normal batching and reports producer lateness and refusals.
+Input settlements are not model calls or coding-task completions.
+
+Defaults are unchanged: ordinary capacity 64, result capacity 4, batch limit
+32, context limit 200,000 serialized characters and activation budget 100.
+FULL activation/snapshot/receipt and effect commits stay enabled. Startup and
+one warm-up job/input per session precede active timing. Goodput includes
+accepted-input drain, excludes startup/warm-up/shutdown/offline reconciliation,
+and counts only work in sessions passing independent exact-set checks.
+Those excluded phases still have recorded timings, and startup failure fails
+the cell. Percentiles use nearest rank and include sample counts; parent CPU
+excludes worker CPU. Two trials do not establish statistical confidence or
+sustained capacity, and latency quantiles are not pooled across trials.
+
+### All measured cells
+
+Worker rates are independently verified Python tool tasks/active second;
+admission rates are independently verified ordinary input settlements/active
+second. A dagger marks incomplete evidence: the numeric value is a conservative
+verified subset, not a passing capacity result. Startup failure has no rate.
+
+| Workload | Sessions | Journals | A1 baseline | B1 offload | B2 offload | A2 baseline |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| worker | 1 | shared | 2.83 | 1.38 | 1.08 | 2.60 |
+| worker | 1 | separate | 2.15 | 0.72 | 1.92 | 2.52 |
+| worker | 2 | shared | 1.96 | startup failed | 2.19 | startup failed |
+| worker | 2 | separate | 2.50 | 3.28 | 2.25 | 3.46 |
+| worker | 4 | shared | 1.65† | 2.16 | 1.80 | 1.99 |
+| worker | 4 | separate | 3.05 | 4.91 | 3.38 | 3.24 |
+| admission | 1 | shared | 197.26 | 280.42 | 215.19 | 161.44 |
+| admission | 1 | separate | 212.89 | 95.24 | 154.20 | 184.82 |
+| admission | 2 | shared | startup failed | 217.05 | 175.90 | startup failed |
+| admission | 2 | separate | 24.54 | 365.93 | 257.27 | 26.06 |
+| admission | 4 | shared | 1.59† | 223.89 | startup failed | 0.00† |
+| admission | 4 | separate | 4.02 | 367.28 | 435.24 | 6.93 |
+
+**All four complete matrix commands exited 1.** In total, 40/48 cells passed;
+all 24 independent-journal cells passed. The eight failed shared-journal cells
+comprise five initialization failures (`OperationalError: database is locked`)
+and three cells with incomplete observations. A1's shared four-session worker
+cell verified 36/48 jobs; its shared four-session admission cell verified
+250/1,000 inputs. A2's shared four-session admission cell verified 0/1,000.
+All accepted work in these cells reached observed settlement, but a session
+with incomplete audit evidence contributes no verified goodput. Zero verified
+goodput here does not mean no input was processed or no effect occurred.
+Failures are preserved; no rejected inputs were automatically retried.
+
+### Interpretation and production boundary
+
+- Event-loop responsiveness is the strongest result. In the four-session
+  independent-journal worker cell, loop-lag p95 fell from 299–347 ms to
+  14.7–15.0 ms. For ordinary input it fell from 890–1,353 ms to 14.35–14.42 ms.
+  These are observations from a 10 ms timer, not scheduling deadlines.
+- Throughput is workload dependent. Single-session worker and admission rates
+  both fell in the independent-journal cells; two-session worker ranges overlap.
+  Four-session worker throughput rose. Moving the wait off the loop does not
+  make a FULL transaction faster or remove SQLite's single-writer constraint.
+- The baseline's four-session independent-journal producer needed 144–247 s
+  for a nominal two-second arrival plan. Current runs needed about two seconds,
+  but rejected 166/1,000 and 0/1,000 inputs respectively. Current planned-arrival
+  to committed p95 was 413–1,059 ms. Baseline active model requests were 1,000
+  versus 39 and 52 after offload: preserved batching explains much of the
+  ordinary-input gain. It is not a comparable gain in per-request database
+  service speed or verified coding-task throughput.
+- Shared-journal startup is still unreliable under concurrent session startup.
+  Current four-session shared worker p95 latency remained 5.22–5.28 s even
+  with low loop lag. The async observation journal remains best effort; a
+  missing observation does not invalidate a separately committed effect, but
+  it prevents the stricter audit proof required by this experiment. Do not
+  derive shared-database production capacity from its successful subsets.
+- SQLite 3.50.4 is in the potentially affected range of the official
+  [WAL-reset defect](https://www.sqlite.org/wal.html#walreset). Use a version
+  containing the fix (3.51.3+ or the listed 3.50.7/3.44.6 backports) before
+  production storage qualification and rerun the workload. This experiment
+  did not reproduce corruption and does not attribute lock errors to that bug.
+- Required production evidence remains: representative task mix and latency/
+  refusal SLOs, patched SQLite, shared-writer/startup behavior, long-duration
+  load and fault combinations, real provider limits/thread contention, and
+  resource curves for memory, WAL/disk growth and all managed processes.
+
+### Implementation and regression verification
+
+The actor persistence changes retain FULL transactions and await the actual
+commit before admitting the next model/tool step or publishing settlement.
+Cancellation waits for a started SQLite call; explicit retry can repair an input
+snapshot or retained receipt without invoking an accepted tool again.
+
+Focused Windows / CPython 3.13.14 verification completed in separate groups:
+
+| Targets | Result |
+| --- | --- |
+| `tests/test_actor_persistence.py` | 14 passed in 12.57s |
+| `tests/test_llm.py` | 29 passed in 37.34s |
+| Durable memory, invalid-response recovery, activation correlation, session locks, T0–T4 crash boundaries, transcript restore, CLI and runtime observations | 106 passed in 162.26s |
+
+These are 149 passing tests, not a full-suite result. The first combined command
+was terminated at its 600-second deadline without a completed result; its cause
+was not established. Diagnostic logs remain in the study directory. Baseline
+[GitHub Actions #10](https://github.com/SwufeFox/nervipulsa/actions/runs/43387063038)
+passed Ubuntu and Windows Python 3.11 jobs at `465a034`; it does not cover these
+working-tree changes. No live provider, POSIX run, long-duration result, disk
+fault experiment or production acceptance is claimed for this revision.
+
+### Retained evidence
+
+The portable [comparison JSON](benchmarks/durable_throughput_2026-11-13.json)
+contains all 48 cells, exact configurations and source hashes, rates, latency
+sample counts/distributions, stage timings, failure counts and regression
+results. Long session-error lists are bounded with their original counts.
+Complete per-job/event/row evidence remains in the ignored local directory:
+`.scratch/throughput-study-04y2422o/`, files `baseline-a1.json`,
+`offload-b1.json`, `offload-b2.json`, `baseline-a2.json`. These raw local paths
+and the isolated baseline checkout are not portable CI artifacts.
+
+The initial mechanics probe is also retained in the comparison JSON: context
+accounting matched the full serialization; its four-measurement mean was
+0.0778 ms versus 46.77 ms for the legacy serialization path. Its 24-tool scripted
+session took 14.2795 s including client polling/settling, so that probe is not
+used as a saturation rate.
+
 ## Supervised process deadlines (2026-11-13)
 
 Added opt-in `--process-timeout` for one-shot `--prompt` calls. A synchronous

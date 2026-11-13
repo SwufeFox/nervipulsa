@@ -15,7 +15,8 @@ import json
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable
 
 from .events import Emitter, Event, Lane, Mailbox, RuntimeState
@@ -852,6 +853,24 @@ class ContextProjector:
         return None
 
 
+async def _finish_before_cancelling(operation: Awaitable[Any]) -> Any:
+    """Observe uncancellable disk work before releasing the actor's ownership."""
+    task = asyncio.ensure_future(operation)
+    cancellation = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+        except BaseException:
+            break
+    if cancellation is not None:
+        if not task.cancelled():
+            task.exception()
+        raise cancellation
+    return task.result()
+
+
 class LLMActor:
     def __init__(
         self,
@@ -926,6 +945,9 @@ class LLMActor:
         self.busy = False
         self._inflight: asyncio.Task[Any] | None = None
         self.after_tool: Callable[[int, ToolCall], None] | None = None
+        # Accepted calls cannot be invoked again when their receipt commit fails.
+        # Retain that receipt until retry has durably recorded it.
+        self._pending_tool_receipts: dict[str, tuple[str, str | None, str, dict[str, Any]]] = {}
         self._stopped: asyncio.Event | None = None
 
     @property
@@ -1277,7 +1299,7 @@ class LLMActor:
                 event_metrics.append(detail)
             record_after = self.transcript.serialized_length()
             try:
-                self._durable_commit_activation(activation)
+                await self._durable_commit_activation(activation)
             except Exception as exc:
                 activation.error_kind = "commit_interrupted"
                 activation.error_message = f"durable transcript commit failed: {exc}"
@@ -1293,6 +1315,8 @@ class LLMActor:
                 )
                 self._journal_activation(activation)
                 self._settle(activation)
+                return
+            if self._stop:
                 return
             accounting_mismatch = record_after - before_chars != input_added_chars
             if (
@@ -1338,7 +1362,7 @@ class LLMActor:
             activation.transcript_version = self.transcript.version
             if self.transcript.version == version_before and compaction is None:
                 self._journal_activation(activation)
-                self._finish(activation, "committed")
+                await self._finish(activation, "committed")
                 return
 
             if compaction is not None:
@@ -1520,6 +1544,8 @@ class LLMActor:
             note(text)
 
     async def _retry(self, activation: Activation) -> None:
+        if self._stop:
+            return
         self.busy = True
         try:
             if activation.error_kind == "response_commit_failed" and activation.response is not None:
@@ -1529,9 +1555,22 @@ class LLMActor:
             if activation.error_kind == "commit_interrupted" and activation.response is not None:
                 activation.status = "running"
                 await self._deliver_tools(activation, activation.response)
-                if activation.status == "running":
-                    self._finish(activation, "committed")
+                if activation.status == "running" and not self._stop:
+                    await self._finish(activation, "committed")
                 return
+            if activation.error_kind == "commit_interrupted":
+                activation.status = "running"
+                try:
+                    await self._durable_commit_activation(activation)
+                except Exception as exc:
+                    activation.error_kind = "commit_interrupted"
+                    activation.error_message = f"durable transcript commit failed: {exc}"
+                    self._pause_inplace(activation)
+                    self._journal_activation(activation)
+                    self._settle(activation)
+                    return
+                if self._stop:
+                    return
             if activation.error_kind == "budget":
                 self._between_user_calls = max(0, self.max_activations - 1)
             self._between_user_calls += 1
@@ -1540,6 +1579,8 @@ class LLMActor:
             self.busy = False
 
     async def _complete_and_commit(self, activation: Activation) -> None:
+        if self._stop:
+            return
         activation.status = "running"
         snapshot_missing = activation.snapshot is None
         if snapshot_missing:
@@ -1615,10 +1656,8 @@ class LLMActor:
         except asyncio.CancelledError:
             finish_attempt("cancelled")
             if self._stop:
-                activation.status = "failed"
                 activation.error_kind = "shutdown"
-                self._journal_activation(activation)
-                self._settle(activation)
+                await self._finish(activation, "failed")
                 return
             raise
         except ProviderFailure as exc:
@@ -1653,7 +1692,7 @@ class LLMActor:
             if problems == ["empty"]:
                 await self._pause(activation, "response_invalid", "model response was empty")
                 return
-            self._reject_all(activation, response, problems)
+            await self._reject_all(activation, response, problems)
             return
         activation.response = response
         await self._commit_response(activation, response)
@@ -1674,8 +1713,8 @@ class LLMActor:
                     {"text": response.content, "activation_id": activation.id},
                 )
         await self._deliver_tools(activation, response)
-        if activation.status == "running":
-            self._finish(activation, "committed")
+        if activation.status == "running" and not self._stop:
+            await self._finish(activation, "committed")
 
     @staticmethod
     def _malformed(response: ModelResponse) -> str | None:
@@ -1717,7 +1756,7 @@ class LLMActor:
                 errors.append(f"{call.id}:{reason}")
         return errors
 
-    def _reject_all(self, activation: Activation, response: ModelResponse, problems: list[str]) -> None:
+    async def _reject_all(self, activation: Activation, response: ModelResponse, problems: list[str]) -> None:
         if not activation.response_recorded:
             self.transcript.add_assistant(response)
             activation.response_recorded = True
@@ -1733,29 +1772,30 @@ class LLMActor:
             rejections.append({"tool_call_id": call.id, "reason": reason})
             self._journal_tool(activation, call.id, None, "rejected", reason)
         self._emit_feedback(activation, rejections or [{"tool_call_id": "", "reason": "invalid_payload"}])
-        self._finish(activation, "committed")
+        await self._finish(activation, "committed")
 
     async def _deliver_tools(self, activation: Activation, response: ModelResponse) -> None:
         rejections: list[dict[str, str]] = []
         for index, call in enumerate(response.tool_calls):
+            if self._stop:
+                return
             state = activation.tool_calls.get(call.id)
-            if state in {"accepted", "rejected"}:
+            pending = self._pending_tool_receipts.get(activation.id)
+            if state in {"accepted", "rejected"} and (pending is None or pending[0] != call.id):
                 continue
-            activation.tool_calls[call.id] = "pending"
             try:
-                receipt, status = await self._deliver_one(activation, call)
-                self.transcript.add_tool(call.id, receipt)
-                activation.tool_calls[call.id] = status
-                execution_id = receipt.get("execution_id") if status == "accepted" else None
+                if pending is not None and pending[0] == call.id:
+                    _, execution_id, status, receipt = pending
+                else:
+                    activation.tool_calls[call.id] = "pending"
+                    receipt, status = await self._deliver_one(activation, call)
+                    self.transcript.add_tool(call.id, receipt)
+                    activation.tool_calls[call.id] = status
+                    execution_id = receipt.get("execution_id") if status == "accepted" else None
+                    execution_id = execution_id if isinstance(execution_id, str) else None
                 reason = receipt.get("reason") if status == "rejected" else None
                 try:
-                    self._durable_commit_tool_receipt(
-                        activation,
-                        call.id,
-                        execution_id if isinstance(execution_id, str) else None,
-                        status,
-                        receipt,
-                    )
+                    receipt = await self._durable_commit_tool_receipt(activation, call.id, execution_id, status, receipt)
                 except Exception as exc:
                     activation.error_kind = "commit_interrupted"
                     activation.error_message = f"commit interrupted: {exc}"
@@ -1771,6 +1811,7 @@ class LLMActor:
                     )
                     self._settle(activation)
                     return
+                self._pending_tool_receipts.pop(activation.id, None)
                 self._journal_tool(
                     activation,
                     call.id,
@@ -1820,9 +1861,12 @@ class LLMActor:
     async def _pause(self, activation: Activation, kind: str, message: str) -> None:
         activation.error_kind = kind
         activation.error_message = message
-        self._pause_inplace(activation)
+        await _finish_before_cancelling(self._pause_after_commit(activation))
+
+    async def _pause_after_commit(self, activation: Activation) -> None:
+        paused = replace(activation, status="paused")
         try:
-            self._durable_commit_activation(activation)
+            await self._durable_commit_activation(paused)
         except Exception as exc:
             self._ui.call(
                 "agent.error",
@@ -1833,16 +1877,13 @@ class LLMActor:
                 },
             lane=Lane.DIAGNOSTIC
             )
+        activation.transcript_version = paused.transcript_version
+        self._pause_inplace(activation)
         self._journal_activation(activation)
         self._settle(activation)
 
     def _pause_inplace(self, activation: Activation) -> None:
         activation.status = "paused"
-        # The status change is the fact a waiting host cares about, so the local
-        # wake-up belongs here rather than in the caller that persists it: a
-        # host must never be left waiting because a persistence step was the
-        # last thing in a branch.
-        self._settled.set()
         self._paused = activation
         kind = activation.error_kind or "paused"
         message = activation.error_message or kind
@@ -1857,11 +1898,10 @@ class LLMActor:
     def _settle(self, activation: Activation) -> None:
         """Publish that one activation is no longer running.
 
-        Two audiences, one fact: `wait_for_activation` is woken by the flag
-        (already set by the state transition), and a host that prefers to listen
-        gets `agent.activation_finished` in the trace and journal. The event is
-        emitted after `_journal_activation`, so its position in the trace
-        follows the persisted row rather than racing it.
+        Two audiences, one fact: `wait_for_activation` is woken by the flag and
+        listeners get `agent.activation_finished` in the trace and journal.
+        A successful durable final commit precedes either audience seeing it;
+        commit failures settle as an explicit pause instead.
         """
         if activation.ended_at is None:
             activation.ended_at = time.time()
@@ -1940,12 +1980,16 @@ class LLMActor:
             activation.context_metrics.pop("input_events", None)
 
 
-    def _finish(self, activation: Activation, status: str) -> None:
-        activation.status = status
+    async def _finish(self, activation: Activation, status: str) -> None:
+        # Cancellation must not strand a durable final row without publishing
+        # its matching in-memory settlement.
+        await _finish_before_cancelling(self._finish_after_commit(activation, status))
+
+    async def _finish_after_commit(self, activation: Activation, status: str) -> None:
+        finished = replace(activation, status=status, ended_at=time.time())
         if status == "committed":
-            activation.error_kind = None
-            activation.error_message = None
-        activation.ended_at = time.time()
+            finished.error_kind = None
+            finished.error_message = None
         if activation.context_metrics:
             after_commit = self.transcript.serialized_length()
             activation.context_metrics["transcript_chars_after_commit"] = after_commit
@@ -1954,10 +1998,8 @@ class LLMActor:
                 activation.context_metrics["response_and_receipt_added_chars"] = (
                     after_commit - request_chars
                 )
-        if self._paused is activation:
-            self._paused = None
         try:
-            self._durable_commit_activation(activation)
+            await self._durable_commit_activation(finished)
         except Exception as exc:
             activation.error_kind = "commit_interrupted"
             activation.error_message = f"durable activation commit failed: {exc}"
@@ -1974,11 +2016,18 @@ class LLMActor:
             self._journal_activation(activation)
             self._settle(activation)
             return
+        activation.status = finished.status
+        activation.error_kind = finished.error_kind
+        activation.error_message = finished.error_message
+        activation.ended_at = finished.ended_at
+        activation.transcript_version = finished.transcript_version
+        if self._paused is activation:
+            self._paused = None
         self._journal_activation(activation)
         self._settle(activation)
 
-    def _durable_commit_activation(self, activation: Activation) -> None:
-        """Sync durable commit of one activation plus transcript snapshot.
+    async def _durable_commit_activation(self, activation: Activation) -> None:
+        """Commit a detached activation and transcript off the owning loop.
 
         Raises on any SQLite failure so callers must fail explicitly instead of
         silently marking committed. Read-only inspection material only; never
@@ -1991,38 +2040,47 @@ class LLMActor:
         error: dict[str, Any] | None = None
         if activation.error_kind:
             error = {"kind": activation.error_kind, "message": activation.error_message}
-        journal.commit_activation_snapshot(
+        await _finish_before_cancelling(asyncio.to_thread(
+            journal.commit_activation_snapshot,
             session_id=self.session_id,
             activation_id=activation.id,
             status=activation.status,
             input_event_ids=list(activation.input_event_ids),
             transcript_version=activation.transcript_version,
-            context=dict(activation.context_metrics or {}),
+            context=deepcopy(activation.context_metrics),
             error=error,
-            transcript_messages=self.transcript.messages,
-            transcript_event_ids=self.transcript.event_ids,
-            transcript_event_types=self.transcript.event_types,
-        )
+            transcript_messages=deepcopy(self.transcript.messages),
+            transcript_event_ids=list(self.transcript.event_ids),
+            transcript_event_types=list(self.transcript.event_types),
+        ))
 
-    def _durable_commit_tool_receipt(
+    async def _durable_commit_tool_receipt(
         self,
         activation: Activation,
         tool_call_id: str,
         execution_id: str | None,
         status: str,
         receipt: dict[str, Any],
-    ) -> None:
+    ) -> dict[str, Any]:
         journal = self._journal
         if journal is None:
-            return
-        journal.commit_tool_receipt(
+            return receipt
+        activation_id = activation.id
+        pending = self._pending_tool_receipts.get(activation_id)
+        if pending is None:
+            pending = (tool_call_id, execution_id, status, deepcopy(receipt))
+            self._pending_tool_receipts[activation_id] = pending
+        tool_call_id, execution_id, status, receipt = pending
+        await _finish_before_cancelling(asyncio.to_thread(
+            journal.commit_tool_receipt,
             session_id=self.session_id,
-            activation_id=activation.id,
+            activation_id=activation_id,
             tool_call_id=tool_call_id,
             execution_id=execution_id,
             status=status,
-            receipt=dict(receipt),
-        )
+            receipt=receipt,
+        ))
+        return receipt
 
     def _journal_activation(self, activation: Activation) -> None:
         journal = self._journal

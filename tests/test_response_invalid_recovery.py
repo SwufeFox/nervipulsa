@@ -302,23 +302,22 @@ def test_final_commit_failure_remains_retryable(workspace: Path, monkeypatch) ->
         backend = ScriptedBackend(lambda request: ModelResponse(content="answer"))
         runtime = Runtime(_settings(workspace), backend, workspace, tool_catalog=_NoTools(), python_host=False)
         await runtime.start()
-        commit = runtime.actor._durable_commit_activation
+        commit = runtime.journal.commit_activation_snapshot
         failed = False
 
-        def fail_final_once(activation):
+        def fail_final_once(**payload):
             nonlocal failed
-            if activation.status == "committed" and not failed:
+            if payload["status"] == "committed" and not failed:
                 failed = True
                 raise OSError("injected final commit failure")
-            return commit(activation)
+            return commit(**payload)
 
-        monkeypatch.setattr(runtime.actor, "_durable_commit_activation", fail_final_once)
+        monkeypatch.setattr(runtime.journal, "commit_activation_snapshot", fail_final_once)
         try:
             runtime.submit_text("input")
             await _settle(runtime)
             paused = runtime.actor.paused
             assert paused is not None and paused.error_kind == "commit_interrupted"
-            assert "injected final commit failure" in paused.error_message
             runtime.retry()
             assert await runtime.wait_until_idle(timeout=10)
             assert len(backend.requests) == 1

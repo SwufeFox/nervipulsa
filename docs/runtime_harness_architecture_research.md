@@ -991,3 +991,47 @@ test_fault_semantics` 51 passed；全量在后台跑，逐字结果待收。期�
 只剩 docs 历史条目）、4 文件 AST 通过、`git diff --check` 通过、
 `test_config + test_cli` 22 passed。测试文件无一处引用 fingerprint，
 所以没有“删了实现、测试还在测它”的悬空断言。
+
+## 2026-11-13 — 研究方向与持久化约束下的吞吐
+
+本轮以 `465a034` 为源码对照，关注的问题收窄为：**在相同 FULL 提交、有限邮箱与不自动重放的约束下，多会话能够完成多少可独立核验的工作，代价体现在哪些等待与尾延迟上？** 旧的上下文计量加速、空闲唤醒和 handler 脚本消融都不能直接回答这个问题。当前源码也已支持显式 transcript restore、会话互斥和外层进程期限，不能继续把较早文献记录中的“尚无恢复模型视图”或“没有进程监护”当作现状。
+
+### 候选贡献与边界
+
+最有证据支撑的研究对象仍是 effect uncertainty 与 actor consumption 的交界：本地 ledger 记录 intent、dispatching、observed/unknown，T0–T4 区分“效果已经发生或被观察”与“模型已经消费并继续任务”。这不是发明 durable execution、unknown outcome 或 exactly-once；语义对照见[文献筛选记录](literature_screening_2026-10-16.md)。恢复一份已提交模型视图，也不等于恢复旧 activation、Python namespace 或未完成副作用。
+
+研究应从以下三项可检验问题推进：
+
+1. **相同耐久性下的响应性与容量。** 对比 actor 同步等待 SQLite 和 await 线程提交两种实现，保留 FULL、事务边界及相同的默认容量/上下文策略；比较完整工具任务完成率、计划到达延迟、loop lag 和共享/独立 journal 的扩展曲线。降低耐久性不作为性能优化。
+2. **负载与不确定性的组合。** 在容量附近加入 cancel、timeout、进程终止、部分/迟到 handler 和提交失败，核对接纳、效果、terminal、settlement、拒绝和清理的完整集合。当前小规模成功运行不能替代持续负载、WAL/设备故障或接近 handler ceiling 的实验。
+3. **可验收 coding-task goodput。** 固定真实任务集、模型与预算，随机配对比较 A1/A2，报告独立验证通过的任务/小时、false-success、未知效果、人工接管、provider 请求、token 和耗时。需要先证明 handler 对这些指标的收益，再考虑通用订阅、推测执行或多候选文件状态层。
+
+### 本轮工程与测量切片
+
+源码核查确认 actor 的 activation/transcript snapshot 和 tool receipt 原先直接在 loop 中执行同步 FULL SQLite 调用；磁盘或锁等待会牵连同 loop 的其他会话。当前切片将这些操作放入线程并 await，冻结独立 payload，等待实际提交结束后才 settlement；取消也等待线程退出，避免会话所有权提前释放。显式 retry 补交失败的输入快照或保留回执，不重做已经接纳的工具。Journal API、schema 与 effect 的 intent → dispatching → observed 顺序不变。
+
+新增 [`bench_load.py`](../benchmarks/bench_load.py) 分开两种单位：worker 模式完成一个真实 Python 工具任务并核对文件 marker、receipt、observed effect、快照与 follow-up commit；admission 模式按绝对计划到达时间提交普通输入并统计批处理后的 settlement，不把输入数等同于模型调用数或编码任务数。两者均记录接纳/拒绝、未完成项、p50/p95/p99 样本数、loop lag、阶段耗时、context 和源码哈希。旧机制脚本也改用每次新建的工作目录，并让上下文长度一致性失败真正终止运行。
+
+实测命令、原始产物位置、源码边界和回归结果统一记录在 [验证记录](../TEST_RESULTS.md#durable-runtime-throughput-study-2026-11-13)。短时合成速率不作为生产额定吞吐：尚需业务任务分布、延迟 SLO、真实 provider 限流/线程争用、资源曲线、跨平台与长时间故障负载证据。
+
+### 存储引擎与托管验证前置条件
+
+本机 `sqlite3.sqlite_version` 实测为 **3.50.4**。SQLite 官方 [WAL 并发说明](https://www.sqlite.org/wal.html#concurrency) 明确，同一 WAL 文件仍只有一个 writer；[性能说明](https://www.sqlite.org/wal.html#performance_considerations) 说明 FULL 会在每次事务提交同步 WAL，checkpoint 也可能造成慢提交。因此线程化可以解除 event loop 的磁盘等待，不能据此推导共享数据库的写入吞吐会线性增加。
+
+同页 [WAL-reset bug](https://www.sqlite.org/wal.html#walreset) 将 3.7.0–3.51.2 列为可能受影响版本，并列出 **3.51.3+** 以及 **3.50.7 / 3.44.6 回补**。触发条件涉及同一 WAL 文件上多连接/线程或进程的写入和 checkpoint 竞态。Nervipulsa 的观测 writer 与耐久连接符合多连接使用背景，但本轮没有复现该罕见损坏，也没有证据把任何耗时或超时归因于它。生产环境应使用包含修复的 SQLite，并重新运行完整性和负载验证；本轮性能数字保留实际引擎版本，不充当生产存储认证。
+
+已实时核对基线提交 `465a034` 的 [GitHub Actions #10](https://github.com/SwufeFox/nervipulsa/actions/runs/43387063038)：Windows 与 Ubuntu 两个 Python 3.11 job 均成功，workflow 执行全套 pytest。该记录属于已推送基线，不覆盖本轮尚未提交的 actor offload 与负载脚本。
+
+### 实测结论与下一步优先级
+
+完整对照采用 A1/B1/B2/A2 顺序：同一脚本、同机、相同 FULL 与默认容量，每个版本各两次独立试验。48 个 workload/session/journal 单元中 40 个通过严格核对，独立 journal 的 24 个全部通过。8 个失败均发生于共享 journal：5 个初始化锁失败、3 个观察记录不完整。四个完整矩阵命令均返回 1，不能把成功子集或聚焦测试通过写成负载全绿。逐单元数据、失败、源码哈希与时延样本见 [验证记录](../TEST_RESULTS.md#durable-runtime-throughput-study-2026-11-13) 和 [可移植 JSON](../benchmarks/durable_throughput_2026-11-13.json)。
+
+本轮最稳定的改善是 event loop 响应性：4 会话独立 journal 的 worker loop-lag p95 从 299–347 ms 降到 14.7–15.0 ms。然而单会话 worker 与普通输入吞吐均下降，2 会话 worker 区间重叠；不能声称全面加速。4 会话普通输入的基线将名义 2 秒到达计划拖到 144–247 秒，线程化后恢复约 2 秒提交计划及批处理，说明输入 settlement 的大幅增益很大程度来自调度与批处理恢复，不能解释为单次 SQLite 写入或编码任务质量同幅提升。
+
+据此，优先级具体化为：
+
+1. **先收敛存储与负载边界。** 在含 WAL-reset 修复的 SQLite 上定位共享库初始化锁和观察 writer 争用，明确共享/独立 journal 各自支持的部署形态、失败可见性与等待界限。保留 FULL、同步提交失败显式暂停及 effect uncertainty 语义；异步观察缺失不能被解释成 effect 没执行。低 loop lag 并未消除共享库 worker 的秒级尾延迟，也不能替代这一步。
+2. **再把耐久性与响应性作为同一实验的约束。** 固定负载、模型/预算、p95/p99 与拒绝率验收条件，做持续负载和资源曲线；在相同负载下组合 timeout/cancel、T0–T4、提交失败和迟到/部分 handler，分别核对接纳、效果、模型消费、settlement 与进程清理。研究主张应落在“效果不确定或已观察而尚未消费时，如何保持正确因果顺序并及时接纳新约束”，而非线程化或 durable execution 本身的新颖性。
+3. **最后用真实编码任务证明收益。** 对固定任务集做随机配对的 A1/A2 对照，用独立 verifier 统计任务/小时、false-success、人工接管、unknown effect、provider 请求/token 与耗时。当前每个 worker 任务只包含简单脚本与 marker，每个普通输入可以与其他输入共享 activation；两种合成 goodput 都不能充当这个研究终点。
+
+本轮实现相关的 149 项聚焦回归已通过；共享库并发启动与观察完整性仍是已观测缺口，未被本轮 actor 线程化修复。当前证据不足以给出生产额定吞吐。生产级结论还缺实际任务/SLO、修复后的存储引擎、长时间故障负载、真实 provider/线程池争用、全进程资源曲线与当前改动的跨平台验证。

@@ -53,6 +53,9 @@ architecture reference and the tests in this tree.
   runs under process supervision and keeps separate artifacts.
 - [`bench_handler_ablation.py`](../benchmarks/bench_handler_ablation.py) —
   scripted A0/A1/A2 mechanism comparison.
+- [`bench_load.py`](../benchmarks/bench_load.py) — finite synthetic worker
+  goodput and scheduled input load, shared/separate journals, latency and loop
+  lag, with offline persistence and file-effect reconciliation.
 - [`failure_baseline.json`](../benchmarks/failure_baseline.json) and
   [`handler_ablation.json`](../benchmarks/handler_ablation.json) —
   machine-readable observations and benchmark records.

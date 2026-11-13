@@ -1,0 +1,5353 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-13",
+  "study": "Durable runtime throughput under synthetic finite load",
+  "contract": {
+    "order": [
+      "baseline-a1",
+      "offload-b1",
+      "offload-b2",
+      "baseline-a2"
+    ],
+    "baseline_revision": "465a034048cd88e944ae45c39b69b47f58544d93",
+    "environment_sqlite_version": "3.50.4",
+    "units": {
+      "worker": "independently verified Python tool tasks/active second",
+      "admission": "independently verified ordinary input settlements/active second"
+    },
+    "aggregation": "two trials per revision and cell; preserve every failure; report range and median without pooling latency quantiles",
+    "qualification": "finite same-machine synthetic comparison; no production SLO, throughput rating, confidence interval or live inference measurement"
+  },
+  "regression_verification": {
+    "actor_persistence": {
+      "passed": 14,
+      "seconds": 12.57
+    },
+    "llm": {
+      "passed": 29,
+      "seconds": 37.34
+    },
+    "remaining_related_regressions": {
+      "passed": 106,
+      "seconds": 162.26
+    },
+    "initial_combined_command": {
+      "outcome": "timeout at 600s; no completed result",
+      "root_cause": "not established"
+    },
+    "hosted_baseline": {
+      "commit": "465a034048cd88e944ae45c39b69b47f58544d93",
+      "url": "https://github.com/SwufeFox/nervipulsa/actions/runs/43387063038",
+      "windows_latest": "success",
+      "ubuntu_latest": "success",
+      "covers_working_changes": false
+    }
+  },
+  "comparison_provenance_valid": true,
+  "all_load_trials_passed": false,
+  "passed_cells": 40,
+  "cell_count": 48,
+  "separate_journal_passed_cells": 24,
+  "separate_journal_cell_count": 24,
+  "baseline_mechanics": {
+    "python": "3.13.14",
+    "platform": "win32",
+    "transcript_measurement": {
+      "messages": 400,
+      "transcript_chars": 859333,
+      "chars_match_full_dump": true,
+      "view_chars": 859737,
+      "ms_per_4_measurements_mean": 0.0778,
+      "ms_per_4_measurements_p95": 0.1342,
+      "legacy_full_dump_ms_mean": 46.77
+    },
+    "tool_session": {
+      "tool_activations": 24,
+      "model_calls": 48,
+      "transcript_chars": 320994,
+      "wall_ms": 14279.5,
+      "cpu_ms": 1734.4
+    },
+    "host_idle_wake": {
+      "rounds": 12,
+      "accepted_to_started_ms_mean": 114.54,
+      "accepted_to_started_ms_max": 389.33,
+      "accepted_to_started_ms_p95": 145.16
+    },
+    "idle_overhead": {
+      "seconds": 2.0,
+      "cpu_ms": 0.0,
+      "scheduler_wakeups": 8,
+      "thread_count_start": 4
+    }
+  },
+  "runs": [
+    {
+      "label": "baseline-a1",
+      "variant": "baseline",
+      "ok": false,
+      "environment": {
+        "python": "3.13.14",
+        "platform": "win32",
+        "os": "Windows-11-10.0.26300-SP0",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+        "logical_cpu_count": 8,
+        "windows_appcontainer": false
+      },
+      "harness_sha256": "5cbf854f91d70f2ab2539c1ad3ee81802462a37fce96772e04326b57f39836af",
+      "source_sha256": {
+        "llm.py": "27c6849b92fa4886a57b4da174873f38c323fdcd0b1bed93fb7a2e22bdbed023",
+        "journal.py": "4cfddbfe6f248b2a01744aae664dc3dee0a823c55d5c0680173259794dd87c97",
+        "python_host.py": "400d01705d7691e972c9317209866bd46dca7e140bf881e17c5be45d19ea9f8a",
+        "events.py": "a5f129e832cedde401c79ecf5ee730f3cebcc22e7feb2c1f5ccd9d1b2d98c4ed"
+      },
+      "configuration": {
+        "sessions": [
+          1,
+          2,
+          4
+        ],
+        "journals": [
+          "shared",
+          "separate"
+        ],
+        "mode": "all",
+        "jobs": 12,
+        "rate": 500.0,
+        "seconds": 2.0,
+        "provider_ms": 20.0,
+        "work_ms": 5.0,
+        "repeats": 1,
+        "seed": 20261113,
+        "json": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\baseline-a1.json",
+        "workspace_root": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\baseline-a1"
+      },
+      "runtime_defaults": {
+        "ordinary_limit": 64,
+        "result_limit": 4,
+        "batch_limit": 32,
+        "context_limit": 200000,
+        "max_activations": 100,
+        "default_timeout": 30,
+        "max_timeout": 120,
+        "max_output_tokens": null
+      },
+      "methodology": {
+        "worker": "one outstanding external input/session; actual python_exec, observed terminal, committed follow-up, exact marker check",
+        "admission": "aggregate absolute-rate ordinary inputs; real batching; no rejection retries; accepted-input drain",
+        "durability": "runtime defaults: FULL activation/snapshot/receipt and effect commits; asynchronous observation journal",
+        "latency_clock": "asyncio loop monotonic seconds; latency distributions in milliseconds",
+        "percentiles": "nearest rank; samples counts included; null when empty",
+        "rate_denominator": "active seconds including warm-worker execution and accepted drain; excludes startup, warm-up, shutdown and offline checks",
+        "cpu": "parent process only; worker process CPU excluded",
+        "lag": "10 ms absolute timer; skipped missed timer deadlines; final overdue deadline sampled",
+        "failure_counts": "failed includes explicit errors or unverified settled work; unfinished means no completion settlement; counts can overlap",
+        "goodput_integrity": "only accepted jobs with independent evidence in sessions passing exact-set/row/event/journal checks contribute goodput",
+        "limits": "finite synthetic scripts; retained listener events and ScriptedBackend request history add overhead; no user workload or latency SLO supplied"
+      },
+      "runtime_source_root": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\baseline",
+      "raw_report": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\baseline-a1.json",
+      "trials": [
+        {
+          "mode": "worker",
+          "sessions": 1,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.3039139000029536,
+            "warmup_s": 1.0828166999999667,
+            "active_start_loop_s": 20027.495925,
+            "producer_s": 4.238277100001142,
+            "drain_s": 0.0,
+            "shutdown_s": 0.0803429999978107,
+            "active_s": 4.238278500000888,
+            "active_parent_cpu_s": 0.5,
+            "offline_reconciliation_s": 0.010117400001036003,
+            "total_s": 5.715700299999298,
+            "total_parent_cpu_s": 0.734375
+          },
+          "loop_lag_ms": {
+            "samples": 192,
+            "p50": 10.596200099826092,
+            "p95": 57.09310001839185,
+            "p99": 91.71420009442954,
+            "max": 101.8633000931004,
+            "mean": 16.88673338744214
+          },
+          "aggregate": {
+            "attempted": 12,
+            "accepted": 12,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 12,
+            "observed_completions": 12,
+            "completed_verified": 12,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 2.831338242637308,
+            "accepted_per_s": 2.831338242637308,
+            "verified_tasks_per_s": 2.831338242637308,
+            "accepted_to_committed_ms": {
+              "samples": 12,
+              "p50": 346.73250000196276,
+              "p95": 379.82970000302885,
+              "p99": 379.82970000302885,
+              "max": 379.82970000302885,
+              "mean": 353.13229166786186
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 12,
+              "p50": 145.35550000073272,
+              "p95": 184.63299999712035,
+              "p99": 184.63299999712035,
+              "max": 184.63299999712035,
+              "mean": 147.1504666663653
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 12,
+              "p50": 183.8461000006646,
+              "p95": 223.11339999941993,
+              "p99": 223.11339999941993,
+              "max": 223.11339999941993,
+              "mean": 187.97797499973967
+            },
+            "attempted_per_producer_s": 2.8313391778930095,
+            "accepted_per_producer_s": 2.8313391778930095,
+            "settled_activations_active": 24
+          },
+          "backend_requests_active": 24,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 1,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.20972059999985504,
+            "warmup_s": 0.8316844000000856,
+            "active_start_loop_s": 20032.8707474,
+            "producer_s": 5.584967099999631,
+            "drain_s": 0.0,
+            "shutdown_s": 0.06923079999978654,
+            "active_s": 5.584968499999377,
+            "active_parent_cpu_s": 0.40625,
+            "offline_reconciliation_s": 0.010031599998910679,
+            "total_s": 6.705830399998376,
+            "total_parent_cpu_s": 0.5625
+          },
+          "loop_lag_ms": {
+            "samples": 245,
+            "p50": 10.636700066243066,
+            "p95": 64.8663000720262,
+            "p99": 178.80120009431266,
+            "max": 266.7685000160418,
+            "mean": 17.55397312724143
+          },
+          "aggregate": {
+            "attempted": 12,
+            "accepted": 12,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 12,
+            "observed_completions": 12,
+            "completed_verified": 12,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 2.148624472994134,
+            "accepted_per_s": 2.148624472994134,
+            "verified_tasks_per_s": 2.148624472994134,
+            "accepted_to_committed_ms": {
+              "samples": 12,
+              "p50": 357.9707999997481,
+              "p95": 1077.6181000001088,
+              "p99": 1077.6181000001088,
+              "max": 1077.6181000001088,
+              "mean": 465.3524250009771
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 12,
+              "p50": 143.2649999987916,
+              "p95": 857.7743000023474,
+              "p99": 857.7743000023474,
+              "max": 857.7743000023474,
+              "mean": 202.92868333308434
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 12,
+              "p50": 193.65579999794136,
+              "p95": 918.4638000006089,
+              "p99": 918.4638000006089,
+              "max": 918.4638000006089,
+              "mean": 269.3742499996006
+            },
+            "attempted_per_producer_s": 2.148625011596003,
+            "accepted_per_producer_s": 2.148625011596003,
+            "settled_activations_active": 24
+          },
+          "backend_requests_active": 24,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 2,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.2419607999981963,
+            "warmup_s": 0.9447091000001819,
+            "active_start_loop_s": 20039.7287789,
+            "producer_s": 12.252860399999918,
+            "drain_s": 0.0,
+            "shutdown_s": 0.09365930000058142,
+            "active_s": 12.252861699998903,
+            "active_parent_cpu_s": 0.859375,
+            "offline_reconciliation_s": 0.03207990000009886,
+            "total_s": 13.565526200000022,
+            "total_parent_cpu_s": 1.0625
+          },
+          "loop_lag_ms": {
+            "samples": 286,
+            "p50": 11.431800106947776,
+            "p95": 118.64700007936335,
+            "p99": 519.6754000535293,
+            "max": 1417.8477000023122,
+            "mean": 37.725426994555775
+          },
+          "aggregate": {
+            "attempted": 24,
+            "accepted": 24,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 24,
+            "observed_completions": 24,
+            "completed_verified": 24,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 1.9587260990632211,
+            "accepted_per_s": 1.9587260990632211,
+            "verified_tasks_per_s": 1.9587260990632211,
+            "accepted_to_committed_ms": {
+              "samples": 24,
+              "p50": 725.9386000005179,
+              "p95": 2217.794899999717,
+              "p99": 2512.0717999998305,
+              "max": 2512.0717999998305,
+              "mean": 977.0562791665421
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 24,
+              "p50": 266.79670000157785,
+              "p95": 1596.2465000011434,
+              "p99": 1835.098300001846,
+              "max": 1835.098300001846,
+              "mean": 393.8227166672732
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 24,
+              "p50": 363.23300000003655,
+              "p95": 1835.3234000023804,
+              "p99": 2155.6846000021324,
+              "max": 2155.6846000021324,
+              "mean": 580.5334833339657
+            },
+            "attempted_per_producer_s": 1.958726306879344,
+            "accepted_per_producer_s": 1.958726306879344,
+            "settled_activations_active": 48
+          },
+          "backend_requests_active": 48,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 2,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.3970506000005116,
+            "warmup_s": 1.7202061000025424,
+            "active_start_loop_s": 20054.2351285,
+            "producer_s": 9.588945700001204,
+            "drain_s": 0.0,
+            "shutdown_s": 0.1499171999967075,
+            "active_s": 9.588946899999428,
+            "active_parent_cpu_s": 0.859375,
+            "offline_reconciliation_s": 0.022383300001820317,
+            "total_s": 11.878769900002226,
+            "total_parent_cpu_s": 1.1875
+          },
+          "loop_lag_ms": {
+            "samples": 157,
+            "p50": 34.39990001061233,
+            "p95": 172.11210002642474,
+            "p99": 790.4481000259693,
+            "max": 842.895400004636,
+            "mean": 55.46991593912755
+          },
+          "aggregate": {
+            "attempted": 24,
+            "accepted": 24,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 24,
+            "observed_completions": 24,
+            "completed_verified": 24,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 2.502881729379629,
+            "accepted_per_s": 2.502881729379629,
+            "verified_tasks_per_s": 2.502881729379629,
+            "accepted_to_committed_ms": {
+              "samples": 24,
+              "p50": 550.1612999978533,
+              "p95": 1762.2067000011157,
+              "p99": 1983.8387999989209,
+              "max": 1983.8387999989209,
+              "mean": 789.1027291667948
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 24,
+              "p50": 212.78470000106608,
+              "p95": 939.5838999989792,
+              "p99": 1057.0569999981672,
+              "max": 1057.0569999981672,
+              "mean": 325.5639999996068
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 24,
+              "p50": 276.17040000041015,
+              "p95": 1110.3084000023955,
+              "p99": 1507.5676999986172,
+              "max": 1507.5676999986172,
+              "mean": 460.71349166656245
+            },
+            "attempted_per_producer_s": 2.502882042600052,
+            "accepted_per_producer_s": 2.502882042600052,
+            "settled_activations_active": 48
+          },
+          "backend_requests_active": 48,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 4,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": false,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.25982400000066264,
+            "warmup_s": 1.747518600001058,
+            "active_start_loop_s": 20066.0143509,
+            "producer_s": 21.851012600000104,
+            "drain_s": 0.0,
+            "shutdown_s": 0.091551099998469,
+            "active_s": 21.85101399999985,
+            "active_parent_cpu_s": 1.65625,
+            "offline_reconciliation_s": 0.03250409999964177,
+            "total_s": 23.98270809999667,
+            "total_parent_cpu_s": 2.03125
+          },
+          "loop_lag_ms": {
+            "samples": 322,
+            "p50": 13.112900029227603,
+            "p95": 250.4566000716295,
+            "p99": 665.3581000355189,
+            "max": 995.6104000484629,
+            "mean": 62.61356777292309
+          },
+          "aggregate": {
+            "attempted": 48,
+            "accepted": 48,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 48,
+            "observed_completions": 48,
+            "completed_verified": 36,
+            "failed": 12,
+            "unfinished": 0,
+            "attempted_per_s": 2.196694395967177,
+            "accepted_per_s": 2.196694395967177,
+            "verified_tasks_per_s": 1.647520796975383,
+            "accepted_to_committed_ms": {
+              "samples": 36,
+              "p50": 1508.6348000004364,
+              "p95": 4284.6744999988005,
+              "p99": 4456.190400000196,
+              "max": 4456.190400000196,
+              "mean": 1558.5618194446497
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 48,
+              "p50": 524.9382999973022,
+              "p95": 3538.572399997065,
+              "p99": 4937.979899998027,
+              "max": 4937.979899998027,
+              "mean": 913.1161312496564
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 48,
+              "p50": 610.9501999999338,
+              "p95": 3670.7220999996935,
+              "p99": 4938.3697000012035,
+              "max": 4938.3697000012035,
+              "mean": 964.1852124999938
+            },
+            "attempted_per_producer_s": 2.1966945367099266,
+            "accepted_per_producer_s": 2.1966945367099266,
+            "settled_activations_active": 96
+          },
+          "backend_requests_active": 96,
+          "integrity_ok": false,
+          "journal_dropped": 8,
+          "session_errors": [
+            "listener versus persisted event IDs: missing=['evt_00000025', 'evt_00000026'] unexpected=[]",
+            "journal observations incomplete",
+            "unverified accepted job: warmup-0",
+            "unverified accepted job: job-0-0",
+            "unverified accepted job: job-0-1",
+            "unverified accepted job: job-0-2",
+            "unverified accepted job: job-0-3",
+            "unverified accepted job: job-0-4"
+          ],
+          "session_errors_count": 15,
+          "session_errors_truncated": true
+        },
+        {
+          "mode": "worker",
+          "sessions": 4,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.4993674999968789,
+            "warmup_s": 1.7370134999982838,
+            "active_start_loop_s": 20090.2347712,
+            "producer_s": 15.734322299998894,
+            "drain_s": 0.0,
+            "shutdown_s": 0.12433539999983623,
+            "active_s": 15.734323900000163,
+            "active_parent_cpu_s": 1.921875,
+            "offline_reconciliation_s": 0.04379669999980251,
+            "total_s": 18.13924810000026,
+            "total_parent_cpu_s": 2.5625
+          },
+          "loop_lag_ms": {
+            "samples": 130,
+            "p50": 74.05040003868635,
+            "p95": 346.6463000331714,
+            "p99": 698.3610000170302,
+            "max": 1040.389000034338,
+            "mean": 115.70754155945906
+          },
+          "aggregate": {
+            "attempted": 48,
+            "accepted": 48,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 48,
+            "observed_completions": 48,
+            "completed_verified": 48,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 3.050655389139377,
+            "accepted_per_s": 3.050655389139377,
+            "verified_tasks_per_s": 3.050655389139377,
+            "accepted_to_committed_ms": {
+              "samples": 48,
+              "p50": 1121.875100001489,
+              "p95": 1995.7811999993282,
+              "p99": 2040.4006999997364,
+              "max": 2040.4006999997364,
+              "mean": 1302.2141500005848
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 48,
+              "p50": 416.5303000008862,
+              "p95": 1229.472099999839,
+              "p99": 1474.7588999998698,
+              "max": 1474.7588999998698,
+              "mean": 515.5602562499553
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 48,
+              "p50": 506.24470000184374,
+              "p95": 1357.1487999979581,
+              "p99": 1475.9732999991684,
+              "max": 1475.9732999991684,
+              "mean": 580.0744124999255
+            },
+            "attempted_per_producer_s": 3.050655699356265,
+            "accepted_per_producer_s": 3.050655699356265,
+            "settled_activations_active": 96
+          },
+          "backend_requests_active": 96,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 1,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.24405820000174572,
+            "warmup_s": 0.09678379999968456,
+            "active_start_loop_s": 20106.4833553,
+            "producer_s": 2.0222200000025623,
+            "drain_s": 1.0093779000017093,
+            "shutdown_s": 0.5545753999977023,
+            "active_s": 3.03160150000258,
+            "active_parent_cpu_s": 0.390625,
+            "offline_reconciliation_s": 0.06179829999746289,
+            "total_s": 3.9890005999986897,
+            "total_parent_cpu_s": 0.46875
+          },
+          "loop_lag_ms": {
+            "samples": 64,
+            "p50": 11.504100013553398,
+            "p95": 109.4854000293708,
+            "p99": 455.7071000308497,
+            "max": 455.7071000308497,
+            "mean": 42.212657828827105
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 598,
+            "rejected": 402,
+            "rejection_reasons": {
+              "capacity_exceeded": 402
+            },
+            "committed_inputs": 598,
+            "observed_completions": 598,
+            "completed_verified": 598,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 329.8586572143961,
+            "accepted_per_s": 197.25547701420885,
+            "verified_tasks_per_s": 197.25547701420885,
+            "accepted_to_committed_ms": {
+              "samples": 598,
+              "p50": 320.9394000004977,
+              "p95": 1009.2182000007597,
+              "p99": 1010.3140999999596,
+              "max": 1010.7304000011936,
+              "mean": 372.5274327758981
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 598,
+              "p50": 381.3588000011805,
+              "p95": 1078.118400000676,
+              "p99": 1126.118400003179,
+              "max": 1136.1184000015783,
+              "mean": 436.50940083713056
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 43.03599999911967,
+              "p95": 101.32829999929527,
+              "p99": 117.74160000277334,
+              "max": 125.51910000183852,
+              "mean": 46.13835310104696
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 494.5060379180964,
+            "accepted_per_producer_s": 295.7146106750217,
+            "settled_activations_active": 20,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 20,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 1,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.501711200002319,
+            "warmup_s": 0.11653369999839924,
+            "active_start_loop_s": 20110.7611083,
+            "producer_s": 2.035012899999856,
+            "drain_s": 0.360578899999382,
+            "shutdown_s": 0.12802839999858406,
+            "active_s": 2.3955948000002536,
+            "active_parent_cpu_s": 0.578125,
+            "offline_reconciliation_s": 0.06818439999915427,
+            "total_s": 3.2102149999991525,
+            "total_parent_cpu_s": 0.75
+          },
+          "loop_lag_ms": {
+            "samples": 53,
+            "p50": 11.10200001130579,
+            "p95": 105.35780003192485,
+            "p99": 406.35350001684856,
+            "max": 406.35350001684856,
+            "mean": 38.72740379123364
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 510,
+            "rejected": 490,
+            "rejection_reasons": {
+              "capacity_exceeded": 490
+            },
+            "committed_inputs": 510,
+            "observed_completions": 510,
+            "completed_verified": 510,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 417.4328646897606,
+            "accepted_per_s": 212.8907609917779,
+            "verified_tasks_per_s": 212.8907609917779,
+            "accepted_to_committed_ms": {
+              "samples": 510,
+              "p50": 350.7506000023568,
+              "p95": 636.7638999981864,
+              "p99": 639.0128999992157,
+              "max": 640.0229999999283,
+              "mean": 354.5828247062209
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 510,
+              "p50": 428.79959999845596,
+              "p95": 741.9188999992912,
+              "p99": 762.7682999991521,
+              "max": 772.7682999975514,
+              "mean": 447.71111372478936
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 63.776200000575045,
+              "p95": 330.3730999978143,
+              "p99": 405.9266000003845,
+              "max": 424.1543999996793,
+              "mean": 89.68145999890112
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 491.3973763999583,
+            "accepted_per_producer_s": 250.61266196397875,
+            "settled_activations_active": 17,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 17,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 2,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": false,
+          "errors": [
+            "trial: RuntimeError: journal initialization failed: OperationalError: database is locked",
+            "producer did not attempt every scheduled arrival"
+          ],
+          "timing": {
+            "shutdown_s": 0.3510272999992594,
+            "active_s": 0.0,
+            "active_parent_cpu_s": 0.0,
+            "offline_reconciliation_s": 0.004956499997206265,
+            "total_s": 15.371550700001535,
+            "total_parent_cpu_s": 0.046875
+          },
+          "loop_lag_ms": {
+            "samples": 0,
+            "p50": null,
+            "p95": null,
+            "p99": null,
+            "max": null,
+            "mean": null
+          },
+          "aggregate": {
+            "attempted": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 0,
+            "observed_completions": 0,
+            "completed_verified": 0,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": null,
+            "accepted_per_s": null,
+            "verified_tasks_per_s": null,
+            "accepted_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": null,
+            "accepted_per_producer_s": null,
+            "settled_activations_active": 0,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 0,
+          "integrity_ok": false,
+          "journal_dropped": 0,
+          "session_errors": [
+            "journal observations incomplete"
+          ],
+          "session_errors_count": 1,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 2,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.28269279999949504,
+            "warmup_s": 0.15363490000163438,
+            "active_start_loop_s": 20129.1787153,
+            "producer_s": 40.54343869999866,
+            "drain_s": 0.20223239999904763,
+            "shutdown_s": 0.1703293999999005,
+            "active_s": 40.74567200000092,
+            "active_parent_cpu_s": 2.828125,
+            "offline_reconciliation_s": 0.1021859000029508,
+            "total_s": 41.4546577000001,
+            "total_parent_cpu_s": 2.953125
+          },
+          "loop_lag_ms": {
+            "samples": 339,
+            "p50": 70.36809988130699,
+            "p95": 380.3768999205204,
+            "p99": 793.6700998725428,
+            "max": 883.776099919487,
+            "mean": 115.23192322527387
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 1000,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 1000,
+            "observed_completions": 1000,
+            "completed_verified": 1000,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 24.542483923199924,
+            "accepted_per_s": 24.542483923199924,
+            "verified_tasks_per_s": 24.542483923199924,
+            "accepted_to_committed_ms": {
+              "samples": 1000,
+              "p50": 262.9985999992641,
+              "p95": 1176.3059999975667,
+              "p99": 1628.7673999977414,
+              "max": 2231.34729999947,
+              "mean": 385.6816753999702
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 1000,
+              "p50": 18134.234599998308,
+              "p95": 36934.54430000202,
+              "p99": 38052.523199999996,
+              "max": 38747.29030000162,
+              "mean": 17937.82576019953
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 16576.568000000407,
+              "p95": 36656.486899999436,
+              "p99": 37565.6299000002,
+              "max": 38545.323199999984,
+              "mean": 17552.11434449955
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 24.664903423695854,
+            "accepted_per_producer_s": 24.664903423695854,
+            "settled_activations_active": 336,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 336,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 4,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": false,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.5618540999967081,
+            "warmup_s": 0.3010622000001604,
+            "active_start_loop_s": 20171.0671289,
+            "producer_s": 157.41702480000095,
+            "drain_s": 0.24989939999795752,
+            "shutdown_s": 0.214041700000962,
+            "active_s": 157.66692570000305,
+            "active_parent_cpu_s": 11.65625,
+            "offline_reconciliation_s": 0.42306509999980335,
+            "total_s": 159.1671682999986,
+            "total_parent_cpu_s": 12.140625
+          },
+          "loop_lag_ms": {
+            "samples": 503,
+            "p50": 200.02670000030776,
+            "p95": 912.2671000113769,
+            "p99": 1841.1472000007052,
+            "max": 3530.1632000155223,
+            "mean": 308.5284355906942
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 1000,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 1000,
+            "observed_completions": 1000,
+            "completed_verified": 250,
+            "failed": 750,
+            "unfinished": 0,
+            "attempted_per_s": 6.342484294408873,
+            "accepted_per_s": 6.342484294408873,
+            "verified_tasks_per_s": 1.5856210736022183,
+            "accepted_to_committed_ms": {
+              "samples": 250,
+              "p50": 627.3753999994369,
+              "p95": 2236.0286000002816,
+              "p99": 3192.5841999982367,
+              "max": 4988.875200000621,
+              "mean": 866.9370416002057
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 250,
+              "p50": 64176.13560000245,
+              "p95": 146599.38479999983,
+              "p99": 155034.06090000135,
+              "max": 155582.3165000038,
+              "mean": 70939.86695800172
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 62110.82840000381,
+              "p95": 145959.80280000003,
+              "p99": 154264.42520000273,
+              "max": 155334.37510000294,
+              "mean": 70152.84624020169
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 6.352553043551068,
+            "accepted_per_producer_s": 6.352553043551068,
+            "settled_activations_active": 1000,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 1000,
+          "integrity_ok": false,
+          "journal_dropped": 190,
+          "session_errors": [
+            "listener versus persisted event IDs: missing=['evt_00000105', 'evt_00000106', 'evt_00000107', 'evt_00000108', 'evt_00000109', 'evt_00000110', 'evt_00000111', 'evt_00000112', 'evt_00000113', 'evt_00000114', 'evt_00000115', 'evt_00000116', 'evt_00000117', 'evt_00000118', 'evt_00000119', 'evt_00000120', 'evt_00000121', 'evt_00000492', 'evt_00000493', 'evt_00000494', 'evt_00000495', 'evt_00000496', 'evt_00000497', 'evt_00000498', 'evt_00000499', 'evt_00000500'] unexpected=[]",
+            "durable accepted user inputs: missing=['evt_00000107', 'evt_00000110', 'evt_00000113', 'evt_00000116', 'evt_00000119', 'evt_00000494', 'evt_00000497', 'evt_00000500'] unexpected=[]",
+            "observation activation IDs: missing=['act_2b4266d96eac', 'act_55dae14d58d0', 'act_6e7256bce63a', 'act_732c75b91837', 'act_a95af2454050', 'act_e39f8b594e21', 'act_fcede6e2f8b1'] unexpected=[]",
+            "activation observation status mismatch: act_76527e507ff1",
+            "activation observation status mismatch: act_78af8b76b818",
+            "journal observations incomplete",
+            "unverified accepted job: warmup-0",
+            "unverified accepted job: input-2"
+          ],
+          "session_errors_count": 769,
+          "session_errors_truncated": true
+        },
+        {
+          "mode": "admission",
+          "sessions": 4,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.6668320000026142,
+            "warmup_s": 0.3181014999972831,
+            "active_start_loop_s": 20330.3699539,
+            "producer_s": 247.18590199999744,
+            "drain_s": 1.519514400002663,
+            "shutdown_s": 1.776763599998958,
+            "active_s": 248.70541840000078,
+            "active_parent_cpu_s": 12.515625,
+            "offline_reconciliation_s": 0.5212773999992351,
+            "total_s": 251.9887602000017,
+            "total_parent_cpu_s": 13.078125
+          },
+          "loop_lag_ms": {
+            "samples": 506,
+            "p50": 250.74380001387908,
+            "p95": 1353.2985000165354,
+            "p99": 2207.630800017796,
+            "max": 3455.7969000125013,
+            "mean": 486.7776268892204
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 1000,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 1000,
+            "observed_completions": 1000,
+            "completed_verified": 1000,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 4.020821124176991,
+            "accepted_per_s": 4.020821124176991,
+            "verified_tasks_per_s": 4.020821124176991,
+            "accepted_to_committed_ms": {
+              "samples": 1000,
+              "p50": 980.9214000015345,
+              "p95": 3800.266999998712,
+              "p99": 5163.805799998954,
+              "max": 6521.814899999299,
+              "mean": 1365.0065313999112
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 1000,
+              "p50": 70909.23929999917,
+              "p95": 224124.37169999976,
+              "p99": 242030.7044000001,
+              "max": 246706.75130000018,
+              "mean": 90784.84323749915
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 70420.61570000078,
+              "p95": 220432.6020999979,
+              "p99": 239654.71199999956,
+              "max": 244884.62190000064,
+              "mean": 89419.76136369917
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 4.045538163418439,
+            "accepted_per_producer_s": 4.045538163418439,
+            "settled_activations_active": 1000,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 1000,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        }
+      ]
+    },
+    {
+      "label": "offload-b1",
+      "variant": "offload",
+      "ok": false,
+      "environment": {
+        "python": "3.13.14",
+        "platform": "win32",
+        "os": "Windows-11-10.0.26300-SP0",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+        "logical_cpu_count": 8,
+        "windows_appcontainer": false
+      },
+      "harness_sha256": "5cbf854f91d70f2ab2539c1ad3ee81802462a37fce96772e04326b57f39836af",
+      "source_sha256": {
+        "llm.py": "64fa55454c49f7fed826f99055782a3504efc3131188082f0968832b3738e27f",
+        "journal.py": "4cfddbfe6f248b2a01744aae664dc3dee0a823c55d5c0680173259794dd87c97",
+        "python_host.py": "400d01705d7691e972c9317209866bd46dca7e140bf881e17c5be45d19ea9f8a",
+        "events.py": "a5f129e832cedde401c79ecf5ee730f3cebcc22e7feb2c1f5ccd9d1b2d98c4ed"
+      },
+      "configuration": {
+        "sessions": [
+          1,
+          2,
+          4
+        ],
+        "journals": [
+          "shared",
+          "separate"
+        ],
+        "mode": "all",
+        "jobs": 12,
+        "rate": 500.0,
+        "seconds": 2.0,
+        "provider_ms": 20.0,
+        "work_ms": 5.0,
+        "repeats": 1,
+        "seed": 20261113,
+        "json": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\offload-b1.json",
+        "workspace_root": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\offload-b1"
+      },
+      "runtime_defaults": {
+        "ordinary_limit": 64,
+        "result_limit": 4,
+        "batch_limit": 32,
+        "context_limit": 200000,
+        "max_activations": 100,
+        "default_timeout": 30,
+        "max_timeout": 120,
+        "max_output_tokens": null
+      },
+      "methodology": {
+        "worker": "one outstanding external input/session; actual python_exec, observed terminal, committed follow-up, exact marker check",
+        "admission": "aggregate absolute-rate ordinary inputs; real batching; no rejection retries; accepted-input drain",
+        "durability": "runtime defaults: FULL activation/snapshot/receipt and effect commits; asynchronous observation journal",
+        "latency_clock": "asyncio loop monotonic seconds; latency distributions in milliseconds",
+        "percentiles": "nearest rank; samples counts included; null when empty",
+        "rate_denominator": "active seconds including warm-worker execution and accepted drain; excludes startup, warm-up, shutdown and offline checks",
+        "cpu": "parent process only; worker process CPU excluded",
+        "lag": "10 ms absolute timer; skipped missed timer deadlines; final overdue deadline sampled",
+        "failure_counts": "failed includes explicit errors or unverified settled work; unfinished means no completion settlement; counts can overlap",
+        "goodput_integrity": "only accepted jobs with independent evidence in sessions passing exact-set/row/event/journal checks contribute goodput",
+        "limits": "finite synthetic scripts; retained listener events and ScriptedBackend request history add overhead; no user workload or latency SLO supplied"
+      },
+      "runtime_source_root": "E:\\Projects\\Magixyne\\Nervipulsa",
+      "raw_report": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\offload-b1.json",
+      "trials": [
+        {
+          "mode": "worker",
+          "sessions": 1,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 2.095803899999737,
+            "warmup_s": 2.2635058000014396,
+            "active_start_loop_s": 20672.8513215,
+            "producer_s": 8.707904300001246,
+            "drain_s": 0.0,
+            "shutdown_s": 0.12892899999860674,
+            "active_s": 8.7079061000004,
+            "active_parent_cpu_s": 0.765625,
+            "offline_reconciliation_s": 0.010981499999616062,
+            "total_s": 13.207460500001616,
+            "total_parent_cpu_s": 1.015625
+          },
+          "loop_lag_ms": {
+            "samples": 601,
+            "p50": 9.505800007900689,
+            "p95": 14.828000326815527,
+            "p99": 15.47760030007339,
+            "max": 16.536800052563194,
+            "mean": 9.342654632100237
+          },
+          "aggregate": {
+            "attempted": 12,
+            "accepted": 12,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 12,
+            "observed_completions": 12,
+            "completed_verified": 12,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 1.378058038544932,
+            "accepted_per_s": 1.378058038544932,
+            "verified_tasks_per_s": 1.378058038544932,
+            "accepted_to_committed_ms": {
+              "samples": 12,
+              "p50": 456.4014000025054,
+              "p95": 1748.046799999429,
+              "p99": 1748.046799999429,
+              "max": 1748.046799999429,
+              "mean": 725.5562583325931
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 12,
+              "p50": 155.29180000157794,
+              "p95": 797.3516000020027,
+              "p99": 797.3516000020027,
+              "max": 797.3516000020027,
+              "mean": 204.54038333385446
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 12,
+              "p50": 227.1818000008352,
+              "p95": 921.6355999997177,
+              "p99": 921.6355999997177,
+              "max": 921.6355999997177,
+              "mean": 305.08967500069656
+            },
+            "attempted_per_producer_s": 1.3780583234014507,
+            "accepted_per_producer_s": 1.3780583234014507,
+            "settled_activations_active": 24
+          },
+          "backend_requests_active": 24,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 1,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.8428082999998878,
+            "warmup_s": 1.4112165000005916,
+            "active_start_loop_s": 20683.958751,
+            "producer_s": 16.746515500002715,
+            "drain_s": 0.0,
+            "shutdown_s": 0.1237159000011161,
+            "active_s": 16.746518800002377,
+            "active_parent_cpu_s": 0.84375,
+            "offline_reconciliation_s": 0.015776700001879362,
+            "total_s": 19.141091099998448,
+            "total_parent_cpu_s": 0.96875
+          },
+          "loop_lag_ms": {
+            "samples": 1131,
+            "p50": 9.803700384509284,
+            "p95": 14.784800114284735,
+            "p99": 15.62460064451443,
+            "max": 16.99380010177265,
+            "mean": 9.643816267359634
+          },
+          "aggregate": {
+            "attempted": 12,
+            "accepted": 12,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 12,
+            "observed_completions": 12,
+            "completed_verified": 12,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 0.7165668365653581,
+            "accepted_per_s": 0.7165668365653581,
+            "verified_tasks_per_s": 0.7165668365653581,
+            "accepted_to_committed_ms": {
+              "samples": 12,
+              "p50": 931.2156999985746,
+              "p95": 3726.778000000195,
+              "p99": 3726.778000000195,
+              "max": 3726.778000000195,
+              "mean": 1395.3848583329698
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 12,
+              "p50": 176.67029999938677,
+              "p95": 1775.2647000015713,
+              "p99": 1775.2647000015713,
+              "max": 1775.2647000015713,
+              "mean": 438.5884666662605
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 12,
+              "p50": 361.05890000180807,
+              "p95": 2037.8842999998596,
+              "p99": 2037.8842999998596,
+              "max": 2037.8842999998596,
+              "mean": 620.796766666596
+            },
+            "attempted_per_producer_s": 0.7165669777690801,
+            "accepted_per_producer_s": 0.7165669777690801,
+            "settled_activations_active": 24
+          },
+          "backend_requests_active": 24,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 2,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": false,
+          "errors": [
+            "trial: RuntimeError: journal initialization failed: OperationalError: database is locked",
+            "closed-loop workload stopped before all configured jobs were attempted"
+          ],
+          "timing": {
+            "shutdown_s": 0.37350709999736864,
+            "active_s": 0.0,
+            "active_parent_cpu_s": 0.0,
+            "offline_reconciliation_s": 0.011826999998447718,
+            "total_s": 15.408005799999955,
+            "total_parent_cpu_s": 0.140625
+          },
+          "loop_lag_ms": {
+            "samples": 0,
+            "p50": null,
+            "p95": null,
+            "p99": null,
+            "max": null,
+            "mean": null
+          },
+          "aggregate": {
+            "attempted": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 0,
+            "observed_completions": 0,
+            "completed_verified": 0,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": null,
+            "accepted_per_s": null,
+            "verified_tasks_per_s": null,
+            "accepted_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": null,
+            "accepted_per_producer_s": null,
+            "settled_activations_active": 0
+          },
+          "backend_requests_active": 0,
+          "integrity_ok": false,
+          "journal_dropped": 0,
+          "session_errors": [
+            "journal observations incomplete"
+          ],
+          "session_errors_count": 1,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 2,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 1.7204985999997007,
+            "warmup_s": 0.9386497999985295,
+            "active_start_loop_s": 20718.9312653,
+            "producer_s": 7.312254999997094,
+            "drain_s": 0.0,
+            "shutdown_s": 0.11937489999763784,
+            "active_s": 7.312255999997433,
+            "active_parent_cpu_s": 0.953125,
+            "offline_reconciliation_s": 0.015079900000273483,
+            "total_s": 10.106141699998261,
+            "total_parent_cpu_s": 1.171875
+          },
+          "loop_lag_ms": {
+            "samples": 540,
+            "p50": 8.067600028880406,
+            "p95": 14.798800464632222,
+            "p99": 15.855400008149445,
+            "max": 16.141100182721857,
+            "mean": 7.979674141919262
+          },
+          "aggregate": {
+            "attempted": 24,
+            "accepted": 24,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 24,
+            "observed_completions": 24,
+            "completed_verified": 24,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 3.2821607996230475,
+            "accepted_per_s": 3.2821607996230475,
+            "verified_tasks_per_s": 3.2821607996230475,
+            "accepted_to_committed_ms": {
+              "samples": 24,
+              "p50": 517.3149000002013,
+              "p95": 1260.3122999971674,
+              "p99": 1328.4206999996968,
+              "max": 1328.4206999996968,
+              "mean": 607.6896124997498
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 24,
+              "p50": 213.13910000026226,
+              "p95": 436.05770000067423,
+              "p99": 957.9873000002408,
+              "max": 957.9873000002408,
+              "mean": 227.2529583336412
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 24,
+              "p50": 288.5539000017161,
+              "p95": 630.8681999980763,
+              "p99": 1140.9390999979223,
+              "max": 1140.9390999979223,
+              "mean": 313.15566250047294
+            },
+            "attempted_per_producer_s": 3.2821612484807403,
+            "accepted_per_producer_s": 3.2821612484807403,
+            "settled_activations_active": 48
+          },
+          "backend_requests_active": 48,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 4,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.23959449999892968,
+            "warmup_s": 2.364743099999032,
+            "active_start_loop_s": 20728.9916482,
+            "producer_s": 22.24022519999926,
+            "drain_s": 0.0,
+            "shutdown_s": 0.08746889999747509,
+            "active_s": 22.240228799997567,
+            "active_parent_cpu_s": 2.234375,
+            "offline_reconciliation_s": 0.061969000002136454,
+            "total_s": 24.994468199998664,
+            "total_parent_cpu_s": 2.8125
+          },
+          "loop_lag_ms": {
+            "samples": 1573,
+            "p50": 8.77500058413716,
+            "p95": 14.896600565407425,
+            "p99": 15.853800810873508,
+            "max": 50.51990100037074,
+            "mean": 8.657838432106178
+          },
+          "aggregate": {
+            "attempted": 48,
+            "accepted": 48,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 48,
+            "observed_completions": 48,
+            "completed_verified": 48,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 2.1582511777039475,
+            "accepted_per_s": 2.1582511777039475,
+            "verified_tasks_per_s": 2.1582511777039475,
+            "accepted_to_committed_ms": {
+              "samples": 48,
+              "p50": 1124.080400000821,
+              "p95": 5280.487200001517,
+              "p99": 6452.429900000425,
+              "max": 6452.429900000425,
+              "mean": 1587.0258562497384
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 48,
+              "p50": 270.27629999793135,
+              "p95": 2585.5883000003814,
+              "p99": 4338.15820000018,
+              "max": 4338.15820000018,
+              "mean": 616.4522270831488
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 48,
+              "p50": 436.71919999906095,
+              "p95": 2629.408599997987,
+              "p99": 4382.318800002395,
+              "max": 4382.318800002395,
+              "mean": 808.6554770830693
+            },
+            "attempted_per_producer_s": 2.158251527057451,
+            "accepted_per_producer_s": 2.158251527057451,
+            "settled_activations_active": 96
+          },
+          "backend_requests_active": 96,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 4,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.5952412999977241,
+            "warmup_s": 1.6868093000011868,
+            "active_start_loop_s": 20753.6764926,
+            "producer_s": 9.782055600000604,
+            "drain_s": 0.0,
+            "shutdown_s": 0.23174219999782508,
+            "active_s": 9.78205700000035,
+            "active_parent_cpu_s": 1.8125,
+            "offline_reconciliation_s": 0.03291679999892949,
+            "total_s": 12.329097599998931,
+            "total_parent_cpu_s": 2.3125
+          },
+          "loop_lag_ms": {
+            "samples": 721,
+            "p50": 8.061600085056853,
+            "p95": 14.710400570038473,
+            "p99": 15.498600012506358,
+            "max": 16.174700464034686,
+            "mean": 7.953835416893764
+          },
+          "aggregate": {
+            "attempted": 48,
+            "accepted": 48,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 48,
+            "observed_completions": 48,
+            "completed_verified": 48,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 4.906943396465414,
+            "accepted_per_s": 4.906943396465414,
+            "verified_tasks_per_s": 4.906943396465414,
+            "accepted_to_committed_ms": {
+              "samples": 48,
+              "p50": 666.7775999994774,
+              "p95": 1964.7769000002882,
+              "p99": 2188.7249999999767,
+              "max": 2188.7249999999767,
+              "mean": 805.0557937497919
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 48,
+              "p50": 256.3049999989744,
+              "p95": 394.6696000020893,
+              "p99": 1333.958300001541,
+              "max": 1333.958300001541,
+              "mean": 265.8307541666242
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 48,
+              "p50": 337.5569000018004,
+              "p95": 595.4278000026534,
+              "p99": 1600.5824000021676,
+              "max": 1600.5824000021676,
+              "mean": 377.5739625002643
+            },
+            "attempted_per_producer_s": 4.906944098743114,
+            "accepted_per_producer_s": 4.906944098743114,
+            "settled_activations_active": 96
+          },
+          "backend_requests_active": 96,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 1,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.23733940000238363,
+            "warmup_s": 0.085091699998884,
+            "active_start_loop_s": 20764.0500686,
+            "producer_s": 2.0026013999995484,
+            "drain_s": 0.37594629999875906,
+            "shutdown_s": 0.08135060000131489,
+            "active_s": 2.3785500999983924,
+            "active_parent_cpu_s": 0.21875,
+            "offline_reconciliation_s": 0.048122299998794915,
+            "total_s": 2.8306000999982643,
+            "total_parent_cpu_s": 0.3125
+          },
+          "loop_lag_ms": {
+            "samples": 184,
+            "p50": 7.4285000446252525,
+            "p95": 13.76650006568525,
+            "p99": 15.897400178801036,
+            "max": 16.25040016733692,
+            "mean": 7.20241096573575
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 667,
+            "rejected": 333,
+            "rejection_reasons": {
+              "capacity_exceeded": 333
+            },
+            "committed_inputs": 667,
+            "observed_completions": 667,
+            "completed_verified": 667,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 420.42419035053155,
+            "accepted_per_s": 280.42293496380455,
+            "verified_tasks_per_s": 280.42293496380455,
+            "accepted_to_committed_ms": {
+              "samples": 667,
+              "p50": 283.6076999992656,
+              "p95": 419.6933999992325,
+              "p99": 457.5315000001865,
+              "max": 458.4450000002107,
+              "mean": 264.2446596699334
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 667,
+              "p50": 289.74469999957364,
+              "p95": 423.7410999958229,
+              "p99": 457.7410999991116,
+              "max": 469.74109999791835,
+              "mean": 270.8301110928812
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 6.264499996177619,
+              "p95": 13.836599995556753,
+              "p99": 15.095499999006279,
+              "max": 16.180700000404613,
+              "mean": 6.643813398601196
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 499.3504948115114,
+            "accepted_per_producer_s": 333.0667800392781,
+            "settled_activations_active": 22,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 22,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 1,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.24694459999955143,
+            "warmup_s": 0.09710099999938393,
+            "active_start_loop_s": 20766.9146241,
+            "producer_s": 2.009843699997873,
+            "drain_s": 0.35254020000138553,
+            "shutdown_s": 0.10675139999875682,
+            "active_s": 2.362386199998582,
+            "active_parent_cpu_s": 0.0625,
+            "offline_reconciliation_s": 0.031010900002002018,
+            "total_s": 2.844356899997365,
+            "total_parent_cpu_s": 0.109375
+          },
+          "loop_lag_ms": {
+            "samples": 163,
+            "p50": 9.553300038533052,
+            "p95": 14.642000081948936,
+            "p99": 15.479400088224793,
+            "max": 15.94620007017511,
+            "mean": 8.999198830249595
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 225,
+            "rejected": 775,
+            "rejection_reasons": {
+              "capacity_exceeded": 775
+            },
+            "committed_inputs": 225,
+            "observed_completions": 225,
+            "completed_verified": 225,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 423.30081338969904,
+            "accepted_per_s": 95.24268301268228,
+            "verified_tasks_per_s": 95.24268301268228,
+            "accepted_to_committed_ms": {
+              "samples": 225,
+              "p50": 988.2367999998678,
+              "p95": 1815.5942000012146,
+              "p99": 1832.726000000548,
+              "max": 1832.9014999981155,
+              "mean": 895.4213182223126
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 225,
+              "p50": 993.3874999987893,
+              "p95": 1818.8520999974571,
+              "p99": 1836.8520999974862,
+              "max": 1840.8520999983011,
+              "mean": 902.5311964427884
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 7.50759999937145,
+              "p95": 14.569799997843802,
+              "p99": 15.73419999840553,
+              "max": 19.64149999912479,
+              "mean": 7.573151798304025
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 497.5511279812745,
+            "accepted_per_producer_s": 111.94900379578677,
+            "settled_activations_active": 8,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 8,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 2,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.20335659999909694,
+            "warmup_s": 0.16193559999737772,
+            "active_start_loop_s": 20769.790762,
+            "producer_s": 2.0114090999995824,
+            "drain_s": 0.7989718000026187,
+            "shutdown_s": 0.49552269999912824,
+            "active_s": 2.810382600000594,
+            "active_parent_cpu_s": 0.296875,
+            "offline_reconciliation_s": 0.05616100000042934,
+            "total_s": 3.7275305000002845,
+            "total_parent_cpu_s": 0.390625
+          },
+          "loop_lag_ms": {
+            "samples": 200,
+            "p50": 8.51400009196368,
+            "p95": 14.51600013388088,
+            "p99": 16.123600136779714,
+            "max": 25.277700031438144,
+            "mean": 8.259822585841903
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 610,
+            "rejected": 390,
+            "rejection_reasons": {
+              "capacity_exceeded": 390
+            },
+            "committed_inputs": 610,
+            "observed_completions": 610,
+            "completed_verified": 610,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 355.8234384171709,
+            "accepted_per_s": 217.05229743447427,
+            "verified_tasks_per_s": 217.05229743447427,
+            "accepted_to_committed_ms": {
+              "samples": 610,
+              "p50": 470.20790000169654,
+              "p95": 1396.0464000010688,
+              "p99": 1473.2583000004524,
+              "max": 1504.9647000014374,
+              "mean": 621.152638196604
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 610,
+              "p50": 483.3797999963281,
+              "p95": 1405.1428999991913,
+              "p99": 1485.1429000009375,
+              "max": 1509.142899998551,
+              "mean": 628.2354252453111
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 6.798900001740549,
+              "p95": 14.276999998401152,
+              "p99": 16.247799998382106,
+              "max": 30.507899999065557,
+              "mean": 7.1053239995089825
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 497.16390365351714,
+            "accepted_per_producer_s": 303.26998122864546,
+            "settled_activations_active": 22,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 22,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 2,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.6032125000019732,
+            "warmup_s": 0.1187394000007771,
+            "active_start_loop_s": 20773.8849501,
+            "producer_s": 2.0009758999985934,
+            "drain_s": 0.4393850999986171,
+            "shutdown_s": 0.552577200000087,
+            "active_s": 2.440365300000849,
+            "active_parent_cpu_s": 0.46875,
+            "offline_reconciliation_s": 0.06793329999709385,
+            "total_s": 3.7829923999997845,
+            "total_parent_cpu_s": 0.609375
+          },
+          "loop_lag_ms": {
+            "samples": 198,
+            "p50": 6.398800051101716,
+            "p95": 14.522200162900845,
+            "p99": 20.70240007378743,
+            "max": 23.432500074704876,
+            "mean": 6.432368802272707
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 893,
+            "rejected": 107,
+            "rejection_reasons": {
+              "capacity_exceeded": 107
+            },
+            "committed_inputs": 893,
+            "observed_completions": 893,
+            "completed_verified": 893,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 409.7747169244097,
+            "accepted_per_s": 365.9288222134978,
+            "verified_tasks_per_s": 365.9288222134978,
+            "accepted_to_committed_ms": {
+              "samples": 893,
+              "p50": 359.0812000002188,
+              "p95": 485.0789000010991,
+              "p99": 523.534899999504,
+              "max": 552.9186999992817,
+              "mean": 339.88153751401654
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 893,
+              "p50": 366.1361999984365,
+              "p95": 489.5853000016359,
+              "p99": 529.27500000078,
+              "max": 561.2750000000233,
+              "mean": 347.1517941765329
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 6.091999999625841,
+              "p95": 14.78059999863035,
+              "p99": 36.96019999915734,
+              "max": 50.97100000057253,
+              "mean": 7.19783059960173
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 499.7561439898916,
+            "accepted_per_producer_s": 446.2822365829732,
+            "settled_activations_active": 30,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 30,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 4,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.23199779999777093,
+            "warmup_s": 0.3722868999975617,
+            "active_start_loop_s": 20777.5631447,
+            "producer_s": 2.0014883000003465,
+            "drain_s": 1.0044548999976541,
+            "shutdown_s": 0.08462330000111251,
+            "active_s": 3.005946599998424,
+            "active_parent_cpu_s": 0.4375,
+            "offline_reconciliation_s": 0.047398700000485405,
+            "total_s": 3.7424743000010494,
+            "total_parent_cpu_s": 0.65625
+          },
+          "loop_lag_ms": {
+            "samples": 219,
+            "p50": 8.17650016688276,
+            "p95": 14.92210013748263,
+            "p99": 15.60190013697138,
+            "max": 18.386200074019143,
+            "mean": 7.954106946438195
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 673,
+            "rejected": 327,
+            "rejection_reasons": {
+              "capacity_exceeded": 327
+            },
+            "committed_inputs": 673,
+            "observed_completions": 673,
+            "completed_verified": 673,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 332.6739071148251,
+            "accepted_per_s": 223.88953948827728,
+            "verified_tasks_per_s": 223.88953948827728,
+            "accepted_to_committed_ms": {
+              "samples": 673,
+              "p50": 392.05610000135493,
+              "p95": 2643.0885000008857,
+              "p99": 2770.359500002087,
+              "max": 2816.491900000983,
+              "mean": 739.5897808319245
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 673,
+              "p50": 400.29779999895254,
+              "p95": 2649.677100002009,
+              "p99": 2777.677099998982,
+              "max": 2825.677100001485,
+              "mean": 746.2597291216885
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 6.1581000009027775,
+              "p95": 13.758699999016244,
+              "p99": 15.129799998248927,
+              "max": 18.464899996615713,
+              "mean": 6.576399198595027
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 499.628201673638,
+            "accepted_per_producer_s": 336.2497797263584,
+            "settled_activations_active": 30,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 30,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 4,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.4640802000030817,
+            "warmup_s": 0.11557340000217664,
+            "active_start_loop_s": 20781.2918137,
+            "producer_s": 2.0020112999991397,
+            "drain_s": 0.26871309999842197,
+            "shutdown_s": 0.15522000000055414,
+            "active_s": 2.2707276999972237,
+            "active_parent_cpu_s": 0.5,
+            "offline_reconciliation_s": 0.05525280000074417,
+            "total_s": 3.0610484999997425,
+            "total_parent_cpu_s": 0.75
+          },
+          "loop_lag_ms": {
+            "samples": 166,
+            "p50": 8.463600061077159,
+            "p95": 14.351000074384501,
+            "p99": 15.321900049457327,
+            "max": 16.093700061901473,
+            "mean": 7.909295853227903
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 834,
+            "rejected": 166,
+            "rejection_reasons": {
+              "capacity_exceeded": 166
+            },
+            "committed_inputs": 834,
+            "observed_completions": 834,
+            "completed_verified": 834,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 440.3874581708862,
+            "accepted_per_s": 367.2831401145191,
+            "verified_tasks_per_s": 367.2831401145191,
+            "accepted_to_committed_ms": {
+              "samples": 834,
+              "p50": 558.1868999979633,
+              "p95": 1054.1106999990006,
+              "p99": 1131.1463999991247,
+              "max": 1194.292599997425,
+              "mean": 561.3057633090648
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 834,
+              "p50": 569.9155000002065,
+              "p95": 1059.0469999951893,
+              "p99": 1143.3585999984643,
+              "max": 1195.0469999974302,
+              "mean": 568.2053540749446
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 6.735299997671973,
+              "p95": 14.087599996855715,
+              "p99": 15.188099998340476,
+              "max": 16.148599996085977,
+              "mean": 6.950604098496115
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 499.4976801581638,
+            "accepted_per_producer_s": 416.5810652519086,
+            "settled_activations_active": 39,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 39,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        }
+      ]
+    },
+    {
+      "label": "offload-b2",
+      "variant": "offload",
+      "ok": false,
+      "environment": {
+        "python": "3.13.14",
+        "platform": "win32",
+        "os": "Windows-11-10.0.26300-SP0",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+        "logical_cpu_count": 8,
+        "windows_appcontainer": false
+      },
+      "harness_sha256": "5cbf854f91d70f2ab2539c1ad3ee81802462a37fce96772e04326b57f39836af",
+      "source_sha256": {
+        "llm.py": "64fa55454c49f7fed826f99055782a3504efc3131188082f0968832b3738e27f",
+        "journal.py": "4cfddbfe6f248b2a01744aae664dc3dee0a823c55d5c0680173259794dd87c97",
+        "python_host.py": "400d01705d7691e972c9317209866bd46dca7e140bf881e17c5be45d19ea9f8a",
+        "events.py": "a5f129e832cedde401c79ecf5ee730f3cebcc22e7feb2c1f5ccd9d1b2d98c4ed"
+      },
+      "configuration": {
+        "sessions": [
+          1,
+          2,
+          4
+        ],
+        "journals": [
+          "shared",
+          "separate"
+        ],
+        "mode": "all",
+        "jobs": 12,
+        "rate": 500.0,
+        "seconds": 2.0,
+        "provider_ms": 20.0,
+        "work_ms": 5.0,
+        "repeats": 1,
+        "seed": 20261113,
+        "json": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\offload-b2.json",
+        "workspace_root": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\offload-b2"
+      },
+      "runtime_defaults": {
+        "ordinary_limit": 64,
+        "result_limit": 4,
+        "batch_limit": 32,
+        "context_limit": 200000,
+        "max_activations": 100,
+        "default_timeout": 30,
+        "max_timeout": 120,
+        "max_output_tokens": null
+      },
+      "methodology": {
+        "worker": "one outstanding external input/session; actual python_exec, observed terminal, committed follow-up, exact marker check",
+        "admission": "aggregate absolute-rate ordinary inputs; real batching; no rejection retries; accepted-input drain",
+        "durability": "runtime defaults: FULL activation/snapshot/receipt and effect commits; asynchronous observation journal",
+        "latency_clock": "asyncio loop monotonic seconds; latency distributions in milliseconds",
+        "percentiles": "nearest rank; samples counts included; null when empty",
+        "rate_denominator": "active seconds including warm-worker execution and accepted drain; excludes startup, warm-up, shutdown and offline checks",
+        "cpu": "parent process only; worker process CPU excluded",
+        "lag": "10 ms absolute timer; skipped missed timer deadlines; final overdue deadline sampled",
+        "failure_counts": "failed includes explicit errors or unverified settled work; unfinished means no completion settlement; counts can overlap",
+        "goodput_integrity": "only accepted jobs with independent evidence in sessions passing exact-set/row/event/journal checks contribute goodput",
+        "limits": "finite synthetic scripts; retained listener events and ScriptedBackend request history add overhead; no user workload or latency SLO supplied"
+      },
+      "runtime_source_root": "E:\\Projects\\Magixyne\\Nervipulsa",
+      "raw_report": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\offload-b2.json",
+      "trials": [
+        {
+          "mode": "worker",
+          "sessions": 1,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 1.01553419999982,
+            "warmup_s": 1.5073522999991837,
+            "active_start_loop_s": 20841.7435023,
+            "producer_s": 11.131618899999012,
+            "drain_s": 0.0,
+            "shutdown_s": 0.08074440000200411,
+            "active_s": 11.13162100000045,
+            "active_parent_cpu_s": 0.5625,
+            "offline_reconciliation_s": 0.012579800000821706,
+            "total_s": 13.74815949999902,
+            "total_parent_cpu_s": 0.734375
+          },
+          "loop_lag_ms": {
+            "samples": 764,
+            "p50": 9.463300444622291,
+            "p95": 14.757300370547455,
+            "p99": 15.751500395708717,
+            "max": 19.541600471711718,
+            "mean": 9.305709657949626
+          },
+          "aggregate": {
+            "attempted": 12,
+            "accepted": 12,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 12,
+            "observed_completions": 12,
+            "completed_verified": 12,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 1.0780101119144745,
+            "accepted_per_s": 1.0780101119144745,
+            "verified_tasks_per_s": 1.0780101119144745,
+            "accepted_to_committed_ms": {
+              "samples": 12,
+              "p50": 942.8294999997888,
+              "p95": 1856.036999997741,
+              "p99": 1856.036999997741,
+              "max": 1856.036999997741,
+              "mean": 927.5576666668712
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 12,
+              "p50": 247.25029999899562,
+              "p95": 539.7790999995777,
+              "p99": 539.7790999995777,
+              "max": 539.7790999995777,
+              "mean": 291.5482833326071
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 12,
+              "p50": 357.1559999982128,
+              "p95": 704.4105000022682,
+              "p99": 704.4105000022682,
+              "max": 704.4105000022682,
+              "mean": 404.52641666585504
+            },
+            "attempted_per_producer_s": 1.0780103152831675,
+            "accepted_per_producer_s": 1.0780103152831675,
+            "settled_activations_active": 24
+          },
+          "backend_requests_active": 24,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 1,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.47407920000114245,
+            "warmup_s": 0.7641798000004201,
+            "active_start_loop_s": 20854.2125962,
+            "producer_s": 6.258390900002269,
+            "drain_s": 0.0,
+            "shutdown_s": 0.09126019999894197,
+            "active_s": 6.258392399999138,
+            "active_parent_cpu_s": 0.5625,
+            "offline_reconciliation_s": 0.007872000001952983,
+            "total_s": 7.595952799998486,
+            "total_parent_cpu_s": 0.703125
+          },
+          "loop_lag_ms": {
+            "samples": 435,
+            "p50": 9.240900275472086,
+            "p95": 14.994100256444653,
+            "p99": 15.83570026923553,
+            "max": 16.877700145414565,
+            "mean": 9.085127284364633
+          },
+          "aggregate": {
+            "attempted": 12,
+            "accepted": 12,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 12,
+            "observed_completions": 12,
+            "completed_verified": 12,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 1.9174253119701559,
+            "accepted_per_s": 1.9174253119701559,
+            "verified_tasks_per_s": 1.9174253119701559,
+            "accepted_to_committed_ms": {
+              "samples": 12,
+              "p50": 406.39050000027055,
+              "p95": 1857.0590000017546,
+              "p99": 1857.0590000017546,
+              "max": 1857.0590000017546,
+              "mean": 521.4860833336085
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 12,
+              "p50": 69.90429999859771,
+              "p95": 1101.0492999994312,
+              "p99": 1101.0492999994312,
+              "max": 1101.0492999994312,
+              "mean": 168.76992499965127
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 12,
+              "p50": 170.7877999979246,
+              "p95": 1546.3219000012032,
+              "p99": 1546.3219000012032,
+              "max": 1546.3219000012032,
+              "mean": 285.6585249998413
+            },
+            "attempted_per_producer_s": 1.9174257715342853,
+            "accepted_per_producer_s": 1.9174257715342853,
+            "settled_activations_active": 24
+          },
+          "backend_requests_active": 24,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 2,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.4749856999987969,
+            "warmup_s": 1.1221525000000838,
+            "active_start_loop_s": 20862.1730879,
+            "producer_s": 10.942013600000791,
+            "drain_s": 0.0,
+            "shutdown_s": 0.08697329999995418,
+            "active_s": 10.9420151000013,
+            "active_parent_cpu_s": 1.046875,
+            "offline_reconciliation_s": 0.015704299999924842,
+            "total_s": 12.6420521,
+            "total_parent_cpu_s": 1.203125
+          },
+          "loop_lag_ms": {
+            "samples": 773,
+            "p50": 9.120500242715934,
+            "p95": 14.973800076404586,
+            "p99": 16.01960033804062,
+            "max": 17.064200485037873,
+            "mean": 9.010200705765541
+          },
+          "aggregate": {
+            "attempted": 24,
+            "accepted": 24,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 24,
+            "observed_completions": 24,
+            "completed_verified": 24,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 2.1933802668575324,
+            "accepted_per_s": 2.1933802668575324,
+            "verified_tasks_per_s": 2.1933802668575324,
+            "accepted_to_committed_ms": {
+              "samples": 24,
+              "p50": 751.6712999968149,
+              "p95": 2285.3460000005725,
+              "p99": 2327.008800002659,
+              "max": 2327.008800002659,
+              "mean": 888.2208583331703
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 24,
+              "p50": 197.29050000023562,
+              "p95": 586.5450000019337,
+              "p99": 840.910700000677,
+              "max": 840.910700000677,
+              "mean": 265.90964999998806
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 24,
+              "p50": 251.18170000132523,
+              "p95": 647.5390999985393,
+              "p99": 947.7910999994492,
+              "max": 947.7910999994492,
+              "mean": 349.8732541667475
+            },
+            "attempted_per_producer_s": 2.193380567539988,
+            "accepted_per_producer_s": 2.193380567539988,
+            "settled_activations_active": 48
+          },
+          "backend_requests_active": 48,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 2,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.32623969999986,
+            "warmup_s": 0.843451400000049,
+            "active_start_loop_s": 20874.3934035,
+            "producer_s": 10.657091100001708,
+            "drain_s": 0.0,
+            "shutdown_s": 0.3261777000006987,
+            "active_s": 10.6570918000034,
+            "active_parent_cpu_s": 0.640625,
+            "offline_reconciliation_s": 0.019879800001945114,
+            "total_s": 12.173064700000396,
+            "total_parent_cpu_s": 0.828125
+          },
+          "loop_lag_ms": {
+            "samples": 748,
+            "p50": 9.25020014619804,
+            "p95": 14.927400414308067,
+            "p99": 15.817200313904323,
+            "max": 16.257900522759883,
+            "mean": 9.075042125744252
+          },
+          "aggregate": {
+            "attempted": 24,
+            "accepted": 24,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 24,
+            "observed_completions": 24,
+            "completed_verified": 24,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 2.252021513035324,
+            "accepted_per_s": 2.252021513035324,
+            "verified_tasks_per_s": 2.252021513035324,
+            "accepted_to_committed_ms": {
+              "samples": 24,
+              "p50": 653.8962999984506,
+              "p95": 1586.2436999996135,
+              "p99": 1739.4477000016195,
+              "max": 1739.4477000016195,
+              "mean": 872.4048583335389
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 24,
+              "p50": 181.42400000215275,
+              "p95": 960.5870000013965,
+              "p99": 1190.884300001926,
+              "max": 1190.884300001926,
+              "mean": 315.08472916705915
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 24,
+              "p50": 325.43359999908716,
+              "p95": 1115.5801999993855,
+              "p99": 1258.691800001543,
+              "max": 1258.691800001543,
+              "mean": 452.84570833337057
+            },
+            "attempted_per_producer_s": 2.252021660957384,
+            "accepted_per_producer_s": 2.252021660957384,
+            "settled_activations_active": 48
+          },
+          "backend_requests_active": 48,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 4,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.24937019999924814,
+            "warmup_s": 1.6331146999982593,
+            "active_start_loop_s": 20887.2907058,
+            "producer_s": 26.689085500001966,
+            "drain_s": 0.0,
+            "shutdown_s": 0.13571690000026138,
+            "active_s": 26.689088000002812,
+            "active_parent_cpu_s": 1.953125,
+            "offline_reconciliation_s": 0.05068810000011581,
+            "total_s": 28.758433800001512,
+            "total_parent_cpu_s": 2.390625
+          },
+          "loop_lag_ms": {
+            "samples": 1835,
+            "p50": 9.316901130659971,
+            "p95": 14.965000180382049,
+            "p99": 15.980100833985489,
+            "max": 50.390600714308675,
+            "mean": 9.180353177506849
+          },
+          "aggregate": {
+            "attempted": 48,
+            "accepted": 48,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 48,
+            "observed_completions": 48,
+            "completed_verified": 48,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 1.798487831431143,
+            "accepted_per_s": 1.798487831431143,
+            "verified_tasks_per_s": 1.798487831431143,
+            "accepted_to_committed_ms": {
+              "samples": 48,
+              "p50": 1316.9114000011177,
+              "p95": 5216.079699999682,
+              "p99": 5463.041099999828,
+              "max": 5463.041099999828,
+              "mean": 1996.2889083333266
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 48,
+              "p50": 370.16009999933885,
+              "p95": 3028.4748999984004,
+              "p99": 3472.1878999989713,
+              "max": 3472.1878999989713,
+              "mean": 714.6854708331224
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 48,
+              "p50": 453.503600001568,
+              "p95": 3067.890999998781,
+              "p99": 5243.147099998168,
+              "max": 5243.147099998168,
+              "mean": 917.3945687499175
+            },
+            "attempted_per_producer_s": 1.7984879998978034,
+            "accepted_per_producer_s": 1.7984879998978034,
+            "settled_activations_active": 96
+          },
+          "backend_requests_active": 96,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 4,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.7046626000010292,
+            "warmup_s": 0.9991566999997303,
+            "active_start_loop_s": 20915.8800139,
+            "producer_s": 14.211286599998857,
+            "drain_s": 0.0,
+            "shutdown_s": 0.27100330000030226,
+            "active_s": 14.211288099999365,
+            "active_parent_cpu_s": 1.828125,
+            "offline_reconciliation_s": 0.05841839999993681,
+            "total_s": 16.24495620000016,
+            "total_parent_cpu_s": 2.34375
+          },
+          "loop_lag_ms": {
+            "samples": 1004,
+            "p50": 8.941100393712986,
+            "p95": 15.026700133603299,
+            "p99": 15.85770038946066,
+            "max": 29.433300409436924,
+            "mean": 8.703943415211944
+          },
+          "aggregate": {
+            "attempted": 48,
+            "accepted": 48,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 48,
+            "observed_completions": 48,
+            "completed_verified": 48,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 3.377596714825741,
+            "accepted_per_s": 3.377596714825741,
+            "verified_tasks_per_s": 3.377596714825741,
+            "accepted_to_committed_ms": {
+              "samples": 48,
+              "p50": 889.572699998098,
+              "p95": 1826.1867000001075,
+              "p99": 1978.3464000029198,
+              "max": 1978.3464000029198,
+              "mean": 1125.5281645835566
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 48,
+              "p50": 263.90380000157165,
+              "p95": 735.1065000002563,
+              "p99": 941.8946000005235,
+              "max": 941.8946000005235,
+              "mean": 306.94462708356696
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 48,
+              "p50": 381.28149999829475,
+              "p95": 1251.7138000002888,
+              "p99": 1452.4625000012747,
+              "max": 1452.4625000012747,
+              "mean": 508.1848645838818
+            },
+            "attempted_per_producer_s": 3.377597071330886,
+            "accepted_per_producer_s": 3.377597071330886,
+            "settled_activations_active": 96
+          },
+          "backend_requests_active": 96,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 1,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.23849179999888293,
+            "warmup_s": 0.09330789999876288,
+            "active_start_loop_s": 20930.7594796,
+            "producer_s": 2.0003054999979213,
+            "drain_s": 0.3185224999979255,
+            "shutdown_s": 0.09156799999982468,
+            "active_s": 2.3188303999995696,
+            "active_parent_cpu_s": 0.375,
+            "offline_reconciliation_s": 0.022156600000016624,
+            "total_s": 2.7645006999991892,
+            "total_parent_cpu_s": 0.4375
+          },
+          "loop_lag_ms": {
+            "samples": 171,
+            "p50": 7.720800018432783,
+            "p95": 14.310900132841198,
+            "p99": 28.85310011333786,
+            "max": 30.81960011695628,
+            "mean": 7.8065158748529155
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 499,
+            "rejected": 501,
+            "rejection_reasons": {
+              "capacity_exceeded": 501
+            },
+            "committed_inputs": 499,
+            "observed_completions": 499,
+            "completed_verified": 499,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 431.25189319589117,
+            "accepted_per_s": 215.19469470474968,
+            "verified_tasks_per_s": 215.19469470474968,
+            "accepted_to_committed_ms": {
+              "samples": 499,
+              "p50": 384.3004000009387,
+              "p95": 548.9469999993162,
+              "p99": 590.9252000019478,
+              "max": 591.3215000000491,
+              "mean": 362.5246737476869
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 499,
+              "p50": 388.51789999898756,
+              "p95": 555.5735999987519,
+              "p99": 592.213100000663,
+              "max": 600.2130999986548,
+              "mean": 370.6583911813443
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 6.754299996828195,
+              "p95": 14.864399996440625,
+              "p99": 33.06549999615527,
+              "max": 48.66069999843603,
+              "mean": 7.5613721987720055
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 499.923636665019,
+            "accepted_per_producer_s": 249.46189469584448,
+            "settled_activations_active": 17,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 17,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 1,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.22651530000075581,
+            "warmup_s": 0.15485809999881894,
+            "active_start_loop_s": 20933.5784124,
+            "producer_s": 2.012278199999855,
+            "drain_s": 0.27700239999830956,
+            "shutdown_s": 0.09134810000250582,
+            "active_s": 2.2892828000003647,
+            "active_parent_cpu_s": 0.171875,
+            "offline_reconciliation_s": 0.026983400002791313,
+            "total_s": 2.7890965000005963,
+            "total_parent_cpu_s": 0.265625
+          },
+          "loop_lag_ms": {
+            "samples": 163,
+            "p50": 8.797200011031236,
+            "p95": 14.502000100037549,
+            "p99": 15.745900036563398,
+            "max": 15.827100054593757,
+            "mean": 8.412858343521059
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 353,
+            "rejected": 647,
+            "rejection_reasons": {
+              "capacity_exceeded": 647
+            },
+            "committed_inputs": 353,
+            "observed_completions": 353,
+            "completed_verified": 353,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 436.8180287729592,
+            "accepted_per_s": 154.1967641568546,
+            "verified_tasks_per_s": 154.1967641568546,
+            "accepted_to_committed_ms": {
+              "samples": 353,
+              "p50": 340.0738000018464,
+              "p95": 1087.724299999536,
+              "p99": 1119.4204000021273,
+              "max": 1119.5373000009567,
+              "mean": 499.7531274784912
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 353,
+              "p50": 346.6273000012734,
+              "p95": 1092.1046000039496,
+              "p99": 1120.104600002378,
+              "max": 1126.1046000036004,
+              "mean": 506.89331246594367
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 7.065000001603039,
+              "p95": 14.303500000096392,
+              "p99": 15.74099999925238,
+              "max": 21.685000003344612,
+              "mean": 7.290361101680901
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 496.9491792934357,
+            "accepted_per_producer_s": 175.42306029058278,
+            "settled_activations_active": 12,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 12,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 2,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.22374149999814108,
+            "warmup_s": 0.14904610000303364,
+            "active_start_loop_s": 20936.3652812,
+            "producer_s": 2.014349900000525,
+            "drain_s": 1.9823270999986562,
+            "shutdown_s": 0.36014849999992293,
+            "active_s": 3.9966788999990968,
+            "active_parent_cpu_s": 0.25,
+            "offline_reconciliation_s": 0.048201999998127576,
+            "total_s": 4.777946300000622,
+            "total_parent_cpu_s": 0.359375
+          },
+          "loop_lag_ms": {
+            "samples": 280,
+            "p50": 8.530900158802979,
+            "p95": 14.625700190663338,
+            "p99": 18.23450003939797,
+            "max": 39.69180003696238,
+            "mean": 8.639659768219385
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 703,
+            "rejected": 297,
+            "rejection_reasons": {
+              "capacity_exceeded": 297
+            },
+            "committed_inputs": 703,
+            "observed_completions": 703,
+            "completed_verified": 703,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 250.20774123240824,
+            "accepted_per_s": 175.89604208638298,
+            "verified_tasks_per_s": 175.89604208638298,
+            "accepted_to_committed_ms": {
+              "samples": 703,
+              "p50": 512.6263999991352,
+              "p95": 2136.3617999995768,
+              "p99": 2314.604099999997,
+              "max": 2347.4927999996,
+              "mean": 744.1982126598554
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 703,
+              "p50": 526.3497999985702,
+              "p95": 2138.3970999995654,
+              "p99": 2322.788599998603,
+              "max": 2350.7885999970313,
+              "mean": 754.9122886199957
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 6.653099997492973,
+              "p95": 40.1702999988629,
+              "p99": 72.66639999943436,
+              "max": 81.46590000251308,
+              "mean": 9.596315400005551
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 496.43808158639143,
+            "accepted_per_producer_s": 348.99597135523317,
+            "settled_activations_active": 24,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 24,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 2,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.3766946000032476,
+            "warmup_s": 0.3464870999996492,
+            "active_start_loop_s": 20941.5056602,
+            "producer_s": 2.012360599997919,
+            "drain_s": 1.023386799999571,
+            "shutdown_s": 0.28385329999946407,
+            "active_s": 3.0357498999983363,
+            "active_parent_cpu_s": 0.6875,
+            "offline_reconciliation_s": 0.14132360000076005,
+            "total_s": 4.184298000000126,
+            "total_parent_cpu_s": 0.90625
+          },
+          "loop_lag_ms": {
+            "samples": 232,
+            "p50": 6.972100083658006,
+            "p95": 14.869800106680486,
+            "p99": 17.949600165593438,
+            "max": 26.99020020736498,
+            "mean": 7.270919950597404
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 781,
+            "rejected": 219,
+            "rejection_reasons": {
+              "capacity_exceeded": 219
+            },
+            "committed_inputs": 781,
+            "observed_completions": 781,
+            "completed_verified": 781,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 329.40790017008584,
+            "accepted_per_s": 257.26757003283706,
+            "verified_tasks_per_s": 257.26757003283706,
+            "accepted_to_committed_ms": {
+              "samples": 781,
+              "p50": 447.1183000023302,
+              "p95": 1202.610000000277,
+              "p99": 1239.6762999997009,
+              "max": 1261.9883000006666,
+              "mean": 545.8440600513815
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 781,
+              "p50": 452.63319999867235,
+              "p95": 1210.896299999149,
+              "p99": 1243.8731000002008,
+              "max": 1264.7863999991387,
+              "mean": 552.21462074232
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 6.015099999785889,
+              "p95": 13.579199996456737,
+              "p99": 15.30339999953867,
+              "max": 18.05400000012014,
+              "mean": 6.4086205995918135
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 496.9288307478461,
+            "accepted_per_producer_s": 388.1014168140678,
+            "settled_activations_active": 27,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 27,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 4,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": false,
+          "errors": [
+            "trial: RuntimeError: journal initialization failed: OperationalError: database is locked",
+            "producer did not attempt every scheduled arrival"
+          ],
+          "timing": {
+            "shutdown_s": 0.7069579999988491,
+            "active_s": 0.0,
+            "active_parent_cpu_s": 0.0,
+            "offline_reconciliation_s": 0.010293600000295555,
+            "total_s": 15.788775700002589,
+            "total_parent_cpu_s": 0.03125
+          },
+          "loop_lag_ms": {
+            "samples": 0,
+            "p50": null,
+            "p95": null,
+            "p99": null,
+            "max": null,
+            "mean": null
+          },
+          "aggregate": {
+            "attempted": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 0,
+            "observed_completions": 0,
+            "completed_verified": 0,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": null,
+            "accepted_per_s": null,
+            "verified_tasks_per_s": null,
+            "accepted_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": null,
+            "accepted_per_producer_s": null,
+            "settled_activations_active": 0,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 0,
+          "integrity_ok": false,
+          "journal_dropped": 0,
+          "session_errors": [
+            "journal observations incomplete",
+            "journal observations incomplete"
+          ],
+          "session_errors_count": 2,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 4,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.5234197999998287,
+            "warmup_s": 0.10919899999862537,
+            "active_start_loop_s": 20961.4201471,
+            "producer_s": 2.009629699998186,
+            "drain_s": 0.28794009999910486,
+            "shutdown_s": 0.20130799999969895,
+            "active_s": 2.2975714999993215,
+            "active_parent_cpu_s": 0.75,
+            "offline_reconciliation_s": 0.05076379999809433,
+            "total_s": 3.1824899000021105,
+            "total_parent_cpu_s": 0.984375
+          },
+          "loop_lag_ms": {
+            "samples": 177,
+            "p50": 6.9037000357639045,
+            "p95": 14.424000179133145,
+            "p99": 17.65640013036318,
+            "max": 25.671100134786684,
+            "mean": 7.075776359141018
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 1000,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 1000,
+            "observed_completions": 1000,
+            "completed_verified": 1000,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 435.2421676541058,
+            "accepted_per_s": 435.2421676541058,
+            "verified_tasks_per_s": 435.2421676541058,
+            "accepted_to_committed_ms": {
+              "samples": 1000,
+              "p50": 261.6316999992705,
+              "p95": 406.6975999994611,
+              "p99": 445.77009999920847,
+              "max": 477.56460000164225,
+              "mean": 267.8367368002364
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 1000,
+              "p50": 268.0447999991884,
+              "p95": 412.7002999994147,
+              "p99": 455.57499999995343,
+              "max": 481.5675999998348,
+              "mean": 275.1017553987549
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 6.2400999959209,
+              "p95": 15.312899995478801,
+              "p99": 27.94019999782904,
+              "max": 38.354899999831105,
+              "mean": 7.217765098546806
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 497.604110847338,
+            "accepted_per_producer_s": 497.604110847338,
+            "settled_activations_active": 52,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 52,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        }
+      ]
+    },
+    {
+      "label": "baseline-a2",
+      "variant": "baseline",
+      "ok": false,
+      "environment": {
+        "python": "3.13.14",
+        "platform": "win32",
+        "os": "Windows-11-10.0.26300-SP0",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+        "logical_cpu_count": 8,
+        "windows_appcontainer": false
+      },
+      "harness_sha256": "5cbf854f91d70f2ab2539c1ad3ee81802462a37fce96772e04326b57f39836af",
+      "source_sha256": {
+        "llm.py": "27c6849b92fa4886a57b4da174873f38c323fdcd0b1bed93fb7a2e22bdbed023",
+        "journal.py": "4cfddbfe6f248b2a01744aae664dc3dee0a823c55d5c0680173259794dd87c97",
+        "python_host.py": "400d01705d7691e972c9317209866bd46dca7e140bf881e17c5be45d19ea9f8a",
+        "events.py": "a5f129e832cedde401c79ecf5ee730f3cebcc22e7feb2c1f5ccd9d1b2d98c4ed"
+      },
+      "configuration": {
+        "sessions": [
+          1,
+          2,
+          4
+        ],
+        "journals": [
+          "shared",
+          "separate"
+        ],
+        "mode": "all",
+        "jobs": 12,
+        "rate": 500.0,
+        "seconds": 2.0,
+        "provider_ms": 20.0,
+        "work_ms": 5.0,
+        "repeats": 1,
+        "seed": 20261113,
+        "json": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\baseline-a2.json",
+        "workspace_root": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\baseline-a2"
+      },
+      "runtime_defaults": {
+        "ordinary_limit": 64,
+        "result_limit": 4,
+        "batch_limit": 32,
+        "context_limit": 200000,
+        "max_activations": 100,
+        "default_timeout": 30,
+        "max_timeout": 120,
+        "max_output_tokens": null
+      },
+      "methodology": {
+        "worker": "one outstanding external input/session; actual python_exec, observed terminal, committed follow-up, exact marker check",
+        "admission": "aggregate absolute-rate ordinary inputs; real batching; no rejection retries; accepted-input drain",
+        "durability": "runtime defaults: FULL activation/snapshot/receipt and effect commits; asynchronous observation journal",
+        "latency_clock": "asyncio loop monotonic seconds; latency distributions in milliseconds",
+        "percentiles": "nearest rank; samples counts included; null when empty",
+        "rate_denominator": "active seconds including warm-worker execution and accepted drain; excludes startup, warm-up, shutdown and offline checks",
+        "cpu": "parent process only; worker process CPU excluded",
+        "lag": "10 ms absolute timer; skipped missed timer deadlines; final overdue deadline sampled",
+        "failure_counts": "failed includes explicit errors or unverified settled work; unfinished means no completion settlement; counts can overlap",
+        "goodput_integrity": "only accepted jobs with independent evidence in sessions passing exact-set/row/event/journal checks contribute goodput",
+        "limits": "finite synthetic scripts; retained listener events and ScriptedBackend request history add overhead; no user workload or latency SLO supplied"
+      },
+      "runtime_source_root": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\baseline",
+      "raw_report": "E:\\Projects\\Magixyne\\Nervipulsa\\.scratch\\throughput-study-04y2422o\\baseline-a2.json",
+      "trials": [
+        {
+          "mode": "worker",
+          "sessions": 1,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.2290450000000419,
+            "warmup_s": 1.0998269000010623,
+            "active_start_loop_s": 21068.598272,
+            "producer_s": 4.615680200000497,
+            "drain_s": 0.0,
+            "shutdown_s": 0.08018620000075316,
+            "active_s": 4.615682399999059,
+            "active_parent_cpu_s": 0.40625,
+            "offline_reconciliation_s": 0.007523299998865696,
+            "total_s": 6.032442499999888,
+            "total_parent_cpu_s": 0.640625
+          },
+          "loop_lag_ms": {
+            "samples": 222,
+            "p50": 10.640200081979856,
+            "p95": 54.81820006752969,
+            "p99": 71.70930010761367,
+            "max": 75.28410003942554,
+            "mean": 15.520149611466541
+          },
+          "aggregate": {
+            "attempted": 12,
+            "accepted": 12,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 12,
+            "observed_completions": 12,
+            "completed_verified": 12,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 2.5998322588231906,
+            "accepted_per_s": 2.5998322588231906,
+            "verified_tasks_per_s": 2.5998322588231906,
+            "accepted_to_committed_ms": {
+              "samples": 12,
+              "p50": 347.1323999983724,
+              "p95": 634.3290999975579,
+              "p99": 634.3290999975579,
+              "max": 634.3290999975579,
+              "mean": 384.5806416660101
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 12,
+              "p50": 140.29160000063712,
+              "p95": 295.84329999852343,
+              "p99": 295.84329999852343,
+              "max": 295.84329999852343,
+              "mean": 152.72541666642306
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 12,
+              "p50": 181.22970000331406,
+              "p95": 481.939199999033,
+              "p99": 481.939199999033,
+              "max": 481.939199999033,
+              "mean": 219.2717416664891
+            },
+            "attempted_per_producer_s": 2.5998334979963964,
+            "accepted_per_producer_s": 2.5998334979963964,
+            "settled_activations_active": 24
+          },
+          "backend_requests_active": 24,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 1,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.23492670000268845,
+            "warmup_s": 0.7024289000000863,
+            "active_start_loop_s": 21074.2444089,
+            "producer_s": 4.766437500002212,
+            "drain_s": 0.0,
+            "shutdown_s": 0.09249669999917387,
+            "active_s": 4.766439800001535,
+            "active_parent_cpu_s": 0.5625,
+            "offline_reconciliation_s": 0.01427010000043083,
+            "total_s": 5.810813200001576,
+            "total_parent_cpu_s": 0.671875
+          },
+          "loop_lag_ms": {
+            "samples": 223,
+            "p50": 10.756400060927263,
+            "p95": 55.473700096627,
+            "p99": 77.08540000749053,
+            "max": 88.2146000112698,
+            "mean": 16.052305889804664
+          },
+          "aggregate": {
+            "attempted": 12,
+            "accepted": 12,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 12,
+            "observed_completions": 12,
+            "completed_verified": 12,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 2.5176023412686623,
+            "accepted_per_s": 2.5176023412686623,
+            "verified_tasks_per_s": 2.5176023412686623,
+            "accepted_to_committed_ms": {
+              "samples": 12,
+              "p50": 357.97590000220225,
+              "p95": 678.2526000024518,
+              "p99": 678.2526000024518,
+              "max": 678.2526000024518,
+              "mean": 397.1346250006415
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 12,
+              "p50": 151.73520000098506,
+              "p95": 470.1146000006702,
+              "p99": 470.1146000006702,
+              "max": 470.1146000006702,
+              "mean": 179.270308333192
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 12,
+              "p50": 194.8886999998649,
+              "p95": 509.51270000223303,
+              "p99": 509.51270000223303,
+              "max": 509.51270000223303,
+              "mean": 223.83219999998497
+            },
+            "attempted_per_producer_s": 2.517603556113855,
+            "accepted_per_producer_s": 2.517603556113855,
+            "settled_activations_active": 24
+          },
+          "backend_requests_active": 24,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 2,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": false,
+          "errors": [
+            "trial: RuntimeError: journal initialization failed: OperationalError: database is locked",
+            "closed-loop workload stopped before all configured jobs were attempted"
+          ],
+          "timing": {
+            "shutdown_s": 0.04410959999950137,
+            "active_s": 0.0,
+            "active_parent_cpu_s": 0.0,
+            "offline_reconciliation_s": 0.005825500000355532,
+            "total_s": 15.06569280000258,
+            "total_parent_cpu_s": 0.09375
+          },
+          "loop_lag_ms": {
+            "samples": 0,
+            "p50": null,
+            "p95": null,
+            "p99": null,
+            "max": null,
+            "mean": null
+          },
+          "aggregate": {
+            "attempted": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 0,
+            "observed_completions": 0,
+            "completed_verified": 0,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": null,
+            "accepted_per_s": null,
+            "verified_tasks_per_s": null,
+            "accepted_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": null,
+            "accepted_per_producer_s": null,
+            "settled_activations_active": 0
+          },
+          "backend_requests_active": 0,
+          "integrity_ok": false,
+          "journal_dropped": 0,
+          "session_errors": [
+            "journal observations incomplete"
+          ],
+          "session_errors_count": 1,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 2,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.3087205999981961,
+            "warmup_s": 1.2920525000008638,
+            "active_start_loop_s": 21095.8000802,
+            "producer_s": 6.937886800002161,
+            "drain_s": 0.0,
+            "shutdown_s": 0.11619710000013583,
+            "active_s": 6.937888100001146,
+            "active_parent_cpu_s": 0.71875,
+            "offline_reconciliation_s": 0.02136899999823072,
+            "total_s": 8.676426599999104,
+            "total_parent_cpu_s": 1.0625
+          },
+          "loop_lag_ms": {
+            "samples": 162,
+            "p50": 29.074900015984895,
+            "p95": 92.82440001697978,
+            "p99": 148.28830000260496,
+            "max": 444.98010001552757,
+            "mean": 37.561851870662025
+          },
+          "aggregate": {
+            "attempted": 24,
+            "accepted": 24,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 24,
+            "observed_completions": 24,
+            "completed_verified": 24,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 3.459265940019418,
+            "accepted_per_s": 3.459265940019418,
+            "verified_tasks_per_s": 3.459265940019418,
+            "accepted_to_committed_ms": {
+              "samples": 24,
+              "p50": 552.2904999997991,
+              "p95": 813.9945999973861,
+              "p99": 914.7569999986445,
+              "max": 914.7569999986445,
+              "mean": 569.2311624999699
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 24,
+              "p50": 201.43620000089868,
+              "p95": 268.5696000007738,
+              "p99": 293.4587999989162,
+              "max": 293.4587999989162,
+              "mean": 209.60407916663826
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 24,
+              "p50": 286.26210000220453,
+              "p95": 353.9874000016425,
+              "p99": 361.59129999941797,
+              "max": 361.59129999941797,
+              "mean": 281.1408333335142
+            },
+            "attempted_per_producer_s": 3.4592665882055793,
+            "accepted_per_producer_s": 3.4592665882055793,
+            "settled_activations_active": 48
+          },
+          "backend_requests_active": 48,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 4,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.2719096000000718,
+            "warmup_s": 2.314857100001973,
+            "active_start_loop_s": 21105.4733493,
+            "producer_s": 24.172518800001853,
+            "drain_s": 0.0,
+            "shutdown_s": 0.1156133000004047,
+            "active_s": 24.172520000000077,
+            "active_parent_cpu_s": 1.65625,
+            "offline_reconciliation_s": 0.04746549999981653,
+            "total_s": 26.922683400000096,
+            "total_parent_cpu_s": 2.109375
+          },
+          "loop_lag_ms": {
+            "samples": 271,
+            "p50": 14.063500097108772,
+            "p95": 372.4375000419968,
+            "p99": 740.9228000433359,
+            "max": 953.2158000984055,
+            "mean": 84.20178567078561
+          },
+          "aggregate": {
+            "attempted": 48,
+            "accepted": 48,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 48,
+            "observed_completions": 48,
+            "completed_verified": 48,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 1.9857259400343799,
+            "accepted_per_s": 1.9857259400343799,
+            "verified_tasks_per_s": 1.9857259400343799,
+            "accepted_to_committed_ms": {
+              "samples": 48,
+              "p50": 1764.582200001314,
+              "p95": 3757.306500003324,
+              "p99": 5882.105300002877,
+              "max": 5882.105300002877,
+              "mean": 1864.0573354165706
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 48,
+              "p50": 659.2971999998554,
+              "p95": 2812.518999999156,
+              "p99": 4735.668400000577,
+              "max": 4735.668400000577,
+              "mean": 975.2577812500931
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 48,
+              "p50": 659.6903999998176,
+              "p95": 2813.1207000005816,
+              "p99": 5615.482200002589,
+              "max": 5615.482200002589,
+              "mean": 1023.7684229166462
+            },
+            "attempted_per_producer_s": 1.9857260386119264,
+            "accepted_per_producer_s": 1.9857260386119264,
+            "settled_activations_active": 96
+          },
+          "backend_requests_active": 96,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "worker",
+          "sessions": 4,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.5648192000007839,
+            "warmup_s": 2.3293607000014163,
+            "active_start_loop_s": 21132.7132419,
+            "producer_s": 14.834745500000281,
+            "drain_s": 0.0,
+            "shutdown_s": 0.14420069999687257,
+            "active_s": 14.83474859999842,
+            "active_parent_cpu_s": 1.5625,
+            "offline_reconciliation_s": 0.0479005999986839,
+            "total_s": 17.921280400001706,
+            "total_parent_cpu_s": 1.90625
+          },
+          "loop_lag_ms": {
+            "samples": 104,
+            "p50": 108.14910001499811,
+            "p95": 298.57220001213136,
+            "p99": 717.6077000149235,
+            "max": 1060.088700010965,
+            "mean": 137.0606480881039
+          },
+          "aggregate": {
+            "attempted": 48,
+            "accepted": 48,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 48,
+            "observed_completions": 48,
+            "completed_verified": 48,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 3.235646339163787,
+            "accepted_per_s": 3.235646339163787,
+            "verified_tasks_per_s": 3.235646339163787,
+            "accepted_to_committed_ms": {
+              "samples": 48,
+              "p50": 1059.8032999987481,
+              "p95": 1959.6354000022984,
+              "p99": 2268.556600000011,
+              "max": 2268.556600000011,
+              "mean": 1228.8742020834889
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 48,
+              "p50": 376.3921999998274,
+              "p95": 570.578699996986,
+              "p99": 1291.28320000018,
+              "max": 1291.28320000018,
+              "mean": 404.0662145832054
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 48,
+              "p50": 393.96140000098967,
+              "p95": 686.3293999995221,
+              "p99": 1295.8375999987766,
+              "max": 1295.8375999987766,
+              "mean": 453.3582833334246
+            },
+            "attempted_per_producer_s": 3.2356470153127392,
+            "accepted_per_producer_s": 3.2356470153127392,
+            "settled_activations_active": 96
+          },
+          "backend_requests_active": 96,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 1,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.2452350000021397,
+            "warmup_s": 0.09619500000189873,
+            "active_start_loop_s": 21148.0879337,
+            "producer_s": 2.002161699998396,
+            "drain_s": 0.33312450000084937,
+            "shutdown_s": 0.07980469999893103,
+            "active_s": 2.335288099999161,
+            "active_parent_cpu_s": 0.203125,
+            "offline_reconciliation_s": 0.018974300000991207,
+            "total_s": 2.7755896000016946,
+            "total_parent_cpu_s": 0.234375
+          },
+          "loop_lag_ms": {
+            "samples": 43,
+            "p50": 9.09160000810516,
+            "p95": 96.06300002633361,
+            "p99": 874.0968000092835,
+            "max": 874.0968000092835,
+            "mean": 48.7083418742005
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 377,
+            "rejected": 623,
+            "rejection_reasons": {
+              "capacity_exceeded": 623
+            },
+            "committed_inputs": 377,
+            "observed_completions": 377,
+            "completed_verified": 377,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 428.2126903315951,
+            "accepted_per_s": 161.43618425501137,
+            "verified_tasks_per_s": 161.43618425501137,
+            "accepted_to_committed_ms": {
+              "samples": 377,
+              "p50": 291.1113000009209,
+              "p95": 1205.1025000000664,
+              "p99": 1206.793800000014,
+              "max": 1207.04719999776,
+              "mean": 460.3803984083539
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 377,
+              "p50": 372.9163999996672,
+              "p95": 1248.9429999986896,
+              "p99": 1278.7954999985232,
+              "max": 1284.7954999997455,
+              "mean": 591.3965509277203
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 85.03539999946952,
+              "p95": 787.296200000128,
+              "p99": 866.4378999965265,
+              "max": 885.9898999980942,
+              "mean": 228.8400656994272
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 499.46015848809867,
+            "accepted_per_producer_s": 188.2964797500132,
+            "settled_activations_active": 13,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 13,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 1,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.20719240000107675,
+            "warmup_s": 0.09655599999678088,
+            "active_start_loop_s": 21150.8316384,
+            "producer_s": 2.0061133000017435,
+            "drain_s": 1.0995665999980702,
+            "shutdown_s": 0.09364160000041011,
+            "active_s": 3.1056819000004907,
+            "active_parent_cpu_s": 0.203125,
+            "offline_reconciliation_s": 0.03480660000059288,
+            "total_s": 3.5379673000024923,
+            "total_parent_cpu_s": 0.3125
+          },
+          "loop_lag_ms": {
+            "samples": 58,
+            "p50": 12.084500020137057,
+            "p95": 150.35390001139604,
+            "p99": 576.3851000265277,
+            "max": 576.3851000265277,
+            "mean": 47.65094139424789
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 574,
+            "rejected": 426,
+            "rejection_reasons": {
+              "capacity_exceeded": 426
+            },
+            "committed_inputs": 574,
+            "observed_completions": 574,
+            "completed_verified": 574,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 321.990478161927,
+            "accepted_per_s": 184.8225344649461,
+            "verified_tasks_per_s": 184.8225344649461,
+            "accepted_to_committed_ms": {
+              "samples": 574,
+              "p50": 309.8233999990043,
+              "p95": 1116.0517999996955,
+              "p99": 1117.4337999982527,
+              "max": 1117.8164999982982,
+              "mean": 370.54927700343643
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 574,
+              "p50": 391.3524999989022,
+              "p95": 1195.1451999993878,
+              "p99": 1241.1451999978453,
+              "max": 1251.1451999998826,
+              "mean": 439.7568106279713
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 45.84210000029998,
+              "p95": 118.59249999906751,
+              "p99": 147.66940000117756,
+              "max": 166.23940000135917,
+              "mean": 50.49591610092466
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 498.4763323183845,
+            "accepted_per_producer_s": 286.12541475075267,
+            "settled_activations_active": 19,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 19,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 2,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": false,
+          "errors": [
+            "trial: RuntimeError: journal initialization failed: OperationalError: database is locked",
+            "producer did not attempt every scheduled arrival"
+          ],
+          "timing": {
+            "shutdown_s": 0.3507925999983854,
+            "active_s": 0.0,
+            "active_parent_cpu_s": 0.0,
+            "offline_reconciliation_s": 0.008673000000271713,
+            "total_s": 15.367028000000573,
+            "total_parent_cpu_s": 0.046875
+          },
+          "loop_lag_ms": {
+            "samples": 0,
+            "p50": null,
+            "p95": null,
+            "p99": null,
+            "max": null,
+            "mean": null
+          },
+          "aggregate": {
+            "attempted": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 0,
+            "observed_completions": 0,
+            "completed_verified": 0,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": null,
+            "accepted_per_s": null,
+            "verified_tasks_per_s": null,
+            "accepted_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": null,
+            "accepted_per_producer_s": null,
+            "settled_activations_active": 0,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 0,
+          "integrity_ok": false,
+          "journal_dropped": 0,
+          "session_errors": [
+            "journal observations incomplete"
+          ],
+          "session_errors_count": 1,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 2,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.874679799999285,
+            "warmup_s": 0.17507859999750508,
+            "active_start_loop_s": 21170.496278,
+            "producer_s": 38.12540110000191,
+            "drain_s": 0.24200570000175503,
+            "shutdown_s": 0.5960487000011199,
+            "active_s": 38.36740860000282,
+            "active_parent_cpu_s": 3.03125,
+            "offline_reconciliation_s": 0.15374959999826388,
+            "total_s": 40.16742929999964,
+            "total_parent_cpu_s": 3.203125
+          },
+          "loop_lag_ms": {
+            "samples": 339,
+            "p50": 76.40419997187564,
+            "p95": 301.3099999479891,
+            "p99": 837.5808999589935,
+            "max": 1135.0931999440945,
+            "mean": 108.1185029007083
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 1000,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 1000,
+            "observed_completions": 1000,
+            "completed_verified": 1000,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 26.06378789939768,
+            "accepted_per_s": 26.06378789939768,
+            "verified_tasks_per_s": 26.06378789939768,
+            "accepted_to_committed_ms": {
+              "samples": 1000,
+              "p50": 265.13949999934994,
+              "p95": 945.8570999995572,
+              "p99": 1429.9733999978343,
+              "max": 2082.949399999052,
+              "mean": 362.56210959995224
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 1000,
+              "p50": 15945.63090000156,
+              "p95": 35231.74700000163,
+              "p99": 36113.177400002314,
+              "max": 36368.749900000694,
+              "mean": 16450.72634540122
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 15412.878600000113,
+              "p95": 34179.118899999594,
+              "p99": 35852.38560000289,
+              "max": 36127.282900000864,
+              "mean": 16088.128147801326
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 26.229232247997253,
+            "accepted_per_producer_s": 26.229232247997253,
+            "settled_activations_active": 336,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 336,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        },
+        {
+          "mode": "admission",
+          "sessions": 4,
+          "journals": "shared",
+          "repeat": 0,
+          "ok": false,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.269023400000151,
+            "warmup_s": 0.33684469999934663,
+            "active_start_loop_s": 21210.2298935,
+            "producer_s": 142.14387100000022,
+            "drain_s": 0.29768930000136606,
+            "shutdown_s": 0.31129020000298624,
+            "active_s": 142.44156170000133,
+            "active_parent_cpu_s": 8.046875,
+            "offline_reconciliation_s": 0.2370178000019223,
+            "total_s": 143.5959522000012,
+            "total_parent_cpu_s": 8.46875
+          },
+          "loop_lag_ms": {
+            "samples": 503,
+            "p50": 184.5649000351841,
+            "p95": 808.416700016096,
+            "p99": 1337.9506000273977,
+            "max": 1842.5028000601742,
+            "mean": 278.08281534106106
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 1000,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 1000,
+            "observed_completions": 1000,
+            "completed_verified": 0,
+            "failed": 1000,
+            "unfinished": 0,
+            "attempted_per_s": 7.020422888272718,
+            "accepted_per_s": 7.020422888272718,
+            "verified_tasks_per_s": 0.0,
+            "accepted_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 65625.19059999977,
+              "p95": 132289.74919999746,
+              "p99": 139144.0614000021,
+              "max": 140044.15890000018,
+              "mean": 67455.25380330013
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 7.035125700213965,
+            "accepted_per_producer_s": 7.035125700213965,
+            "settled_activations_active": 1000,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 1000,
+          "integrity_ok": false,
+          "journal_dropped": 269,
+          "session_errors": [
+            "listener versus persisted event IDs: missing=['evt_00000056'] unexpected=[]",
+            "durable accepted user inputs: missing=['evt_00000056'] unexpected=[]",
+            "journal observations incomplete",
+            "unverified accepted job: warmup-0",
+            "unverified accepted job: input-2",
+            "unverified accepted job: input-6",
+            "unverified accepted job: input-10",
+            "unverified accepted job: input-14"
+          ],
+          "session_errors_count": 1025,
+          "session_errors_truncated": true
+        },
+        {
+          "mode": "admission",
+          "sessions": 4,
+          "journals": "separate",
+          "repeat": 0,
+          "ok": true,
+          "errors": [],
+          "timing": {
+            "startup_s": 0.5917224000004353,
+            "warmup_s": 0.7273857000000135,
+            "active_start_loop_s": 21354.5471597,
+            "producer_s": 144.01943860000029,
+            "drain_s": 0.24931369999831077,
+            "shutdown_s": 1.115199699997902,
+            "active_s": 144.2687545000008,
+            "active_parent_cpu_s": 8.671875,
+            "offline_reconciliation_s": 0.2392827000003308,
+            "total_s": 146.94255319999866,
+            "total_parent_cpu_s": 9.015625
+          },
+          "loop_lag_ms": {
+            "samples": 504,
+            "p50": 170.85690006570076,
+            "p95": 889.8640000734304,
+            "p99": 1860.3340000772732,
+            "max": 2453.782000051433,
+            "mean": 281.2560216772317
+          },
+          "aggregate": {
+            "attempted": 1000,
+            "accepted": 1000,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "committed_inputs": 1000,
+            "observed_completions": 1000,
+            "completed_verified": 1000,
+            "failed": 0,
+            "unfinished": 0,
+            "attempted_per_s": 6.931507820010982,
+            "accepted_per_s": 6.931507820010982,
+            "verified_tasks_per_s": 6.931507820010982,
+            "accepted_to_committed_ms": {
+              "samples": 1000,
+              "p50": 504.54679999893415,
+              "p95": 2386.037899999792,
+              "p99": 3674.096200000349,
+              "max": 5210.46109999952,
+              "mean": 791.521466400085
+            },
+            "scheduled_to_committed_ms": {
+              "samples": 1000,
+              "p50": 66949.51299999957,
+              "p95": 135223.18489999816,
+              "p99": 141602.1967000015,
+              "max": 142270.3853000021,
+              "mean": 66551.55432780042
+            },
+            "producer_lateness_ms": {
+              "samples": 1000,
+              "p50": 64040.10170000038,
+              "p95": 132337.67069999885,
+              "p99": 140848.64970000126,
+              "max": 141954.6174999996,
+              "mean": 65759.98998790041
+            },
+            "worker_accepted_to_started_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "worker_accepted_to_finished_ms": {
+              "samples": 0,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null,
+              "mean": null
+            },
+            "attempted_per_producer_s": 6.943507138487054,
+            "accepted_per_producer_s": 6.943507138487054,
+            "settled_activations_active": 1000,
+            "configured_aggregate_arrivals_per_s": 500.0,
+            "nominal_arrival_window_s": 2.0,
+            "scheduled_arrivals": 1000
+          },
+          "backend_requests_active": 1000,
+          "integrity_ok": true,
+          "journal_dropped": 0,
+          "session_errors": [],
+          "session_errors_count": 0,
+          "session_errors_truncated": false
+        }
+      ]
+    }
+  ],
+  "cells": [
+    {
+      "mode": "worker",
+      "sessions": 1,
+      "journals": "shared",
+      "baseline": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 2.5998322588231906,
+          "median": 2.7155852507302494,
+          "max": 2.831338242637308
+        },
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 1.0780101119144745,
+          "median": 1.2280340752297032,
+          "max": 1.378058038544932
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "worker",
+      "sessions": 1,
+      "journals": "separate",
+      "baseline": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 2.148624472994134,
+          "median": 2.333113407131398,
+          "max": 2.5176023412686623
+        },
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 0.7165668365653581,
+          "median": 1.3169960742677569,
+          "max": 1.9174253119701559
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "worker",
+      "sessions": 2,
+      "journals": "shared",
+      "baseline": {
+        "all_trials_passed": false,
+        "passed_trials": 1,
+        "goodput_stats": null,
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": false,
+        "passed_trials": 1,
+        "goodput_stats": null,
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "worker",
+      "sessions": 2,
+      "journals": "separate",
+      "baseline": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 2.502881729379629,
+          "median": 2.9810738346995236,
+          "max": 3.459265940019418
+        },
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 2.252021513035324,
+          "median": 2.767091156329186,
+          "max": 3.2821607996230475
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "worker",
+      "sessions": 4,
+      "journals": "shared",
+      "baseline": {
+        "all_trials_passed": false,
+        "passed_trials": 1,
+        "goodput_stats": null,
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 1.798487831431143,
+          "median": 1.9783695045675453,
+          "max": 2.1582511777039475
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "worker",
+      "sessions": 4,
+      "journals": "separate",
+      "baseline": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 3.050655389139377,
+          "median": 3.1431508641515817,
+          "max": 3.235646339163787
+        },
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 3.377596714825741,
+          "median": 4.142270055645578,
+          "max": 4.906943396465414
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "admission",
+      "sessions": 1,
+      "journals": "shared",
+      "baseline": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 161.43618425501137,
+          "median": 179.3458306346101,
+          "max": 197.25547701420885
+        },
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 215.19469470474968,
+          "median": 247.80881483427711,
+          "max": 280.42293496380455
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "admission",
+      "sessions": 1,
+      "journals": "separate",
+      "baseline": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 184.8225344649461,
+          "median": 198.85664772836202,
+          "max": 212.8907609917779
+        },
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 95.24268301268228,
+          "median": 124.71972358476845,
+          "max": 154.1967641568546
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "admission",
+      "sessions": 2,
+      "journals": "shared",
+      "baseline": {
+        "all_trials_passed": false,
+        "passed_trials": 0,
+        "goodput_stats": null,
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 175.89604208638298,
+          "median": 196.47416976042862,
+          "max": 217.05229743447427
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "admission",
+      "sessions": 2,
+      "journals": "separate",
+      "baseline": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 24.542483923199924,
+          "median": 25.303135911298803,
+          "max": 26.06378789939768
+        },
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 257.26757003283706,
+          "median": 311.59819612316744,
+          "max": 365.9288222134978
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "admission",
+      "sessions": 4,
+      "journals": "shared",
+      "baseline": {
+        "all_trials_passed": false,
+        "passed_trials": 0,
+        "goodput_stats": null,
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": false,
+        "passed_trials": 1,
+        "goodput_stats": null,
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    },
+    {
+      "mode": "admission",
+      "sessions": 4,
+      "journals": "separate",
+      "baseline": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 4.020821124176991,
+          "median": 5.476164472093986,
+          "max": 6.931507820010982
+        },
+        "run_labels": [
+          "baseline-a1",
+          "baseline-a2"
+        ]
+      },
+      "offload": {
+        "all_trials_passed": true,
+        "passed_trials": 2,
+        "goodput_stats": {
+          "samples": 2,
+          "min": 367.2831401145191,
+          "median": 401.26265388431244,
+          "max": 435.2421676541058
+        },
+        "run_labels": [
+          "offload-b1",
+          "offload-b2"
+        ]
+      }
+    }
+  ],
+  "failures": [
+    {
+      "run": "baseline-a1",
+      "mode": "worker",
+      "sessions": 4,
+      "journals": "shared",
+      "kind": "independent evidence incomplete",
+      "journal_dropped": 8,
+      "session_errors_count": 15
+    },
+    {
+      "run": "baseline-a1",
+      "mode": "admission",
+      "sessions": 2,
+      "journals": "shared",
+      "kind": "journal initialization failure",
+      "journal_dropped": 0,
+      "session_errors_count": 1
+    },
+    {
+      "run": "baseline-a1",
+      "mode": "admission",
+      "sessions": 4,
+      "journals": "shared",
+      "kind": "independent evidence incomplete",
+      "journal_dropped": 190,
+      "session_errors_count": 769
+    },
+    {
+      "run": "offload-b1",
+      "mode": "worker",
+      "sessions": 2,
+      "journals": "shared",
+      "kind": "journal initialization failure",
+      "journal_dropped": 0,
+      "session_errors_count": 1
+    },
+    {
+      "run": "offload-b2",
+      "mode": "admission",
+      "sessions": 4,
+      "journals": "shared",
+      "kind": "journal initialization failure",
+      "journal_dropped": 0,
+      "session_errors_count": 2
+    },
+    {
+      "run": "baseline-a2",
+      "mode": "worker",
+      "sessions": 2,
+      "journals": "shared",
+      "kind": "journal initialization failure",
+      "journal_dropped": 0,
+      "session_errors_count": 1
+    },
+    {
+      "run": "baseline-a2",
+      "mode": "admission",
+      "sessions": 2,
+      "journals": "shared",
+      "kind": "journal initialization failure",
+      "journal_dropped": 0,
+      "session_errors_count": 1
+    },
+    {
+      "run": "baseline-a2",
+      "mode": "admission",
+      "sessions": 4,
+      "journals": "shared",
+      "kind": "independent evidence incomplete",
+      "journal_dropped": 269,
+      "session_errors_count": 1025
+    }
+  ],
+  "evidence_note": "Portable aggregates preserve all 48 cells, failed runs and source hashes. Per-trial session error lists retain the first 8 entries plus exact counts; complete per-job/event evidence remains in each raw_report under the ignored local study directory.",
+  "failure_kinds": {
+    "independent evidence incomplete": 3,
+    "journal initialization failure": 5
+  }
+}

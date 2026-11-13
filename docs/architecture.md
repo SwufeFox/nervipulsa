@@ -44,6 +44,12 @@ flowchart TD
 
 标识关联：session_id 是持久会话作用域，默认每个 Runtime 随机生成，也可显式用于顺序续接；event id/seq 在会话内唯一。显式会话启动时从 events、输入记录、effect 和 receipt 的已保存 ID 恢复序号边界，不能只取 transcript 中残留的 ID，否则 assistant/UI 事件会与下一轮输入冲突并造成日志丢失。activation_id 关联一次输入批次和模型提交；tool_call_id 关联模型调用与回执；execution_id 是 `python.requested` 的 event id，`python.finished.reply_to` 指向它。SQLite 查询始终需要 session_id。相同 journal/session 的并发 Runtime 在启动时明确拒绝，不同 session 可共用 journal。
 
+Actor 的 activation/transcript snapshot 与 tool receipt 仍走同步 FULL 事务接口，但调用前在 loop 内冻结独立 payload，再通过 `asyncio.to_thread` 执行 SQLite 并 await 结果。初始输入快照提交成功前不调用 provider；receipt 提交成功前不推进后续工具；最终 commit/pause 成功或明确失败后才发布对应 settlement。取消不能撤销已经开始的 SQLite 调用，因此 actor 先等待线程退出并完成必要状态转换，Runtime 才能结束清理、释放会话锁。
+
+显式 retry 也遵守这些顺序：输入快照失败须先重新提交再请求模型；已经接纳的工具若 receipt 提交失败，actor 保留该 activation 的分离回执，retry 只补交回执再继续，不重复调用工具。该状态仅存在于当前 actor 内，不随 transcript restore 恢复，不新增自动重试或 effect replay。
+
+这消除的是 actor 在 event loop 上等待磁盘/SQLite 锁的路径，不把单会话 actor 或 Python namespace 变成并行执行。共享 journal 仍受 SQLite 单 writer 约束，线程池、JSON/快照复制、同步 listener 和真实 provider 也仍可能限制吞吐；需按 workload 和 journal 布局分别测量。
+
 会话锁由 Windows byte-range lock 或 POSIX flock 持有，文件名哈希包含 canonical journal path 和 session_id。锁文件不删除，避免新旧 inode 同时被持有；进程死亡由 OS 释放句柄。启动取消先等待线程中的取得锁/Journal 初始化操作结束再清理；shutdown 取消也等待 host/actor 清理及 Journal writer 真正停止，随后才释放本实例的锁。这保证正常生命周期内不会在旧 writer 仍活动时交出会话，不是分布式锁或硬退出期限。
 
 输入到输出的关联是公开接口，不要求宿主扫描 ledger：`Runtime.activation_for_event(event_id)` 常数时间返回消费该输入的 activation；`await Runtime.wait_for_activation(input_event_id=..., timeout=...)` 在该 activation 不再 `running` 时返回，`None` 表示超时、尚无消费，或该输入被停在只能由显式 retry 解除的 pause 之后。每次 settle 递增 `Activation.settle_version`；retry 之后传入 `after_version` 等待下一次结果。同一次 settle 还会以 `agent.activation_finished` 进入 trace 与 journal，payload 为 `{activation_id, input_event_ids, status, error_kind, ended_at, settle_version}`。retry 复用同一 activation 对象，因此 `input_event_ids` 在重试前后保持稳定。
@@ -140,6 +146,7 @@ Windows 的 `NERVIPULSA_WINDOWS_APPCONTAINER=1` 是独立的实验性 opt-in：�
 
 - 2026-10-21 durable memory 切片：Transcript/Activation/tool receipt 增加同步 durable 提交（FULL + BEGIN IMMEDIATE，失败显式抛错转 commit_interrupted），重启后 `/inspect` 只读可查、绝不自动重放；新增 `tests/test_durable_memory.py` 5 项（commit 失败显式报错、落盘往返、重启可读且新会话空转、无重放、失败转暂停），本地 `python -m pytest tests/test_durable_memory.py -q` 5 passed；证据分层：本地验证通过，hosted CI / 长跑 / 真实模型未验证。
 - 2026-11-12 文档整理：不改代码；合并 `feat/configurable-agent-profile` 后全量 `python -m pytest -q` 221 passed（Windows / Python 3.13.14 / pytest 9.1.1），覆盖新增的 activation correlation、transcript restore、structured observation、no-Python-host 及既有 worker/CLI/provider 测试。该结果仍是本机单次运行，不代表 hosted CI、长跑或真实模型验收。
+- 2026-11-13 actor 持久化线程化：输入快照、receipt、最终 settlement 和取消/显式 retry 边界的新增测试 14 项通过；既有 actor 测试 29 项与持久化、恢复、崩溃边界、会话锁、CLI、observation 相关测试 106 项通过，共 149 项。首次组合执行在 600 秒被终止，原因未确定；之后分组完成。共享 journal 负载仍观察到初始化锁失败；聚焦测试通过不等于负载或生产验收。命令、矩阵、观察记录缺失和证据边界见 [验证记录](../TEST_RESULTS.md#durable-runtime-throughput-study-2026-11-13)。
 - 更早的验证范围：初稿整理仅做静态检查；后续 scheduler 修复运行完整的 `python -m pytest tests/test_events.py tests/test_python_host.py -vv`，Windows / Python 3.13.14 / pytest 9.1.1 下 30 passed（163.80s），包含真实 worker、取消/重启及 durable commit 故障替身。新增回归在内存恢复回退实现时失败，证明覆盖该异常边界问题。当时未重现 startup flush 失败，未调整 timeout；一次通过不能排除间歇性 startup 问题。未运行全库测试、CLI/provider 或扫描竞态专项验证，以上测试不构成这些行为的验收。
 
 - 2026-11-13：新增单次子代理调用与 JSON 结果、显式会话续接；实跑发现并修复 `SystemExit(0)` 误报失败及续接复用 event id 导致观测静默丢失的问题。最终 live 运行验证一次 Python 执行、跨进程记忆与既有 SQLite 事件保留；测试阶段及 HTTP 超时边界见 [验证记录](../TEST_RESULTS.md#one-shot-and-resume-smoke-2026-11-13)。未据此宣称并发同会话写入、硬进程期限或生产任务质量已验收。
